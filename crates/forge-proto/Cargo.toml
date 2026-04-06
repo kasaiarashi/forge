@@ -2,6 +2,7 @@
 name = "forge-proto"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
 
 [dependencies]
 tonic.workspace = true
