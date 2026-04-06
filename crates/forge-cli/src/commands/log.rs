@@ -12,7 +12,7 @@ pub fn run(count: u32, _file: Option<String>) -> Result<()> {
         let snapshot = ws.object_store.get_snapshot(&current)?;
 
         println!(
-            "\x1b[33msnapshot {}\x1b[0m",
+            "\x1b[33mcommit {}\x1b[0m",
             current.short()
         );
         println!(
@@ -32,7 +32,7 @@ pub fn run(count: u32, _file: Option<String>) -> Result<()> {
     }
 
     if shown == 0 {
-        println!("No snapshots yet.");
+        println!("No commits yet.");
     }
 
     Ok(())

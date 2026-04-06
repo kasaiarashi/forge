@@ -12,9 +12,8 @@ pub fn run(path: String, reason: Option<String>) -> Result<()> {
     let config = ws.config()?;
 
     let server_url = config
-        .server_url
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("No server configured. Set server_url in .forge/config.json"))?
+        .default_remote_url()
+        .ok_or_else(|| anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>"))?
         .to_string();
 
     // Normalize path.
