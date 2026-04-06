@@ -161,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/:repo/commits/:branch", get(api::list_commits))
         .route("/repos/:repo/tree/:branch", get(api::get_tree))
         .route("/repos/:repo/blob/:branch", get(api::get_blob))
+        .route("/repos/:repo/raw/:branch", get(api::get_raw))
         .route("/repos/:repo/commit/:hash", get(api::get_commit))
         .route("/repos/:repo/locks", get(api::list_locks));
 

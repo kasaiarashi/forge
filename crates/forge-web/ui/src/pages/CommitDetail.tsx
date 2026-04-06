@@ -15,7 +15,7 @@ import {
   RepoIcon,
 } from '@primer/octicons-react';
 import type { CommitDetail as CommitDetailType, DiffFile } from '../api';
-import api from '../api';
+import api, { copyToClipboard } from '../api';
 
 function timeAgo(epoch: number): string {
   const date = new Date(epoch * 1000);
@@ -73,7 +73,7 @@ export default function CommitDetail() {
 
   const handleCopy = () => {
     if (commit?.commit) {
-      navigator.clipboard.writeText(commit.commit.hash);
+      copyToClipboard(commit.commit.hash);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }

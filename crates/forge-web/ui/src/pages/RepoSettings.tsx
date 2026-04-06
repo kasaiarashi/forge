@@ -18,7 +18,7 @@ import {
   CopyIcon,
 } from '@primer/octicons-react';
 import type { RepoInfo, Branch } from '../api';
-import api from '../api';
+import api, { copyToClipboard } from '../api';
 
 export default function RepoSettings() {
   const { repo = '' } = useParams();
@@ -108,7 +108,7 @@ export default function RepoSettings() {
   const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
 
   const handleCopyClone = () => {
-    navigator.clipboard.writeText(`forge clone ${cloneUrl}`);
+    copyToClipboard(`forge clone ${cloneUrl}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

@@ -15,7 +15,7 @@ import {
   RepoIcon,
 } from '@primer/octicons-react';
 import type { CommitList } from '../api';
-import api from '../api';
+import api, { copyToClipboard } from '../api';
 
 function timeAgo(epoch: number): string {
   const date = new Date(epoch * 1000);
@@ -75,7 +75,7 @@ export default function Commits() {
   }, [repo, branch, page]);
 
   const handleCopyHash = (hash: string) => {
-    navigator.clipboard.writeText(hash);
+    copyToClipboard(hash);
     setCopiedHash(hash);
     setTimeout(() => setCopiedHash(''), 2000);
   };

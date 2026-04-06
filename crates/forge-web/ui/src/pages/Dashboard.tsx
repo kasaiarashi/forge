@@ -21,7 +21,7 @@ import {
   XIcon,
 } from '@primer/octicons-react';
 import type { RepoInfo } from '../api';
-import api from '../api';
+import api, { copyToClipboard } from '../api';
 import { useAuth } from '../context/AuthContext';
 
 function timeAgo(epoch: number): string {
@@ -45,7 +45,7 @@ function CopyableCodeBlock({ lines, label }: { lines: string[]; label: string })
   const text = lines.join('\n');
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(text);
+    copyToClipboard(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

@@ -23,7 +23,7 @@ import {
   CopyIcon,
 } from '@primer/octicons-react';
 import type { TreeEntry, Branch } from '../api';
-import api from '../api';
+import api, { copyToClipboard } from '../api';
 
 function formatSize(bytes: number | null): string {
   if (bytes === null) return '';
@@ -46,7 +46,7 @@ export default function RepoTree() {
 
   const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
   const copyCloneUrl = () => {
-    navigator.clipboard.writeText(`forge clone ${cloneUrl}`);
+    copyToClipboard(`forge clone ${cloneUrl}`);
     setCloneCopied(true);
     setTimeout(() => setCloneCopied(false), 2000);
   };

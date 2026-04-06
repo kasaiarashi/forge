@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -409,6 +409,47 @@ pub async fn get_blob(
                 hash: resp.hash,
             };
             (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => internal_error(e),
+    }
+}
+
+/// GET /api/repos/:repo/raw/:branch?path=file -- raw file download.
+pub async fn get_raw(
+    State(state): State<Arc<AppState>>,
+    Path((repo, branch)): Path<(String, String)>,
+    Query(query): Query<BlobQuery>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    let commit_hash = match resolve_branch(&grpc, &repo, &branch).await {
+        Ok(h) => h,
+        Err(e) => return internal_error(e),
+    };
+
+    match grpc.get_file_content(&repo, &commit_hash, &query.path).await {
+        Ok(resp) => {
+            let filename = query.path.rsplit('/').next().unwrap_or("file");
+            let content_type = if resp.is_binary {
+                "application/octet-stream"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+            let disposition = format!("attachment; filename=\"{}\"", filename);
+
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, content_type.to_string()),
+                    (header::CONTENT_DISPOSITION, disposition),
+                    (header::CONTENT_LENGTH, resp.content.len().to_string()),
+                ],
+                resp.content,
+            )
+                .into_response()
         }
         Err(e) => internal_error(e),
     }

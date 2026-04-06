@@ -22,7 +22,7 @@ import hljs from 'highlight.js';
 import hljsLight from 'highlight.js/styles/github.css?url';
 import hljsDark from 'highlight.js/styles/github-dark.css?url';
 import type { FileContent } from '../api';
-import api from '../api';
+import api, { copyToClipboard } from '../api';
 import { useTheme } from '../context/ThemeContext';
 
 const extToLang: Record<string, string> = {
@@ -145,7 +145,7 @@ export default function FileView() {
 
   const handleCopy = () => {
     if (file?.content) {
-      navigator.clipboard.writeText(file.content);
+      copyToClipboard(file.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
@@ -252,7 +252,7 @@ export default function FileView() {
               size="small"
               leadingVisual={DownloadIcon}
               as="a"
-              href={`/api/repos/${encRepo}/blob/${encBranch}?path=${encodeURIComponent(filePath)}`}
+              href={`/api/repos/${encRepo}/raw/${encBranch}?path=${encodeURIComponent(filePath)}`}
             >
               Raw
             </Button>
@@ -266,7 +266,7 @@ export default function FileView() {
             <div style={{ marginTop: '8px' }}>
               <Button
                 as="a"
-                href={`/api/repos/${encRepo}/blob/${encBranch}?path=${encodeURIComponent(filePath)}`}
+                href={`/api/repos/${encRepo}/raw/${encBranch}?path=${encodeURIComponent(filePath)}`}
               >
                 Download
               </Button>

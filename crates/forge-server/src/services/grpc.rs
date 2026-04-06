@@ -669,7 +669,7 @@ impl ForgeService for ForgeGrpcService {
         let size = content.len() as u64;
 
         Ok(Response::new(GetFileContentResponse {
-            content: if is_binary { vec![] } else { content },
+            content,
             size,
             is_binary,
             hash: file_entry.hash.short(),
