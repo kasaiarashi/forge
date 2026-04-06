@@ -1,0 +1,7 @@
+[package]
+name = "forge-ignore"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+globset.workspace = true
