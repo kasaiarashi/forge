@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::hash::ForgeHash;
 
 /// A directory listing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Tree {
     pub entries: Vec<TreeEntry>,
 }

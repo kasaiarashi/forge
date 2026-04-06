@@ -17,11 +17,17 @@ pub fn run() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>"))?
         .to_string();
 
+    let repo_name = if config.repo.is_empty() {
+        "default".to_string()
+    } else {
+        config.repo.clone()
+    };
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async { pull_async(&ws, &server_url).await })
+    rt.block_on(async { pull_async(&ws, &server_url, &repo_name).await })
 }
 
-async fn pull_async(ws: &Workspace, server_url: &str) -> Result<()> {
+async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result<()> {
     let mut client = ForgeServiceClient::connect(server_url.to_string()).await?;
 
     let branch = ws
@@ -32,7 +38,7 @@ async fn pull_async(ws: &Workspace, server_url: &str) -> Result<()> {
     // Get remote refs.
     let refs_resp = client
         .get_refs(GetRefsRequest {
-            repository: String::new(),
+            repo: repo_name.to_string(),
         })
         .await?
         .into_inner();
@@ -85,6 +91,7 @@ async fn pull_async(ws: &Workspace, server_url: &str) -> Result<()> {
         let mut stream = client
             .pull_objects(PullRequest {
                 want_hashes: need,
+                repo: repo_name.to_string(),
             })
             .await?
             .into_inner();

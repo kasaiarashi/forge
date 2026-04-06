@@ -2,21 +2,36 @@ syntax = "proto3";
 package forge;
 
 service ForgeService {
-    // Object transfer
+    // Object transfer (scoped to repo)
     rpc PushObjects(stream ObjectChunk) returns (PushResponse);
     rpc PullObjects(PullRequest) returns (stream ObjectChunk);
     rpc HasObjects(HasObjectsRequest) returns (HasObjectsResponse);
 
-    // References
+    // References (scoped to repo)
     rpc GetRefs(GetRefsRequest) returns (GetRefsResponse);
     rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
 
-    // Locks
+    // Locks (scoped to repo)
     rpc AcquireLock(LockRequest) returns (LockResponse);
     rpc ReleaseLock(UnlockRequest) returns (UnlockResponse);
     rpc ListLocks(ListLocksRequest) returns (ListLocksResponse);
     rpc VerifyLocks(VerifyLocksRequest) returns (VerifyLocksResponse);
+
+    // Repository management
+    rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+    rpc CreateRepo(CreateRepoRequest) returns (CreateRepoResponse);
+
+    // Browsing (used by Web UI)
+    rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+    rpc GetTreeEntries(GetTreeEntriesRequest) returns (GetTreeEntriesResponse);
+    rpc GetFileContent(GetFileContentRequest) returns (GetFileContentResponse);
+    rpc GetCommitDetail(GetCommitDetailRequest) returns (GetCommitDetailResponse);
+    rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
 }
+
+// ============================================================
+// Object transfer
+// ============================================================
 
 message ObjectChunk {
     bytes hash = 1;
@@ -25,6 +40,7 @@ message ObjectChunk {
     uint64 offset = 4;
     bytes data = 5;
     bool is_last = 6;
+    string repo = 7;
 }
 
 message PushResponse {
@@ -34,18 +50,24 @@ message PushResponse {
 
 message PullRequest {
     repeated bytes want_hashes = 1;
+    string repo = 2;
 }
 
 message HasObjectsRequest {
     repeated bytes hashes = 1;
+    string repo = 2;
 }
 
 message HasObjectsResponse {
     repeated bool has = 1;
 }
 
+// ============================================================
+// References
+// ============================================================
+
 message GetRefsRequest {
-    string repository = 1;
+    string repo = 1;
 }
 
 message GetRefsResponse {
@@ -53,9 +75,10 @@ message GetRefsResponse {
 }
 
 message UpdateRefRequest {
-    string ref_name = 1;
-    bytes old_hash = 2;
-    bytes new_hash = 3;
+    string repo = 1;
+    string ref_name = 2;
+    bytes old_hash = 3;
+    bytes new_hash = 4;
 }
 
 message UpdateRefResponse {
@@ -63,11 +86,16 @@ message UpdateRefResponse {
     string error = 2;
 }
 
+// ============================================================
+// Locks
+// ============================================================
+
 message LockRequest {
-    string path = 1;
-    string owner = 2;
-    string workspace_id = 3;
-    string reason = 4;
+    string repo = 1;
+    string path = 2;
+    string owner = 3;
+    string workspace_id = 4;
+    string reason = 5;
 }
 
 message LockResponse {
@@ -76,9 +104,10 @@ message LockResponse {
 }
 
 message UnlockRequest {
-    string path = 1;
-    string owner = 2;
-    bool force = 3;
+    string repo = 1;
+    string path = 2;
+    string owner = 3;
+    bool force = 4;
 }
 
 message UnlockResponse {
@@ -87,8 +116,9 @@ message UnlockResponse {
 }
 
 message ListLocksRequest {
-    string path_prefix = 1;
-    string owner = 2;
+    string repo = 1;
+    string path_prefix = 2;
+    string owner = 3;
 }
 
 message ListLocksResponse {
@@ -96,8 +126,9 @@ message ListLocksResponse {
 }
 
 message VerifyLocksRequest {
-    string owner = 1;
-    repeated string paths = 2;
+    string repo = 1;
+    string owner = 2;
+    repeated string paths = 3;
 }
 
 message VerifyLocksResponse {
@@ -111,4 +142,120 @@ message LockInfo {
     string workspace_id = 3;
     int64 created_at = 4;
     string reason = 5;
+}
+
+// ============================================================
+// Repository management
+// ============================================================
+
+message ListReposRequest {}
+
+message ListReposResponse {
+    repeated RepoInfo repos = 1;
+}
+
+message RepoInfo {
+    string name = 1;
+    string description = 2;
+    int64 created_at = 3;
+    int32 branch_count = 4;
+    string default_branch = 5;
+    string last_commit_message = 6;
+    string last_commit_author = 7;
+    int64 last_commit_time = 8;
+}
+
+message CreateRepoRequest {
+    string name = 1;
+    string description = 2;
+}
+
+message CreateRepoResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// ============================================================
+// Browsing (Web UI)
+// ============================================================
+
+message ListCommitsRequest {
+    string repo = 1;
+    string branch = 2;
+    int32 limit = 3;
+    int32 offset = 4;
+}
+
+message ListCommitsResponse {
+    repeated CommitInfo commits = 1;
+    int32 total = 2;
+}
+
+message CommitInfo {
+    string hash = 1;
+    string message = 2;
+    string author_name = 3;
+    string author_email = 4;
+    int64 timestamp = 5;
+    repeated string parent_hashes = 6;
+}
+
+message GetTreeEntriesRequest {
+    string repo = 1;
+    string commit_hash = 2;
+    string path = 3;
+}
+
+message GetTreeEntriesResponse {
+    repeated TreeEntryInfo entries = 1;
+    string commit_hash = 2;
+    string path = 3;
+}
+
+message TreeEntryInfo {
+    string name = 1;
+    string kind = 2;
+    string hash = 3;
+    uint64 size = 4;
+}
+
+message GetFileContentRequest {
+    string repo = 1;
+    string commit_hash = 2;
+    string path = 3;
+}
+
+message GetFileContentResponse {
+    bytes content = 1;
+    uint64 size = 2;
+    bool is_binary = 3;
+    string hash = 4;
+}
+
+message GetCommitDetailRequest {
+    string repo = 1;
+    string commit_hash = 2;
+}
+
+message GetCommitDetailResponse {
+    CommitInfo commit = 1;
+    repeated DiffEntry changes = 2;
+}
+
+message DiffEntry {
+    string path = 1;
+    string change_type = 2;
+    uint64 old_size = 3;
+    uint64 new_size = 4;
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+    string version = 1;
+    int64 uptime_secs = 2;
+    int64 total_objects = 3;
+    int64 total_size_bytes = 4;
+    repeated string repos = 5;
+    int32 active_locks = 6;
 }

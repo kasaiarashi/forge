@@ -17,11 +17,17 @@ pub fn run() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>"))?
         .to_string();
 
+    let repo_name = if config.repo.is_empty() {
+        "default".to_string()
+    } else {
+        config.repo.clone()
+    };
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async { push_async(&ws, &server_url).await })
+    rt.block_on(async { push_async(&ws, &server_url, &repo_name).await })
 }
 
-async fn push_async(ws: &Workspace, server_url: &str) -> Result<()> {
+async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result<()> {
     let mut client = ForgeServiceClient::connect(server_url.to_string()).await?;
 
     // Get current branch and its tip.
@@ -39,7 +45,7 @@ async fn push_async(ws: &Workspace, server_url: &str) -> Result<()> {
     // Get remote ref.
     let refs_resp = client
         .get_refs(GetRefsRequest {
-            repository: String::new(),
+            repo: repo_name.to_string(),
         })
         .await?
         .into_inner();
@@ -60,6 +66,7 @@ async fn push_async(ws: &Workspace, server_url: &str) -> Result<()> {
     let has_resp = client
         .has_objects(HasObjectsRequest {
             hashes: hashes.clone(),
+            repo: repo_name.to_string(),
         })
         .await?
         .into_inner();
@@ -81,6 +88,7 @@ async fn push_async(ws: &Workspace, server_url: &str) -> Result<()> {
 
         let forge_dir = ws.forge_dir();
         let missing_clone = missing.clone();
+        let repo_name_clone = repo_name.to_string();
 
         tokio::spawn(async move {
             let store = forge_core::store::chunk_store::ChunkStore::new(forge_dir.join("objects"));
@@ -94,6 +102,7 @@ async fn push_async(ws: &Workspace, server_url: &str) -> Result<()> {
                             offset: 0,
                             data,
                             is_last: true,
+                            repo: repo_name_clone.clone(),
                         };
                         if tx.send(chunk).await.is_err() {
                             break;
@@ -111,6 +120,7 @@ async fn push_async(ws: &Workspace, server_url: &str) -> Result<()> {
     // Update remote ref (CAS).
     let update_resp = client
         .update_ref(UpdateRefRequest {
+            repo: repo_name.to_string(),
             ref_name: ref_name.clone(),
             old_hash: remote_tip_bytes,
             new_hash: local_tip.as_bytes().to_vec(),

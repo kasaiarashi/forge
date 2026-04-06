@@ -64,6 +64,9 @@ pub struct WorkspaceConfig {
     /// Workflow mode: "lock" (perforce-style) or "merge" (git-style).
     #[serde(default)]
     pub workflow: WorkflowMode,
+    /// Repository name on the server (like GitHub's "owner/repo").
+    #[serde(default)]
+    pub repo: String,
     /// Named remotes (like git remotes). First one is the default.
     #[serde(default)]
     pub remotes: Vec<Remote>,
@@ -210,6 +213,7 @@ impl Workspace {
             user,
             workspace_id: uuid::Uuid::new_v4().to_string(),
             workflow: WorkflowMode::default(),
+            repo: String::new(),
             remotes: vec![],
             auto_lock_patterns: vec![
                 "*.uasset".into(),

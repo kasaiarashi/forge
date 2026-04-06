@@ -14,6 +14,7 @@ pub fn run(key: Option<String>, value: Option<String>) -> Result<()> {
             // Show all config.
             println!("user.name     = {}", config.user.name);
             println!("user.email    = {}", config.user.email);
+            println!("repo          = {}", if config.repo.is_empty() { "default" } else { &config.repo });
             println!("workflow      = {}", config.workflow);
             println!("workspace_id  = {}", config.workspace_id);
             if !config.remotes.is_empty() {
@@ -55,18 +56,23 @@ pub fn run(key: Option<String>, value: Option<String>) -> Result<()> {
             ws.save_config(&config)?;
             println!("user.email = {}", val);
         }
+        (Some("repo"), Some(val)) => {
+            config.repo = val.to_string();
+            ws.save_config(&config)?;
+            println!("repo = {}", val);
+        }
         (Some(key), None) => {
-            // Get a value.
             match key {
                 "workflow" => println!("{}", config.workflow),
                 "user.name" => println!("{}", config.user.name),
                 "user.email" => println!("{}", config.user.email),
+                "repo" => println!("{}", if config.repo.is_empty() { "default" } else { &config.repo }),
                 "workspace_id" => println!("{}", config.workspace_id),
-                _ => bail!("Unknown config key '{}'. Known: workflow, user.name, user.email", key),
+                _ => bail!("Unknown config key '{}'. Known: workflow, user.name, user.email, repo", key),
             }
         }
         (Some(key), Some(_)) => {
-            bail!("Cannot set '{}'. Known writable keys: workflow, user.name, user.email", key);
+            bail!("Cannot set '{}'. Known writable keys: workflow, user.name, user.email, repo", key);
         }
     }
 
