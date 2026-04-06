@@ -24,6 +24,7 @@ pub fn run(path: String, force: bool) -> Result<()> {
 
         let resp = client
             .release_lock(UnlockRequest {
+                repo: if config.repo.is_empty() { "default".into() } else { config.repo.clone() },
                 path: rel_path.clone(),
                 owner: config.user.name.clone(),
                 force,

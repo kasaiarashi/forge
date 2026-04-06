@@ -1,0 +1,23 @@
+[package]
+name = "forge-web"
+version = "0.1.0"
+edition = "2021"
+authors = ["Krishna Teja <krishna18developer@gmail.com>"]
+
+[dependencies]
+forge-proto = { path = "../../forge-proto" }
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+bcrypt = "0.17"
+toml = "0.8"

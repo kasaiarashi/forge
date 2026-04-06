@@ -25,6 +25,7 @@ pub fn run(path: String, reason: Option<String>) -> Result<()> {
 
         let resp = client
             .acquire_lock(LockRequest {
+                repo: if config.repo.is_empty() { "default".into() } else { config.repo.clone() },
                 path: rel_path.clone(),
                 owner: config.user.name.clone(),
                 workspace_id: config.workspace_id.clone(),

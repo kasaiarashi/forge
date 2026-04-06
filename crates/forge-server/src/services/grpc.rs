@@ -2,10 +2,12 @@
 // Licensed under the MIT License.
 
 use std::sync::Arc;
+use std::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use forge_core::hash::ForgeHash;
+use forge_core::store::object_store::ObjectStore;
 use forge_proto::forge::forge_service_server::ForgeService;
 use forge_proto::forge::*;
 
@@ -15,6 +17,20 @@ use crate::storage::fs::FsStorage;
 pub struct ForgeGrpcService {
     pub fs: Arc<FsStorage>,
     pub db: Arc<MetadataDb>,
+    pub start_time: Instant,
+}
+
+/// Normalize repo name: empty string defaults to "default".
+fn repo_name(repo: &str) -> &str {
+    if repo.is_empty() { "default" } else { repo }
+}
+
+impl ForgeGrpcService {
+    /// Build an ObjectStore for a specific repo.
+    fn object_store(&self, repo: &str) -> ObjectStore {
+        let store = self.fs.repo_store(repo);
+        ObjectStore::new(store.root().to_path_buf())
+    }
 }
 
 #[tonic::async_trait]
@@ -30,12 +46,19 @@ impl ForgeService for ForgeGrpcService {
         // Buffer for reassembling multi-chunk objects.
         let mut current_buf: Vec<u8> = Vec::new();
         let mut current_hash: Option<Vec<u8>> = None;
+        let mut store = None;
 
         while let Some(chunk) = stream
             .message()
             .await
             .map_err(|e| Status::internal(e.to_string()))?
         {
+            // Read repo from the first chunk.
+            if store.is_none() {
+                let repo = repo_name(&chunk.repo);
+                store = Some(self.fs.repo_store(repo));
+            }
+
             if current_hash.as_ref() != Some(&chunk.hash) {
                 // New object starting.
                 current_buf.clear();
@@ -54,8 +77,9 @@ impl ForgeService for ForgeGrpcService {
                 let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
                     .map_err(|e| Status::internal(e.to_string()))?;
 
-                self.fs
-                    .store
+                store
+                    .as_ref()
+                    .unwrap()
                     .put(&forge_hash, &current_buf)
                     .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -75,20 +99,21 @@ impl ForgeService for ForgeGrpcService {
         &self,
         request: Request<PullRequest>,
     ) -> Result<Response<Self::PullObjectsStream>, Status> {
-        let want_hashes = request.into_inner().want_hashes;
-        let fs = Arc::clone(&self.fs);
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo).to_string();
+        let store = self.fs.repo_store(&repo);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         tokio::spawn(async move {
-            for hash_bytes in want_hashes {
+            for hash_bytes in req.want_hashes {
                 let hash_hex = hex::encode(&hash_bytes);
                 let forge_hash = match ForgeHash::from_hex(&hash_hex) {
                     Ok(h) => h,
                     Err(_) => continue,
                 };
 
-                match fs.store.get(&forge_hash) {
+                match store.get(&forge_hash) {
                     Ok(data) => {
                         // Send in chunks of 2MB to stay under gRPC message limits.
                         let chunk_size = 2 * 1024 * 1024;
@@ -106,6 +131,7 @@ impl ForgeService for ForgeGrpcService {
                                 offset: offset as u64,
                                 data: data[offset..end].to_vec(),
                                 is_last,
+                                repo: String::new(),
                             };
 
                             if tx.send(Ok(msg)).await.is_err() {
@@ -128,13 +154,15 @@ impl ForgeService for ForgeGrpcService {
         &self,
         request: Request<HasObjectsRequest>,
     ) -> Result<Response<HasObjectsResponse>, Status> {
-        let hashes = request.into_inner().hashes;
-        let mut has = Vec::with_capacity(hashes.len());
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let store = self.fs.repo_store(repo);
+        let mut has = Vec::with_capacity(req.hashes.len());
 
-        for hash_bytes in &hashes {
+        for hash_bytes in &req.hashes {
             let hash_hex = hex::encode(hash_bytes);
             let exists = match ForgeHash::from_hex(&hash_hex) {
-                Ok(h) => self.fs.store.has(&h),
+                Ok(h) => store.has(&h),
                 Err(_) => false,
             };
             has.push(exists);
@@ -145,11 +173,14 @@ impl ForgeService for ForgeGrpcService {
 
     async fn get_refs(
         &self,
-        _request: Request<GetRefsRequest>,
+        request: Request<GetRefsRequest>,
     ) -> Result<Response<GetRefsResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+
         let all_refs = self
             .db
-            .get_all_refs()
+            .get_all_refs(repo)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let mut refs = std::collections::HashMap::new();
@@ -165,10 +196,11 @@ impl ForgeService for ForgeGrpcService {
         request: Request<UpdateRefRequest>,
     ) -> Result<Response<UpdateRefResponse>, Status> {
         let req = request.into_inner();
+        let repo = repo_name(&req.repo);
 
         let success = self
             .db
-            .update_ref(&req.ref_name, &req.old_hash, &req.new_hash)
+            .update_ref(repo, &req.ref_name, &req.old_hash, &req.new_hash)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(UpdateRefResponse {
@@ -186,10 +218,11 @@ impl ForgeService for ForgeGrpcService {
         request: Request<LockRequest>,
     ) -> Result<Response<LockResponse>, Status> {
         let req = request.into_inner();
+        let repo = repo_name(&req.repo);
 
         let result = self
             .db
-            .acquire_lock(&req.path, &req.owner, &req.workspace_id, &req.reason)
+            .acquire_lock(repo, &req.path, &req.owner, &req.workspace_id, &req.reason)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         match result {
@@ -215,10 +248,11 @@ impl ForgeService for ForgeGrpcService {
         request: Request<UnlockRequest>,
     ) -> Result<Response<UnlockResponse>, Status> {
         let req = request.into_inner();
+        let repo = repo_name(&req.repo);
 
         let success = self
             .db
-            .release_lock(&req.path, &req.owner, req.force)
+            .release_lock(repo, &req.path, &req.owner, req.force)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(UnlockResponse {
@@ -236,10 +270,11 @@ impl ForgeService for ForgeGrpcService {
         request: Request<ListLocksRequest>,
     ) -> Result<Response<ListLocksResponse>, Status> {
         let req = request.into_inner();
+        let repo = repo_name(&req.repo);
 
         let locks = self
             .db
-            .list_locks(&req.path_prefix, &req.owner)
+            .list_locks(repo, &req.path_prefix, &req.owner)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let lock_infos: Vec<LockInfo> = locks
@@ -261,11 +296,12 @@ impl ForgeService for ForgeGrpcService {
         request: Request<VerifyLocksRequest>,
     ) -> Result<Response<VerifyLocksResponse>, Status> {
         let req = request.into_inner();
+        let repo = repo_name(&req.repo);
 
         // Get all locks for the requested paths.
         let all_locks = self
             .db
-            .list_locks("", "")
+            .list_locks(repo, "", "")
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let mut ours = Vec::new();
@@ -295,5 +331,361 @@ impl ForgeService for ForgeGrpcService {
         }
 
         Ok(Response::new(VerifyLocksResponse { ours, theirs }))
+    }
+
+    // ================================================================
+    // Repository management RPCs
+    // ================================================================
+
+    async fn list_repos(
+        &self,
+        _request: Request<ListReposRequest>,
+    ) -> Result<Response<ListReposResponse>, Status> {
+        let repos = self
+            .db
+            .list_repos()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut repo_infos = Vec::new();
+        for r in repos {
+            // Get branch info for this repo.
+            let all_refs = self
+                .db
+                .get_all_refs(&r.name)
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            let branches: Vec<_> = all_refs
+                .iter()
+                .filter(|(name, _)| name.starts_with("refs/heads/"))
+                .collect();
+            let branch_count = branches.len() as i32;
+
+            // Try to get last commit info from the default branch (main).
+            let default_branch = "main".to_string();
+            let mut last_commit_message = String::new();
+            let mut last_commit_author = String::new();
+            let mut last_commit_time = 0i64;
+
+            let main_ref = format!("refs/heads/{}", default_branch);
+            if let Ok(Some(tip_bytes)) = self.db.get_ref(&r.name, &main_ref) {
+                if let Ok(tip) = ForgeHash::from_hex(&hex::encode(&tip_bytes)) {
+                    let os = self.object_store(&r.name);
+                    if let Ok(snap) = os.get_snapshot(&tip) {
+                        last_commit_message = snap.message.clone();
+                        last_commit_author = snap.author.name.clone();
+                        last_commit_time = snap.timestamp.timestamp();
+                    }
+                }
+            }
+
+            repo_infos.push(RepoInfo {
+                name: r.name,
+                description: r.description,
+                created_at: r.created_at,
+                branch_count,
+                default_branch,
+                last_commit_message,
+                last_commit_author,
+                last_commit_time,
+            });
+        }
+
+        Ok(Response::new(ListReposResponse { repos: repo_infos }))
+    }
+
+    async fn create_repo(
+        &self,
+        request: Request<CreateRepoRequest>,
+    ) -> Result<Response<CreateRepoResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.name.is_empty() {
+            return Ok(Response::new(CreateRepoResponse {
+                success: false,
+                error: "repo name cannot be empty".into(),
+            }));
+        }
+
+        // Create the repo record in the database.
+        let created = self
+            .db
+            .create_repo(&req.name, &req.description)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !created {
+            return Ok(Response::new(CreateRepoResponse {
+                success: false,
+                error: format!("repo '{}' already exists", req.name),
+            }));
+        }
+
+        // Ensure the repo's objects directory exists.
+        let _store = self.fs.repo_store(&req.name);
+
+        Ok(Response::new(CreateRepoResponse {
+            success: true,
+            error: String::new(),
+        }))
+    }
+
+    // ================================================================
+    // Browsing RPCs (for Web UI)
+    // ================================================================
+
+    async fn list_commits(
+        &self,
+        request: Request<ListCommitsRequest>,
+    ) -> Result<Response<ListCommitsResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let os = self.object_store(repo);
+
+        let ref_name = format!("refs/heads/{}", if req.branch.is_empty() { "main" } else { &req.branch });
+        let tip_bytes = self.db.get_ref(repo, &ref_name)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let tip = match tip_bytes {
+            Some(b) => ForgeHash::from_hex(&hex::encode(&b))
+                .map_err(|e| Status::internal(e.to_string()))?,
+            None => return Ok(Response::new(ListCommitsResponse { commits: vec![], total: 0 })),
+        };
+
+        let limit = if req.limit == 0 { 50 } else { req.limit as usize };
+        let offset = req.offset as usize;
+        let mut commits = Vec::new();
+        let mut current = tip;
+        let mut skipped = 0usize;
+
+        while !current.is_zero() && commits.len() < limit {
+            let snap = match os.get_snapshot(&current) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+
+            if skipped < offset {
+                skipped += 1;
+            } else {
+                commits.push(CommitInfo {
+                    hash: current.short(),
+                    message: snap.message.clone(),
+                    author_name: snap.author.name.clone(),
+                    author_email: snap.author.email.clone(),
+                    timestamp: snap.timestamp.timestamp(),
+                    parent_hashes: snap.parents.iter().map(|p| p.short()).collect(),
+                });
+            }
+
+            current = snap.parents.first().copied().unwrap_or(ForgeHash::ZERO);
+        }
+
+        let total = (skipped + commits.len()) as i32;
+        Ok(Response::new(ListCommitsResponse { commits, total }))
+    }
+
+    async fn get_tree_entries(
+        &self,
+        request: Request<GetTreeEntriesRequest>,
+    ) -> Result<Response<GetTreeEntriesResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let os = self.object_store(repo);
+
+        let commit_hash = ForgeHash::from_hex(&req.commit_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let snap = os.get_snapshot(&commit_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Navigate to the requested path within the tree.
+        let mut tree_hash = snap.tree;
+
+        if !req.path.is_empty() {
+            for component in req.path.split('/').filter(|c| !c.is_empty()) {
+                let tree = os.get_tree(&tree_hash)
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                let entry = tree.entries.iter()
+                    .find(|e| e.name == component)
+                    .ok_or_else(|| Status::not_found(format!("Path not found: {}", req.path)))?;
+                if entry.kind != forge_core::object::tree::EntryKind::Directory {
+                    return Err(Status::invalid_argument(format!("{} is not a directory", component)));
+                }
+                tree_hash = entry.hash;
+            }
+        }
+
+        let tree = os.get_tree(&tree_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut entries: Vec<TreeEntryInfo> = tree.entries.iter().map(|e| {
+            TreeEntryInfo {
+                name: e.name.clone(),
+                kind: match e.kind {
+                    forge_core::object::tree::EntryKind::File => "file".into(),
+                    forge_core::object::tree::EntryKind::Directory => "directory".into(),
+                    forge_core::object::tree::EntryKind::Symlink => "symlink".into(),
+                },
+                hash: e.hash.short(),
+                size: e.size,
+            }
+        }).collect();
+
+        // Sort: directories first, then files, alphabetically.
+        entries.sort_by(|a, b| {
+            let a_dir = a.kind == "directory";
+            let b_dir = b.kind == "directory";
+            b_dir.cmp(&a_dir).then(a.name.cmp(&b.name))
+        });
+
+        Ok(Response::new(GetTreeEntriesResponse {
+            entries,
+            commit_hash: req.commit_hash,
+            path: req.path,
+        }))
+    }
+
+    async fn get_file_content(
+        &self,
+        request: Request<GetFileContentRequest>,
+    ) -> Result<Response<GetFileContentResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let os = self.object_store(repo);
+
+        let commit_hash = ForgeHash::from_hex(&req.commit_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let snap = os.get_snapshot(&commit_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Navigate to the file.
+        let mut tree_hash = snap.tree;
+        let parts: Vec<&str> = req.path.split('/').filter(|c| !c.is_empty()).collect();
+        let (dir_parts, file_name) = parts.split_at(parts.len().saturating_sub(1));
+
+        for component in dir_parts {
+            let tree = os.get_tree(&tree_hash)
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let entry = tree.entries.iter()
+                .find(|e| e.name == *component)
+                .ok_or_else(|| Status::not_found(format!("Path not found: {}", req.path)))?;
+            tree_hash = entry.hash;
+        }
+
+        let tree = os.get_tree(&tree_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let file_entry = tree.entries.iter()
+            .find(|e| Some(e.name.as_str()) == file_name.first().copied())
+            .ok_or_else(|| Status::not_found(format!("File not found: {}", req.path)))?;
+
+        // Get the file content.
+        let content = os.get_blob_data(&file_entry.hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let is_binary = content.iter().take(8192).any(|&b| b == 0);
+        let size = content.len() as u64;
+
+        Ok(Response::new(GetFileContentResponse {
+            content: if is_binary { vec![] } else { content },
+            size,
+            is_binary,
+            hash: file_entry.hash.short(),
+        }))
+    }
+
+    async fn get_commit_detail(
+        &self,
+        request: Request<GetCommitDetailRequest>,
+    ) -> Result<Response<GetCommitDetailResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let os = self.object_store(repo);
+
+        let commit_hash = ForgeHash::from_hex(&req.commit_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let snap = os.get_snapshot(&commit_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let commit = CommitInfo {
+            hash: commit_hash.short(),
+            message: snap.message.clone(),
+            author_name: snap.author.name.clone(),
+            author_email: snap.author.email.clone(),
+            timestamp: snap.timestamp.timestamp(),
+            parent_hashes: snap.parents.iter().map(|p| p.short()).collect(),
+        };
+
+        // Diff against parent to find changed files.
+        let changes = if let Some(parent_hash) = snap.parents.first() {
+            if let Ok(parent_snap) = os.get_snapshot(parent_hash) {
+                let get_tree = |h: &ForgeHash| os.get_tree(h).ok();
+                let old_map = forge_core::diff::flatten_tree(
+                    &os.get_tree(&parent_snap.tree).unwrap_or_default(),
+                    "",
+                    &get_tree,
+                );
+                let new_map = forge_core::diff::flatten_tree(
+                    &os.get_tree(&snap.tree).unwrap_or_default(),
+                    "",
+                    &get_tree,
+                );
+                forge_core::diff::diff_maps(&old_map, &new_map)
+                    .into_iter()
+                    .map(|d| match d {
+                        forge_core::diff::DiffEntry::Added { path, size, .. } => DiffEntry {
+                            path, change_type: "added".into(), old_size: 0, new_size: size,
+                        },
+                        forge_core::diff::DiffEntry::Deleted { path, size, .. } => DiffEntry {
+                            path, change_type: "deleted".into(), old_size: size, new_size: 0,
+                        },
+                        forge_core::diff::DiffEntry::Modified { path, old_size, new_size, .. } => DiffEntry {
+                            path, change_type: "modified".into(), old_size, new_size,
+                        },
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            // Initial commit: all files are "added".
+            let get_tree = |h: &ForgeHash| os.get_tree(h).ok();
+            let tree = os.get_tree(&snap.tree).unwrap_or_default();
+            let map = forge_core::diff::flatten_tree(&tree, "", &get_tree);
+            map.into_iter()
+                .map(|(path, (_, size))| DiffEntry {
+                    path, change_type: "added".into(), old_size: 0, new_size: size,
+                })
+                .collect()
+        };
+
+        Ok(Response::new(GetCommitDetailResponse {
+            commit: Some(commit),
+            changes,
+        }))
+    }
+
+    async fn get_server_info(
+        &self,
+        _request: Request<GetServerInfoRequest>,
+    ) -> Result<Response<GetServerInfoResponse>, Status> {
+        let uptime = self.start_time.elapsed().as_secs() as i64;
+
+        let repos = self.db.list_repos()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let repo_names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
+
+        // Count total active locks across all repos (sum per-repo).
+        let mut total_locks = 0i32;
+        for r in &repos {
+            let locks = self.db.list_locks(&r.name, "", "")
+                .map_err(|e| Status::internal(e.to_string()))?;
+            total_locks += locks.len() as i32;
+        }
+
+        Ok(Response::new(GetServerInfoResponse {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime_secs: uptime,
+            total_objects: 0, // TODO: count objects
+            total_size_bytes: 0,
+            repos: repo_names,
+            active_locks: total_locks,
+        }))
     }
 }

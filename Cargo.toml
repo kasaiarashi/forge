@@ -5,6 +5,7 @@ members = [
     "crates/forge-server",
     "crates/forge-proto",
     "crates/forge-ignore",
+    "crates/forge-web/server",
 ]
 resolver = "2"
 

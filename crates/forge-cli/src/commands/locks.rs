@@ -22,6 +22,7 @@ pub fn run() -> Result<()> {
 
         let resp = client
             .list_locks(ListLocksRequest {
+                repo: if config.repo.is_empty() { "default".into() } else { config.repo.clone() },
                 path_prefix: String::new(),
                 owner: String::new(),
             })

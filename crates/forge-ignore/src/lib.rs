@@ -3,15 +3,15 @@ use std::path::Path;
 
 /// Default ignore patterns for Unreal Engine projects.
 pub const DEFAULT_PATTERNS: &[&str] = &[
-    // UE build outputs
-    "Binaries/**",
-    "Intermediate/**",
-    "Saved/**",
-    "DerivedDataCache/**",
-    "Build/**",
+    // UE build outputs (top-level and inside plugins)
+    "**/Binaries/**",
+    "**/Intermediate/**",
+    "**/Saved/**",
+    "**/DerivedDataCache/**",
+    "**/Build/**",
     // IDE
-    ".vs/**",
-    ".idea/**",
+    "**/.vs/**",
+    "**/.idea/**",
     "*.sln",
     "*.suo",
     "*.opensdf",
@@ -26,6 +26,8 @@ pub const DEFAULT_PATTERNS: &[&str] = &[
     "*.tmp",
     "*.temp",
     "*.dmp",
+    // Forge internal
+    ".forge/**",
 ];
 
 /// Manages .forgeignore patterns for filtering files.

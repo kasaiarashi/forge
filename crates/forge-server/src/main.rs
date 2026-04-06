@@ -86,13 +86,12 @@ async fn main() -> Result<()> {
     let db_path = config.resolved_db_path();
     let db = Arc::new(MetadataDb::open(&db_path)?);
 
-    // For now, use a "default" repo. Multi-repo routing can be added later.
-    let objects_path = config.repo_objects_path("default");
-    let fs = Arc::new(FsStorage::new(objects_path));
+    let fs = Arc::new(FsStorage::new(base.join("repos")));
 
     let service = ForgeGrpcService {
         fs: Arc::clone(&fs),
         db: Arc::clone(&db),
+        start_time: std::time::Instant::now(),
     };
 
     let addr = config.server.listen.parse()?;
