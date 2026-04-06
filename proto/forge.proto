@@ -1,0 +1,114 @@
+syntax = "proto3";
+package forge;
+
+service ForgeService {
+    // Object transfer
+    rpc PushObjects(stream ObjectChunk) returns (PushResponse);
+    rpc PullObjects(PullRequest) returns (stream ObjectChunk);
+    rpc HasObjects(HasObjectsRequest) returns (HasObjectsResponse);
+
+    // References
+    rpc GetRefs(GetRefsRequest) returns (GetRefsResponse);
+    rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
+
+    // Locks
+    rpc AcquireLock(LockRequest) returns (LockResponse);
+    rpc ReleaseLock(UnlockRequest) returns (UnlockResponse);
+    rpc ListLocks(ListLocksRequest) returns (ListLocksResponse);
+    rpc VerifyLocks(VerifyLocksRequest) returns (VerifyLocksResponse);
+}
+
+message ObjectChunk {
+    bytes hash = 1;
+    uint32 object_type = 2;
+    uint64 total_size = 3;
+    uint64 offset = 4;
+    bytes data = 5;
+    bool is_last = 6;
+}
+
+message PushResponse {
+    repeated bytes received_hashes = 1;
+    string error = 2;
+}
+
+message PullRequest {
+    repeated bytes want_hashes = 1;
+}
+
+message HasObjectsRequest {
+    repeated bytes hashes = 1;
+}
+
+message HasObjectsResponse {
+    repeated bool has = 1;
+}
+
+message GetRefsRequest {
+    string repository = 1;
+}
+
+message GetRefsResponse {
+    map<string, bytes> refs = 1;
+}
+
+message UpdateRefRequest {
+    string ref_name = 1;
+    bytes old_hash = 2;
+    bytes new_hash = 3;
+}
+
+message UpdateRefResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message LockRequest {
+    string path = 1;
+    string owner = 2;
+    string workspace_id = 3;
+    string reason = 4;
+}
+
+message LockResponse {
+    bool granted = 1;
+    LockInfo existing_lock = 2;
+}
+
+message UnlockRequest {
+    string path = 1;
+    string owner = 2;
+    bool force = 3;
+}
+
+message UnlockResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message ListLocksRequest {
+    string path_prefix = 1;
+    string owner = 2;
+}
+
+message ListLocksResponse {
+    repeated LockInfo locks = 1;
+}
+
+message VerifyLocksRequest {
+    string owner = 1;
+    repeated string paths = 2;
+}
+
+message VerifyLocksResponse {
+    repeated LockInfo ours = 1;
+    repeated LockInfo theirs = 2;
+}
+
+message LockInfo {
+    string path = 1;
+    string owner = 2;
+    string workspace_id = 3;
+    int64 created_at = 4;
+    string reason = 5;
+}

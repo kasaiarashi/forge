@@ -1,0 +1,22 @@
+[package]
+name = "forge-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+blake3.workspace = true
+fastcdc.workspace = true
+zstd.workspace = true
+serde.workspace = true
+bincode.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+hex.workspace = true
+walkdir.workspace = true
+tracing.workspace = true
+forge-ignore.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

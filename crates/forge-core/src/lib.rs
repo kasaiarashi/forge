@@ -1,0 +1,9 @@
+pub mod hash;
+pub mod chunk;
+pub mod compress;
+pub mod error;
+pub mod object;
+pub mod store;
+pub mod workspace;
+pub mod index;
+pub mod diff;

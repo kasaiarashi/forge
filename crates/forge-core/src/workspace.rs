@@ -1,0 +1,202 @@
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+use crate::error::ForgeError;
+use crate::hash::ForgeHash;
+use crate::object::snapshot::Author;
+use crate::store::object_store::ObjectStore;
+
+/// The `.forge` directory name.
+pub const FORGE_DIR: &str = ".forge";
+
+/// Current HEAD reference.
+#[derive(Debug, Clone)]
+pub enum HeadRef {
+    /// Points to a branch by name.
+    Branch(String),
+    /// Detached, pointing directly at a snapshot hash.
+    Detached(ForgeHash),
+}
+
+/// Workspace configuration stored in `.forge/config.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    /// Remote server URL (e.g., "http://localhost:9876").
+    pub server_url: Option<String>,
+    /// The user identity.
+    pub user: Author,
+    /// Unique ID for this workspace instance.
+    pub workspace_id: String,
+    /// Patterns for auto-locking (e.g., ["*.uasset", "*.umap"]).
+    #[serde(default)]
+    pub auto_lock_patterns: Vec<String>,
+}
+
+/// Represents a Forge workspace rooted at a project directory.
+pub struct Workspace {
+    /// The root of the user's project (parent of .forge/).
+    pub root: PathBuf,
+    /// The object store.
+    pub object_store: ObjectStore,
+}
+
+impl Workspace {
+    /// The .forge directory path.
+    pub fn forge_dir(&self) -> PathBuf {
+        self.root.join(FORGE_DIR)
+    }
+
+    /// Discover a workspace by walking up from `start`.
+    pub fn discover(start: &Path) -> Result<Self, ForgeError> {
+        let mut current = start.to_path_buf();
+        loop {
+            let forge_dir = current.join(FORGE_DIR);
+            if forge_dir.is_dir() {
+                let objects_dir = forge_dir.join("objects");
+                return Ok(Self {
+                    root: current,
+                    object_store: ObjectStore::new(objects_dir),
+                });
+            }
+            if !current.pop() {
+                return Err(ForgeError::NotAWorkspace);
+            }
+        }
+    }
+
+    /// Initialize a new workspace at `root`.
+    pub fn init(root: &Path, user: Author) -> Result<Self, ForgeError> {
+        let forge_dir = root.join(FORGE_DIR);
+        if forge_dir.exists() {
+            return Err(ForgeError::AlreadyInitialized(
+                root.display().to_string(),
+            ));
+        }
+
+        // Create directory structure.
+        std::fs::create_dir_all(forge_dir.join("objects"))?;
+        std::fs::create_dir_all(forge_dir.join("refs").join("heads"))?;
+        std::fs::create_dir_all(forge_dir.join("refs").join("remotes"))?;
+        std::fs::create_dir_all(forge_dir.join("locks"))?;
+
+        // Write HEAD pointing to main branch.
+        std::fs::write(forge_dir.join("HEAD"), "ref: refs/heads/main\n")?;
+
+        // Write initial branch ref (zero hash = no snapshots yet).
+        std::fs::write(
+            forge_dir.join("refs").join("heads").join("main"),
+            ForgeHash::ZERO.to_hex(),
+        )?;
+
+        // Write config.
+        let config = WorkspaceConfig {
+            server_url: None,
+            user,
+            workspace_id: uuid::Uuid::new_v4().to_string(),
+            auto_lock_patterns: vec![],
+        };
+        let config_json = serde_json::to_string_pretty(&config)
+            .map_err(|e| ForgeError::Serialization(e.to_string()))?;
+        std::fs::write(forge_dir.join("config.json"), config_json)?;
+
+        // Write empty index.
+        let index = crate::index::Index::default();
+        index.save(&forge_dir.join("index"))?;
+
+        let objects_dir = forge_dir.join("objects");
+        Ok(Self {
+            root: root.to_path_buf(),
+            object_store: ObjectStore::new(objects_dir),
+        })
+    }
+
+    /// Read the current HEAD reference.
+    pub fn head(&self) -> Result<HeadRef, ForgeError> {
+        let head_path = self.forge_dir().join("HEAD");
+        let content = std::fs::read_to_string(&head_path)?;
+        let content = content.trim();
+
+        if let Some(ref_name) = content.strip_prefix("ref: ") {
+            // Extract branch name from "refs/heads/<name>".
+            let branch = ref_name
+                .strip_prefix("refs/heads/")
+                .unwrap_or(ref_name)
+                .to_string();
+            Ok(HeadRef::Branch(branch))
+        } else {
+            let hash = ForgeHash::from_hex(content)?;
+            Ok(HeadRef::Detached(hash))
+        }
+    }
+
+    /// Set the HEAD reference.
+    pub fn set_head(&self, head: &HeadRef) -> Result<(), ForgeError> {
+        let head_path = self.forge_dir().join("HEAD");
+        let content = match head {
+            HeadRef::Branch(name) => format!("ref: refs/heads/{}\n", name),
+            HeadRef::Detached(hash) => format!("{}\n", hash.to_hex()),
+        };
+        std::fs::write(&head_path, content)?;
+        Ok(())
+    }
+
+    /// Get the snapshot hash that the current HEAD points to.
+    pub fn head_snapshot(&self) -> Result<ForgeHash, ForgeError> {
+        match self.head()? {
+            HeadRef::Branch(name) => self.get_branch_tip(&name),
+            HeadRef::Detached(hash) => Ok(hash),
+        }
+    }
+
+    /// Get the snapshot hash at the tip of a branch.
+    pub fn get_branch_tip(&self, branch: &str) -> Result<ForgeHash, ForgeError> {
+        let ref_path = self.forge_dir().join("refs").join("heads").join(branch);
+        if !ref_path.exists() {
+            return Err(ForgeError::BranchNotFound(branch.to_string()));
+        }
+        let content = std::fs::read_to_string(&ref_path)?;
+        ForgeHash::from_hex(content.trim())
+    }
+
+    /// Update the tip of a branch.
+    pub fn set_branch_tip(&self, branch: &str, hash: &ForgeHash) -> Result<(), ForgeError> {
+        let ref_path = self.forge_dir().join("refs").join("heads").join(branch);
+        std::fs::write(&ref_path, hash.to_hex())?;
+        Ok(())
+    }
+
+    /// List all branches.
+    pub fn list_branches(&self) -> Result<Vec<String>, ForgeError> {
+        let heads_dir = self.forge_dir().join("refs").join("heads");
+        let mut branches = Vec::new();
+        if heads_dir.exists() {
+            for entry in std::fs::read_dir(&heads_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        branches.push(name.to_string());
+                    }
+                }
+            }
+        }
+        branches.sort();
+        Ok(branches)
+    }
+
+    /// Get the current branch name (if HEAD points to a branch).
+    pub fn current_branch(&self) -> Result<Option<String>, ForgeError> {
+        match self.head()? {
+            HeadRef::Branch(name) => Ok(Some(name)),
+            HeadRef::Detached(_) => Ok(None),
+        }
+    }
+
+    /// Load workspace config.
+    pub fn config(&self) -> Result<WorkspaceConfig, ForgeError> {
+        let config_path = self.forge_dir().join("config.json");
+        let content = std::fs::read_to_string(&config_path)?;
+        let config: WorkspaceConfig = serde_json::from_str(&content)
+            .map_err(|e| ForgeError::Serialization(e.to_string()))?;
+        Ok(config)
+    }
+}

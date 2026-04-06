@@ -1,0 +1,18 @@
+[package]
+name = "forge-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+forge-core.workspace = true
+forge-proto.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
