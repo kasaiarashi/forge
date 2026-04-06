@@ -45,7 +45,10 @@ export default function RepoTree() {
   const [cloneCopied, setCloneCopied] = useState(false);
 
   const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
-  const copyCloneUrl = () => {
+  const [showCloneMenu, setShowCloneMenu] = useState(false);
+  const copyCloneUrl = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
     copyToClipboard(`forge clone ${cloneUrl}`);
     setCloneCopied(true);
     setTimeout(() => setCloneCopied(false), 2000);
@@ -207,12 +210,17 @@ export default function RepoTree() {
 
       {/* Code clone button */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
-        <ActionMenu>
-          <ActionMenu.Button variant="primary" leadingVisual={CodeIcon}>
+        <div style={{ position: 'relative' }}>
+          <Button variant="primary" leadingVisual={CodeIcon} onClick={() => setShowCloneMenu(!showCloneMenu)}>
             Code
-          </ActionMenu.Button>
-          <ActionMenu.Overlay width="large">
-            <div style={{ padding: '16px' }}>
+          </Button>
+          {showCloneMenu && (
+            <div style={{
+              position: 'absolute', right: 0, top: '100%', marginTop: '4px', zIndex: 100,
+              width: 360, padding: '16px', borderRadius: '6px',
+              background: 'var(--bg-default)', border: '1px solid var(--border-default)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+            }}>
               <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '8px', color: 'var(--fg-default)' }}>Clone</div>
               <div style={{ fontSize: '12px', color: 'var(--fg-muted)', marginBottom: '8px' }}>
                 Use Forge CLI to clone this repository.
@@ -233,8 +241,8 @@ export default function RepoTree() {
                 Then run: <code style={{ background: 'var(--bg-subtle)', padding: '2px 6px', borderRadius: '3px' }}>forge config repo {repo}</code>
               </div>
             </div>
-          </ActionMenu.Overlay>
-        </ActionMenu>
+          )}
+        </div>
       </div>
 
       {/* File table */}
