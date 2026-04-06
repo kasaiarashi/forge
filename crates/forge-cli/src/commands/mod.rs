@@ -13,3 +13,5 @@ pub mod locks;
 pub mod branch;
 pub mod switch;
 pub mod ignore;
+pub mod remote;
+pub mod config_cmd;

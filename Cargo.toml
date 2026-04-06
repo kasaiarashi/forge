@@ -45,6 +45,8 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 hex = "0.4"
 walkdir = "2"
+rayon = "1"
+toml = "0.8"
 globset = "0.4"
 bytes = "1"
 # Database

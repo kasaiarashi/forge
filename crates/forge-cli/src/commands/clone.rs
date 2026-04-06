@@ -27,11 +27,10 @@ pub fn run(url: String, path: Option<String>) -> Result<()> {
     };
     let ws = Workspace::init(&target, author)?;
 
-    // Set server URL in config.
+    // Add origin remote.
     let mut config = ws.config()?;
-    config.server_url = Some(url);
-    let config_json = serde_json::to_string_pretty(&config)?;
-    std::fs::write(ws.forge_dir().join("config.json"), config_json)?;
+    config.add_remote("origin".into(), url)?;
+    ws.save_config(&config)?;
 
     // Write default .forgeignore.
     let ignore_path = target.join(".forgeignore");

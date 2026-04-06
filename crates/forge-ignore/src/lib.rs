@@ -3,16 +3,29 @@ use std::path::Path;
 
 /// Default ignore patterns for Unreal Engine projects.
 pub const DEFAULT_PATTERNS: &[&str] = &[
+    // UE build outputs
     "Binaries/**",
     "Intermediate/**",
     "Saved/**",
     "DerivedDataCache/**",
     "Build/**",
+    // IDE
     ".vs/**",
+    ".idea/**",
     "*.sln",
     "*.suo",
     "*.opensdf",
     "*.sdf",
+    "*.VC.db",
+    "*.VC.opendb",
+    // OS
+    ".DS_Store",
+    "Thumbs.db",
+    // Logs and temp
+    "*.log",
+    "*.tmp",
+    "*.temp",
+    "*.dmp",
 ];
 
 /// Manages .forgeignore patterns for filtering files.

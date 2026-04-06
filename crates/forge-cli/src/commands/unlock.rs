@@ -12,9 +12,8 @@ pub fn run(path: String, force: bool) -> Result<()> {
     let config = ws.config()?;
 
     let server_url = config
-        .server_url
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("No server configured"))?
+        .default_remote_url()
+        .ok_or_else(|| anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>"))?
         .to_string();
 
     let rel_path = path.replace('\\', "/");

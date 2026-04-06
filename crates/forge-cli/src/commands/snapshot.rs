@@ -25,7 +25,7 @@ pub fn run(message: String, all: bool) -> Result<()> {
         .collect();
 
     if staged.is_empty() {
-        bail!("Nothing staged. Use `forge add` or `forge snapshot --all`.");
+        bail!("Nothing staged. Use `forge add` or `forge commit --all`.");
     }
 
     // Build tree hierarchy from staged + existing entries.
@@ -63,7 +63,7 @@ pub fn run(message: String, all: bool) -> Result<()> {
     index.clear_staged();
     index.save(&ws.forge_dir().join("index"))?;
 
-    println!("Snapshot {} created", snap_hash.short());
+    println!("Committed {}", snap_hash.short());
     println!("  {} file(s) | {}", staged.len(), message);
 
     Ok(())

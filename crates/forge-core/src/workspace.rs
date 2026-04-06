@@ -18,18 +18,135 @@ pub enum HeadRef {
     Detached(ForgeHash),
 }
 
+/// How the workspace handles concurrent edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowMode {
+    /// Perforce-style: binary files must be locked before editing.
+    /// Conflicts are prevented — only the lock holder can modify a file.
+    Lock,
+    /// Git-style: anyone edits freely, conflicts resolved at push time
+    /// by diffing and choosing which user's version to keep.
+    Merge,
+}
+
+impl Default for WorkflowMode {
+    fn default() -> Self {
+        Self::Lock
+    }
+}
+
+impl std::fmt::Display for WorkflowMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lock => write!(f, "lock"),
+            Self::Merge => write!(f, "merge"),
+        }
+    }
+}
+
+/// A named remote server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Remote {
+    /// Display name (e.g., "origin", "staging", "production").
+    pub name: String,
+    /// Server URL (e.g., "http://localhost:9876", "https://forge.mycompany.com:9876").
+    pub url: String,
+}
+
 /// Workspace configuration stored in `.forge/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
-    /// Remote server URL (e.g., "http://localhost:9876").
-    pub server_url: Option<String>,
     /// The user identity.
     pub user: Author,
     /// Unique ID for this workspace instance.
     pub workspace_id: String,
-    /// Patterns for auto-locking (e.g., ["*.uasset", "*.umap"]).
+    /// Workflow mode: "lock" (perforce-style) or "merge" (git-style).
+    #[serde(default)]
+    pub workflow: WorkflowMode,
+    /// Named remotes (like git remotes). First one is the default.
+    #[serde(default)]
+    pub remotes: Vec<Remote>,
+    /// Patterns for auto-locking in lock mode (e.g., ["*.uasset", "*.umap"]).
     #[serde(default)]
     pub auto_lock_patterns: Vec<String>,
+
+    // Legacy field — kept for backwards compatibility during migration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+}
+
+impl WorkspaceConfig {
+    /// Get the default remote (first in the list, or legacy server_url).
+    pub fn default_remote(&self) -> Option<&Remote> {
+        self.remotes.first()
+    }
+
+    /// Get the URL of the default remote.
+    pub fn default_remote_url(&self) -> Option<&str> {
+        self.remotes
+            .first()
+            .map(|r| r.url.as_str())
+            .or(self.server_url.as_deref())
+    }
+
+    /// Get a remote by name.
+    pub fn get_remote(&self, name: &str) -> Option<&Remote> {
+        self.remotes.iter().find(|r| r.name == name)
+    }
+
+    /// Add a remote. Returns error if name already exists.
+    pub fn add_remote(&mut self, name: String, url: String) -> Result<(), ForgeError> {
+        if self.remotes.iter().any(|r| r.name == name) {
+            return Err(ForgeError::Other(format!(
+                "Remote '{}' already exists",
+                name
+            )));
+        }
+        self.remotes.push(Remote { name, url });
+        Ok(())
+    }
+
+    /// Remove a remote by name.
+    pub fn remove_remote(&mut self, name: &str) -> Result<(), ForgeError> {
+        let len = self.remotes.len();
+        self.remotes.retain(|r| r.name != name);
+        if self.remotes.len() == len {
+            return Err(ForgeError::Other(format!(
+                "Remote '{}' not found",
+                name
+            )));
+        }
+        Ok(())
+    }
+
+    /// Rename a remote.
+    pub fn rename_remote(&mut self, old: &str, new: &str) -> Result<(), ForgeError> {
+        if self.remotes.iter().any(|r| r.name == new) {
+            return Err(ForgeError::Other(format!(
+                "Remote '{}' already exists",
+                new
+            )));
+        }
+        let remote = self
+            .remotes
+            .iter_mut()
+            .find(|r| r.name == old)
+            .ok_or_else(|| ForgeError::Other(format!("Remote '{}' not found", old)))?;
+        remote.name = new.to_string();
+        Ok(())
+    }
+
+    /// Set the URL of an existing remote.
+    pub fn set_remote_url(&mut self, name: &str, url: String) -> Result<(), ForgeError> {
+        let remote = self
+            .remotes
+            .iter_mut()
+            .find(|r| r.name == name)
+            .ok_or_else(|| ForgeError::Other(format!("Remote '{}' not found", name)))?;
+        remote.url = url;
+        Ok(())
+    }
 }
 
 /// Represents a Forge workspace rooted at a project directory.
@@ -90,10 +207,17 @@ impl Workspace {
 
         // Write config.
         let config = WorkspaceConfig {
-            server_url: None,
             user,
             workspace_id: uuid::Uuid::new_v4().to_string(),
-            auto_lock_patterns: vec![],
+            workflow: WorkflowMode::default(),
+            remotes: vec![],
+            auto_lock_patterns: vec![
+                "*.uasset".into(),
+                "*.umap".into(),
+                "*.uexp".into(),
+                "*.ubulk".into(),
+            ],
+            server_url: None,
         };
         let config_json = serde_json::to_string_pretty(&config)
             .map_err(|e| ForgeError::Serialization(e.to_string()))?;
@@ -198,5 +322,14 @@ impl Workspace {
         let config: WorkspaceConfig = serde_json::from_str(&content)
             .map_err(|e| ForgeError::Serialization(e.to_string()))?;
         Ok(config)
+    }
+
+    /// Save workspace config back to disk.
+    pub fn save_config(&self, config: &WorkspaceConfig) -> Result<(), ForgeError> {
+        let config_path = self.forge_dir().join("config.json");
+        let json = serde_json::to_string_pretty(config)
+            .map_err(|e| ForgeError::Serialization(e.to_string()))?;
+        std::fs::write(&config_path, json)?;
+        Ok(())
     }
 }

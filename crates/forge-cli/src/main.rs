@@ -24,13 +24,13 @@ enum Commands {
         paths: Vec<String>,
     },
 
-    /// Create a snapshot of current changes
-    Snapshot {
-        /// Snapshot message
+    /// Commit current changes
+    Commit {
+        /// Commit message
         #[arg(short, long)]
         message: String,
 
-        /// Snapshot all changed files (skip explicit staging)
+        /// Commit all changed files (skip explicit staging)
         #[arg(short, long)]
         all: bool,
     },
@@ -40,14 +40,14 @@ enum Commands {
 
     /// Show differences
     Diff {
-        /// Compare against a specific snapshot
+        /// Compare against a specific commit
         #[arg(long)]
-        snapshot: Option<String>,
+        commit: Option<String>,
     },
 
-    /// Show snapshot history
+    /// Show commit history
     Log {
-        /// Number of snapshots to show
+        /// Number of commits to show
         #[arg(short, long, default_value_t = 20)]
         count: u32,
 
@@ -56,10 +56,10 @@ enum Commands {
         file: Option<String>,
     },
 
-    /// Push snapshots to the server
+    /// Push commits to the server
     Push,
 
-    /// Pull snapshots from the server
+    /// Pull commits from the server
     Pull,
 
     /// Clone a remote project
@@ -116,6 +116,24 @@ enum Commands {
         /// Patterns to add
         patterns: Vec<String>,
     },
+
+    /// Manage remote servers
+    Remote {
+        /// Action: add, remove, rename, set-url (omit to list)
+        action: Option<String>,
+
+        /// Arguments for the action (e.g., name, url)
+        args: Vec<String>,
+    },
+
+    /// View or set workspace configuration
+    Config {
+        /// Config key (e.g., workflow, user.name)
+        key: Option<String>,
+
+        /// Value to set
+        value: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -126,9 +144,9 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init => commands::init::run()?,
         Commands::Add { paths } => commands::add::run(paths)?,
-        Commands::Snapshot { message, all } => commands::snapshot::run(message, all)?,
+        Commands::Commit { message, all } => commands::snapshot::run(message, all)?,
         Commands::Status => commands::status::run(cli.json)?,
-        Commands::Diff { snapshot } => commands::diff::run(snapshot)?,
+        Commands::Diff { commit } => commands::diff::run(commit)?,
         Commands::Log { count, file } => commands::log::run(count, file)?,
         Commands::Push => commands::push::run()?,
         Commands::Pull => commands::pull::run()?,
@@ -139,6 +157,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Branch { name, delete } => commands::branch::run(name, delete)?,
         Commands::Switch { name } => commands::switch::run(name)?,
         Commands::Ignore { patterns } => commands::ignore::run(patterns)?,
+        Commands::Remote { action, args } => commands::remote::run(action, args)?,
+        Commands::Config { key, value } => commands::config_cmd::run(key, value)?,
     }
 
     Ok(())
