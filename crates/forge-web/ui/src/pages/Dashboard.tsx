@@ -8,6 +8,7 @@ import {
   Button,
   Dialog,
   FormControl,
+  IconButton,
 } from '@primer/react';
 import {
   RepoIcon,
@@ -15,9 +16,13 @@ import {
   PlusIcon,
   GitBranchIcon,
   ClockIcon,
+  CopyIcon,
+  CheckIcon,
+  XIcon,
 } from '@primer/octicons-react';
-import type { RepoInfo, User } from '../api';
+import type { RepoInfo } from '../api';
 import api from '../api';
+import { useAuth } from '../context/AuthContext';
 
 function timeAgo(epoch: number): string {
   if (!epoch) return '';
@@ -35,35 +40,81 @@ function timeAgo(epoch: number): string {
   return `${months} month${months > 1 ? 's' : ''} ago`;
 }
 
+function CopyableCodeBlock({ lines, label }: { lines: string[]; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const text = lines.join('\n');
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div style={{ marginBottom: '16px' }}>
+      <div style={{ fontSize: '14px', fontWeight: 600, color: '#1f2328', marginBottom: '8px' }}>
+        {label}
+      </div>
+      <div style={{
+        position: 'relative',
+        background: '#161b22',
+        borderRadius: '6px',
+        padding: '16px',
+        fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+        fontSize: '13px',
+        lineHeight: '20px',
+        color: '#e6edf3',
+        overflow: 'auto',
+      }}>
+        <div style={{ position: 'absolute', top: '8px', right: '8px' }}>
+          <IconButton
+            aria-label="Copy"
+            icon={copied ? CheckIcon : CopyIcon}
+            size="small"
+            variant="invisible"
+            onClick={handleCopy}
+            style={{ color: '#8b949e' }}
+          />
+        </div>
+        {lines.map((line, i) => (
+          <div key={i} style={{ whiteSpace: 'pre' }}>{line}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('');
-  const [user, setUser] = useState<User | null>(null);
+  const { user } = useAuth();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [creating, setCreating] = useState(false);
+  const [createdRepo, setCreatedRepo] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([api.listRepos(), api.me()])
-      .then(([r, u]) => {
-        setRepos(r);
-        setUser(u);
-      })
+    api.listRepos()
+      .then((r) => setRepos(r))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  const serverUrl = window.location.origin;
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
     setCreating(true);
     try {
-      await api.createRepo(newName.trim(), newDesc.trim());
+      const repoName = newName.trim();
+      await api.createRepo(repoName, newDesc.trim());
       const updated = await api.listRepos();
       setRepos(updated);
       setShowCreate(false);
+      setCreatedRepo(repoName);
       setNewName('');
       setNewDesc('');
     } catch (e) {
@@ -96,6 +147,47 @@ export default function Dashboard() {
 
   return (
     <div>
+      {/* Quick setup after repo creation */}
+      {createdRepo && (
+        <div className="forge-card" style={{ marginBottom: '24px', position: 'relative' }}>
+          <div className="forge-card-header" style={{ justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <RepoIcon size={16} />
+              <span style={{ fontWeight: 600 }}>Quick setup for {createdRepo}</span>
+            </div>
+            <IconButton
+              aria-label="Dismiss"
+              icon={XIcon}
+              variant="invisible"
+              size="small"
+              onClick={() => setCreatedRepo(null)}
+            />
+          </div>
+          <div style={{ padding: '16px' }}>
+            <CopyableCodeBlock
+              label="...or create a new repository on the command line"
+              lines={[
+                'forge init',
+                `forge config repo ${createdRepo}`,
+                'forge config user.name "Your Name"',
+                `forge remote add origin ${serverUrl}:9876`,
+                'forge add .',
+                'forge commit -m "Initial commit"',
+                'forge push',
+              ]}
+            />
+            <CopyableCodeBlock
+              label="...or push an existing repository"
+              lines={[
+                `forge config repo ${createdRepo}`,
+                `forge remote add origin ${serverUrl}:9876`,
+                'forge push',
+              ]}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Page header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>

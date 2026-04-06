@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   Breadcrumbs,
@@ -17,8 +17,60 @@ import {
   LockIcon,
   RepoIcon,
 } from '@primer/octicons-react';
+import hljs from 'highlight.js';
+import hljsLight from 'highlight.js/styles/github.css?url';
+import hljsDark from 'highlight.js/styles/github-dark.css?url';
 import type { FileContent } from '../api';
 import api from '../api';
+import { useTheme } from '../context/ThemeContext';
+
+const extToLang: Record<string, string> = {
+  ts: 'typescript',
+  tsx: 'typescript',
+  js: 'javascript',
+  jsx: 'javascript',
+  rs: 'rust',
+  cpp: 'cpp',
+  cc: 'cpp',
+  cxx: 'cpp',
+  h: 'cpp',
+  hpp: 'cpp',
+  cs: 'csharp',
+  py: 'python',
+  json: 'json',
+  toml: 'toml',
+  ini: 'ini',
+  xml: 'xml',
+  yaml: 'yaml',
+  yml: 'yaml',
+  md: 'markdown',
+  css: 'css',
+  html: 'html',
+  htm: 'html',
+  proto: 'protobuf',
+  sql: 'sql',
+  sh: 'bash',
+  bash: 'bash',
+  zsh: 'bash',
+  go: 'go',
+  java: 'java',
+  rb: 'ruby',
+  php: 'php',
+  swift: 'swift',
+  kt: 'kotlin',
+  lua: 'lua',
+  r: 'r',
+  dockerfile: 'dockerfile',
+  makefile: 'makefile',
+};
+
+function getLanguage(filename: string): string | null {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  const baseName = filename.toLowerCase();
+  if (baseName === 'dockerfile') return 'dockerfile';
+  if (baseName === 'makefile' || baseName === 'gnumakefile') return 'makefile';
+  return extToLang[ext] || null;
+}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} bytes`;
@@ -28,6 +80,7 @@ function formatSize(bytes: number): string {
 
 export default function FileView() {
   const { repo = '', branch = 'main', '*': filePath = '' } = useParams();
+  const { resolvedMode } = useTheme();
   const [file, setFile] = useState<FileContent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -46,8 +99,40 @@ export default function FileView() {
       .finally(() => setLoading(false));
   }, [repo, branch, filePath]);
 
+  useEffect(() => {
+    const id = 'hljs-theme';
+    let link = document.getElementById(id) as HTMLLinkElement | null;
+    const href = resolvedMode === 'night' ? hljsDark : hljsLight;
+    if (!link) {
+      link = document.createElement('link');
+      link.id = id;
+      link.rel = 'stylesheet';
+      document.head.appendChild(link);
+    }
+    link.href = href;
+  }, [resolvedMode]);
+
   const pathParts = filePath.split('/');
   const fileName = pathParts[pathParts.length - 1];
+
+  const highlightedLines = useMemo(() => {
+    if (!file?.content) return [];
+    const lang = getLanguage(fileName);
+    let highlighted: string;
+    try {
+      if (lang) {
+        highlighted = hljs.highlight(file.content, { language: lang }).value;
+      } else {
+        highlighted = hljs.highlightAuto(file.content).value;
+      }
+    } catch {
+      highlighted = file.content
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+    return highlighted.split('\n');
+  }, [file?.content, fileName]);
 
   const buildBreadcrumbPath = (index: number): string => {
     if (index < pathParts.length - 1) {
@@ -64,8 +149,6 @@ export default function FileView() {
       setTimeout(() => setCopied(false), 2000);
     }
   };
-
-  const lines = file?.content?.split('\n') || [];
 
   if (loading) {
     return (
@@ -194,7 +277,7 @@ export default function FileView() {
             lineHeight: '20px',
           }}>
             <tbody>
-              {lines.map((line, i) => (
+              {highlightedLines.map((lineHtml, i) => (
                 <tr key={i}>
                   <td
                     className="line-number"
@@ -210,9 +293,10 @@ export default function FileView() {
                   >
                     {i + 1}
                   </td>
-                  <td style={{ padding: '0 16px', whiteSpace: 'pre', overflow: 'visible' }}>
-                    {line}
-                  </td>
+                  <td
+                    style={{ padding: '0 16px', whiteSpace: 'pre', overflow: 'visible' }}
+                    dangerouslySetInnerHTML={{ __html: lineHtml }}
+                  />
                 </tr>
               ))}
             </tbody>

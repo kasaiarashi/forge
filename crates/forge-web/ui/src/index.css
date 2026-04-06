@@ -9,6 +9,11 @@ body {
   background-color: #f6f8fa;
 }
 
+[data-color-mode="night"] body {
+  color: #e6edf3;
+  background-color: #0d1117;
+}
+
 #root {
   min-height: 100vh;
   display: flex;
@@ -138,4 +143,50 @@ body {
   text-align: center;
   color: #656d76;
   font-size: 12px;
+}
+
+/* Dark mode overrides */
+[data-color-mode="night"] .forge-card,
+[data-color-mode="night"] .forge-card-header {
+  background: #161b22;
+  border-color: #30363d;
+}
+
+[data-color-mode="night"] .file-row:hover {
+  background: #161b22;
+}
+
+[data-color-mode="night"] .forge-footer {
+  background: #010409;
+  border-color: #30363d;
+  color: #8b949e;
+}
+
+[data-color-mode="night"] .login-wrapper {
+  background: #0d1117;
+}
+
+[data-color-mode="night"] .stat-card {
+  background: #161b22;
+  border-color: #30363d;
+}
+
+[data-color-mode="night"] .line-number {
+  color: #8b949e;
+}
+
+[data-color-mode="night"] .line-number:hover {
+  color: #e6edf3;
+}
+
+[data-color-mode="night"] .diff-add {
+  background-color: #1a4721;
+}
+
+[data-color-mode="night"] .diff-del {
+  background-color: #542220;
+}
+
+[data-color-mode="night"] .diff-hunk {
+  background-color: #1a3a5c;
 }

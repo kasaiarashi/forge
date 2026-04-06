@@ -6,7 +6,7 @@ import {
   FormControl,
   Flash,
 } from '@primer/react';
-import api from '../api';
+import { useAuth } from '../context/AuthContext';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -14,14 +14,15 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { login } = useAuth();
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      const res = await api.login(username, password);
-      if (res.ok) {
+      const ok = await login(username, password);
+      if (ok) {
         navigate('/');
       } else {
         setError('Incorrect username or password.');

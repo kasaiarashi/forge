@@ -17,7 +17,6 @@ use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::auth::SessionStore;
 use crate::config::Config;
 use crate::grpc_client::ForgeGrpcClient;
 
@@ -61,7 +60,6 @@ enum Commands {
 
 pub struct AppState {
     pub config: Config,
-    pub sessions: SessionStore,
     /// Lazily-initialized gRPC client. Protected by RwLock so we can
     /// connect on first request (avoids startup failure if forge-server
     /// is not yet running).
@@ -145,7 +143,6 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         config: cfg,
-        sessions: auth::new_session_store(),
         grpc: RwLock::new(None),
     });
 
