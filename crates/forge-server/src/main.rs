@@ -8,10 +8,11 @@ mod storage;
 use std::sync::Arc;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tonic::transport::Server;
 use tracing::info;
 
+use config::ServerConfig;
 use forge_proto::forge::forge_service_server::ForgeServiceServer;
 use services::grpc::ForgeGrpcService;
 use storage::db::MetadataDb;
@@ -20,17 +21,28 @@ use storage::fs::FsStorage;
 #[derive(Parser)]
 #[command(name = "forge-server", about = "Forge VCS server", version)]
 struct Cli {
-    /// Address to listen on
-    #[arg(short, long, default_value = "0.0.0.0:9876")]
-    listen: String,
+    /// Path to config file (TOML)
+    #[arg(short, long, default_value = "forge-server.toml", global = true)]
+    config: String,
 
-    /// Directory for object storage
-    #[arg(short, long, default_value = "./forge-data/objects")]
-    storage: String,
+    /// Override listen address
+    #[arg(short, long, global = true)]
+    listen: Option<String>,
 
-    /// Path to SQLite database
-    #[arg(short, long, default_value = "./forge-data/forge.db")]
-    database: String,
+    /// Override storage base path
+    #[arg(short, long, global = true)]
+    storage: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Generate a default config file
+    Init,
+    /// Start the server (default)
+    Serve,
 }
 
 #[tokio::main]
@@ -39,16 +51,54 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let addr = cli.listen.parse()?;
-    let fs = Arc::new(FsStorage::new(cli.storage.into()));
-    let db = Arc::new(MetadataDb::open(std::path::Path::new(&cli.database))?);
+    match cli.command {
+        Some(Commands::Init) => {
+            let path = std::path::Path::new(&cli.config);
+            if path.exists() {
+                eprintln!("Config file already exists: {}", path.display());
+                eprintln!("Delete it first or use a different path with --config.");
+                std::process::exit(1);
+            }
+            std::fs::write(path, ServerConfig::generate_default())?;
+            println!("Generated default config: {}", path.display());
+            println!("\nEdit it to configure storage paths, then run:");
+            println!("  forge-server serve");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Load config file (uses defaults if file doesn't exist).
+    let mut config = ServerConfig::load(std::path::Path::new(&cli.config))?;
+
+    // CLI overrides.
+    if let Some(listen) = cli.listen {
+        config.server.listen = listen;
+    }
+    if let Some(storage) = cli.storage {
+        config.storage.base_path = storage.into();
+    }
+
+    // Ensure base directories exist.
+    let base = &config.storage.base_path;
+    std::fs::create_dir_all(base.join("repos"))?;
+
+    let db_path = config.resolved_db_path();
+    let db = Arc::new(MetadataDb::open(&db_path)?);
+
+    // For now, use a "default" repo. Multi-repo routing can be added later.
+    let objects_path = config.repo_objects_path("default");
+    let fs = Arc::new(FsStorage::new(objects_path));
 
     let service = ForgeGrpcService {
         fs: Arc::clone(&fs),
         db: Arc::clone(&db),
     };
 
+    let addr = config.server.listen.parse()?;
     info!("Forge server listening on {}", addr);
+    info!("Storage: {}", base.display());
+    info!("Database: {}", db_path.display());
 
     Server::builder()
         .add_service(ForgeServiceServer::new(service))
