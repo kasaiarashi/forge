@@ -41,6 +41,35 @@ impl ForgeGrpcClient {
         Ok(resp.into_inner())
     }
 
+    /// Update a repository (rename and/or change description).
+    pub async fn update_repo(
+        &self,
+        name: &str,
+        new_name: &str,
+        description: &str,
+    ) -> anyhow::Result<UpdateRepoResponse> {
+        let mut client = self.client.clone();
+        let resp = client
+            .update_repo(UpdateRepoRequest {
+                name: name.to_string(),
+                new_name: new_name.to_string(),
+                description: description.to_string(),
+            })
+            .await?;
+        Ok(resp.into_inner())
+    }
+
+    /// Delete a repository.
+    pub async fn delete_repo(&self, name: &str) -> anyhow::Result<DeleteRepoResponse> {
+        let mut client = self.client.clone();
+        let resp = client
+            .delete_repo(DeleteRepoRequest {
+                name: name.to_string(),
+            })
+            .await?;
+        Ok(resp.into_inner())
+    }
+
     /// List refs (branches) for a repository.
     pub async fn get_refs(&self, repo: &str) -> anyhow::Result<GetRefsResponse> {
         let mut client = self.client.clone();

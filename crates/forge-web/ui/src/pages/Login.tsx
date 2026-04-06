@@ -6,7 +6,7 @@ import {
   FormControl,
   Flash,
 } from '@primer/react';
-import api from '../api';
+import { useAuth } from '../context/AuthContext';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -14,14 +14,15 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { login } = useAuth();
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      const res = await api.login(username, password);
-      if (res.ok) {
+      const ok = await login(username, password);
+      if (ok) {
         navigate('/');
       } else {
         setError('Incorrect username or password.');
@@ -42,7 +43,7 @@ export default function Login() {
         </svg>
       </div>
 
-      <h1 style={{ fontSize: '24px', fontWeight: 300, color: '#1f2328', marginBottom: '16px', marginTop: 0 }}>
+      <h1 style={{ fontSize: '24px', fontWeight: 300, color: 'var(--fg-default)', marginBottom: '16px', marginTop: 0 }}>
         Sign in to Forge
       </h1>
 
@@ -57,8 +58,8 @@ export default function Login() {
         style={{
           width: 308,
           padding: '16px',
-          background: 'white',
-          border: '1px solid #d0d7de',
+          background: 'var(--bg-default)',
+          border: '1px solid var(--border-default)',
           borderRadius: '6px',
         }}
       >
@@ -103,11 +104,11 @@ export default function Login() {
           width: 308,
           marginTop: '16px',
           padding: '16px',
-          border: '1px solid #d0d7de',
+          border: '1px solid var(--border-default)',
           borderRadius: '6px',
           textAlign: 'center',
           fontSize: '12px',
-          background: 'white',
+          background: 'var(--bg-default)',
         }}
       >
         Forge VCS server login. Contact your admin for credentials.

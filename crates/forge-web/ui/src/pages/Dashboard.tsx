@@ -8,6 +8,7 @@ import {
   Button,
   Dialog,
   FormControl,
+  IconButton,
 } from '@primer/react';
 import {
   RepoIcon,
@@ -15,9 +16,13 @@ import {
   PlusIcon,
   GitBranchIcon,
   ClockIcon,
+  CopyIcon,
+  CheckIcon,
+  XIcon,
 } from '@primer/octicons-react';
-import type { RepoInfo, User } from '../api';
-import api from '../api';
+import type { RepoInfo } from '../api';
+import api, { copyToClipboard } from '../api';
+import { useAuth } from '../context/AuthContext';
 
 function timeAgo(epoch: number): string {
   if (!epoch) return '';
@@ -35,35 +40,81 @@ function timeAgo(epoch: number): string {
   return `${months} month${months > 1 ? 's' : ''} ago`;
 }
 
+function CopyableCodeBlock({ lines, label }: { lines: string[]; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const text = lines.join('\n');
+
+  const handleCopy = () => {
+    copyToClipboard(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div style={{ marginBottom: '16px' }}>
+      <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--fg-default)', marginBottom: '8px' }}>
+        {label}
+      </div>
+      <div style={{
+        position: 'relative',
+        background: '#161b22',
+        borderRadius: '6px',
+        padding: '16px',
+        fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+        fontSize: '13px',
+        lineHeight: '20px',
+        color: '#e6edf3',
+        overflow: 'auto',
+      }}>
+        <div style={{ position: 'absolute', top: '8px', right: '8px' }}>
+          <IconButton
+            aria-label="Copy"
+            icon={copied ? CheckIcon : CopyIcon}
+            size="small"
+            variant="invisible"
+            onClick={handleCopy}
+            style={{ color: '#8b949e' }}
+          />
+        </div>
+        {lines.map((line, i) => (
+          <div key={i} style={{ whiteSpace: 'pre' }}>{line}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('');
-  const [user, setUser] = useState<User | null>(null);
+  const { user } = useAuth();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [creating, setCreating] = useState(false);
+  const [createdRepo, setCreatedRepo] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([api.listRepos(), api.me()])
-      .then(([r, u]) => {
-        setRepos(r);
-        setUser(u);
-      })
+    api.listRepos()
+      .then((r) => setRepos(r))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  const serverUrl = window.location.origin;
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
     setCreating(true);
     try {
-      await api.createRepo(newName.trim(), newDesc.trim());
+      const repoName = newName.trim();
+      await api.createRepo(repoName, newDesc.trim());
       const updated = await api.listRepos();
       setRepos(updated);
       setShowCreate(false);
+      setCreatedRepo(repoName);
       setNewName('');
       setNewDesc('');
     } catch (e) {
@@ -96,6 +147,47 @@ export default function Dashboard() {
 
   return (
     <div>
+      {/* Quick setup after repo creation */}
+      {createdRepo && (
+        <div className="forge-card" style={{ marginBottom: '24px', position: 'relative' }}>
+          <div className="forge-card-header" style={{ justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <RepoIcon size={16} />
+              <span style={{ fontWeight: 600 }}>Quick setup for {createdRepo}</span>
+            </div>
+            <IconButton
+              aria-label="Dismiss"
+              icon={XIcon}
+              variant="invisible"
+              size="small"
+              onClick={() => setCreatedRepo(null)}
+            />
+          </div>
+          <div style={{ padding: '16px' }}>
+            <CopyableCodeBlock
+              label="...or create a new repository on the command line"
+              lines={[
+                'forge init',
+                `forge config repo ${createdRepo}`,
+                'forge config user.name "Your Name"',
+                `forge remote add origin ${serverUrl}:9876`,
+                'forge add .',
+                'forge commit -m "Initial commit"',
+                'forge push',
+              ]}
+            />
+            <CopyableCodeBlock
+              label="...or push an existing repository"
+              lines={[
+                `forge config repo ${createdRepo}`,
+                `forge remote add origin ${serverUrl}:9876`,
+                'forge push',
+              ]}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Page header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -125,13 +217,13 @@ export default function Dashboard() {
       {/* Repository list */}
       {filtered.length === 0 ? (
         <div className="forge-card" style={{ padding: '48px', textAlign: 'center' }}>
-          <div style={{ color: '#656d76', marginBottom: '8px', display: 'flex', justifyContent: 'center' }}>
+          <div style={{ color: 'var(--fg-muted)', marginBottom: '8px', display: 'flex', justifyContent: 'center' }}>
             <RepoIcon size={40} />
           </div>
-          <p style={{ fontSize: '16px', fontWeight: 600, color: '#1f2328', margin: '0 0 4px 0' }}>
+          <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--fg-default)', margin: '0 0 4px 0' }}>
             {repos.length === 0 ? 'No repositories yet' : 'No matching repositories'}
           </p>
-          <p style={{ color: '#656d76', fontSize: '14px', margin: 0 }}>
+          <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: 0 }}>
             {repos.length === 0
               ? 'Create a repository to get started with Forge VCS.'
               : 'Try a different search term.'}
@@ -148,10 +240,10 @@ export default function Dashboard() {
                 alignItems: 'flex-start',
                 gap: '12px',
                 padding: '16px',
-                borderBottom: i < filtered.length - 1 ? '1px solid #d8dee4' : 'none',
+                borderBottom: i < filtered.length - 1 ? '1px solid var(--border-muted)' : 'none',
               }}
             >
-              <span style={{ color: '#656d76', display: 'inline-flex', marginTop: '2px', flexShrink: 0 }}>
+              <span style={{ color: 'var(--fg-muted)', display: 'inline-flex', marginTop: '2px', flexShrink: 0 }}>
                 <RepoIcon size={16} />
               </span>
 
@@ -162,7 +254,7 @@ export default function Dashboard() {
                     style={{
                       fontWeight: 600,
                       fontSize: '16px',
-                      color: '#0969da',
+                      color: 'var(--fg-accent)',
                       textDecoration: 'none',
                     }}
                     onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
@@ -181,12 +273,12 @@ export default function Dashboard() {
                 </div>
 
                 {repo.description && (
-                  <p style={{ color: '#656d76', fontSize: '14px', margin: '0 0 8px 0', lineHeight: 1.5 }}>
+                  <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 8px 0', lineHeight: 1.5 }}>
                     {repo.description}
                   </p>
                 )}
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '16px', fontSize: '12px', color: '#656d76', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px', fontSize: '12px', color: 'var(--fg-muted)', flexWrap: 'wrap' }}>
                   {repo.last_commit_message && (
                     <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                       <ClockIcon size={12} />

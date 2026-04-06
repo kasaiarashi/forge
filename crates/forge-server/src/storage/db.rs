@@ -93,6 +93,59 @@ impl MetadataDb {
         Ok(result)
     }
 
+    pub fn update_repo(&self, name: &str, new_name: &str, description: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+
+        // Check that the repo exists.
+        let exists: bool = conn
+            .prepare("SELECT COUNT(*) FROM repos WHERE name = ?1")?
+            .query_row([name], |row| row.get::<_, i64>(0))
+            .map(|c| c > 0)?;
+        if !exists {
+            return Ok(false);
+        }
+
+        let effective_name = if new_name.is_empty() { name } else { new_name };
+
+        // If renaming, check that the new name is not already taken.
+        if !new_name.is_empty() && new_name != name {
+            let taken: bool = conn
+                .prepare("SELECT COUNT(*) FROM repos WHERE name = ?1")?
+                .query_row([new_name], |row| row.get::<_, i64>(0))
+                .map(|c| c > 0)?;
+            if taken {
+                anyhow::bail!("repo '{}' already exists", new_name);
+            }
+        }
+
+        conn.execute(
+            "UPDATE repos SET name = ?1, description = ?2 WHERE name = ?3",
+            rusqlite::params![effective_name, description, name],
+        )?;
+
+        // Update refs and locks tables if renamed.
+        if !new_name.is_empty() && new_name != name {
+            conn.execute(
+                "UPDATE refs SET repo = ?1 WHERE repo = ?2",
+                rusqlite::params![new_name, name],
+            )?;
+            conn.execute(
+                "UPDATE locks SET repo = ?1 WHERE repo = ?2",
+                rusqlite::params![new_name, name],
+            )?;
+        }
+
+        Ok(true)
+    }
+
+    pub fn delete_repo(&self, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute("DELETE FROM repos WHERE name = ?1", [name])?;
+        conn.execute("DELETE FROM refs WHERE repo = ?1", [name])?;
+        conn.execute("DELETE FROM locks WHERE repo = ?1", [name])?;
+        Ok(affected > 0)
+    }
+
     // -- Refs --
 
     pub fn get_ref(&self, repo: &str, name: &str) -> Result<Option<Vec<u8>>> {

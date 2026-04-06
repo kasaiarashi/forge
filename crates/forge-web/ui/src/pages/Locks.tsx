@@ -15,6 +15,7 @@ import {
   ClockIcon,
   CodeIcon,
   GitCommitIcon,
+  GearIcon,
   RepoIcon,
 } from '@primer/octicons-react';
 import type { Lock, Branch } from '../api';
@@ -85,12 +86,12 @@ export default function Locks() {
     <div>
       {/* Repo name header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: '#656d76', display: 'inline-flex' }}>
+        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
           <RepoIcon size={20} />
         </span>
         <Link
           to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: '#0969da', textDecoration: 'none' }}
+          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
         >
           {repo}
         </Link>
@@ -115,12 +116,15 @@ export default function Locks() {
         <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} aria-current="page" icon={LockIcon}>
           Locks
         </UnderlineNav.Item>
+        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
+          Settings
+        </UnderlineNav.Item>
       </UnderlineNav>
 
       {/* Page header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '16px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ color: '#656d76', display: 'inline-flex' }}><LockIcon size={24} /></span>
+          <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><LockIcon size={24} /></span>
           <h2 style={{ fontSize: '20px', fontWeight: 600, margin: 0 }}>File Locks</h2>
           <Label variant="secondary">{locks.length}</Label>
         </div>
@@ -137,13 +141,13 @@ export default function Locks() {
 
       {locks.length === 0 ? (
         <div className="forge-card" style={{ padding: '48px', textAlign: 'center' }}>
-          <div style={{ color: '#656d76', marginBottom: '8px', display: 'flex', justifyContent: 'center' }}>
+          <div style={{ color: 'var(--fg-muted)', marginBottom: '8px', display: 'flex', justifyContent: 'center' }}>
             <UnlockIcon size={40} />
           </div>
-          <p style={{ fontSize: '16px', fontWeight: 600, color: '#1f2328', margin: '0 0 4px 0' }}>
+          <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--fg-default)', margin: '0 0 4px 0' }}>
             No active locks
           </p>
-          <p style={{ color: '#656d76', fontSize: '14px', margin: 0 }}>
+          <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: 0 }}>
             Files are locked using <code className="text-mono">forge lock</code> to prevent
             conflicts on binary assets.
           </p>
@@ -152,16 +156,16 @@ export default function Locks() {
         <div className="forge-card">
           {/* Table header */}
           <div style={{
-            background: '#f6f8fa',
+            background: 'var(--bg-subtle)',
             padding: '8px 16px',
-            borderBottom: '1px solid #d0d7de',
+            borderBottom: '1px solid var(--border-default)',
             display: 'grid',
             gridTemplateColumns: '1fr 150px 150px 1fr auto',
             gap: '8px',
             alignItems: 'center',
             fontSize: '12px',
             fontWeight: 600,
-            color: '#656d76',
+            color: 'var(--fg-muted)',
           }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
               <FileIcon size={14} /> Path
@@ -187,7 +191,7 @@ export default function Locks() {
                 gap: '8px',
                 alignItems: 'center',
                 padding: '8px 16px',
-                borderBottom: i < locks.length - 1 ? '1px solid #d8dee4' : 'none',
+                borderBottom: i < locks.length - 1 ? '1px solid var(--border-muted)' : 'none',
                 fontSize: '14px',
               }}
             >
@@ -204,7 +208,7 @@ export default function Locks() {
                   gap: '4px',
                 }}
               >
-                <span style={{ color: '#9a6700', display: 'inline-flex', flexShrink: 0 }}>
+                <span style={{ color: 'var(--fg-warning)', display: 'inline-flex', flexShrink: 0 }}>
                   <LockIcon size={14} />
                 </span>
                 {lock.path}
@@ -212,10 +216,10 @@ export default function Locks() {
 
               <span style={{ fontWeight: 600 }}>{lock.owner}</span>
 
-              <span style={{ color: '#656d76' }}>{timeAgo(lock.created_at)}</span>
+              <span style={{ color: 'var(--fg-muted)' }}>{timeAgo(lock.created_at)}</span>
 
               <span style={{
-                color: '#656d76',
+                color: 'var(--fg-muted)',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',

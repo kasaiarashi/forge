@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,12 @@ struct RepoInfoJson {
 #[derive(Debug, Deserialize)]
 pub struct CreateRepoBody {
     pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateRepoBody {
+    pub new_name: Option<String>,
     pub description: Option<String>,
 }
 
@@ -187,6 +193,62 @@ pub async fn create_repo(
                     Json(serde_json::json!({"success": true})),
                 )
                     .into_response()
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"success": false, "error": resp.error})),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => internal_error(e),
+    }
+}
+
+/// PUT /api/repos/:repo -- update repo (rename/description).
+pub async fn update_repo(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Json(body): Json<UpdateRepoBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    let new_name = body.new_name.unwrap_or_default();
+    let description = body.description.unwrap_or_default();
+
+    match grpc.update_repo(&repo, &new_name, &description).await {
+        Ok(resp) => {
+            if resp.success {
+                (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"success": false, "error": resp.error})),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => internal_error(e),
+    }
+}
+
+/// DELETE /api/repos/:repo -- delete a repo.
+pub async fn delete_repo(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    match grpc.delete_repo(&repo).await {
+        Ok(resp) => {
+            if resp.success {
+                (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
             } else {
                 (
                     StatusCode::BAD_REQUEST,
@@ -347,6 +409,47 @@ pub async fn get_blob(
                 hash: resp.hash,
             };
             (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => internal_error(e),
+    }
+}
+
+/// GET /api/repos/:repo/raw/:branch?path=file -- raw file download.
+pub async fn get_raw(
+    State(state): State<Arc<AppState>>,
+    Path((repo, branch)): Path<(String, String)>,
+    Query(query): Query<BlobQuery>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    let commit_hash = match resolve_branch(&grpc, &repo, &branch).await {
+        Ok(h) => h,
+        Err(e) => return internal_error(e),
+    };
+
+    match grpc.get_file_content(&repo, &commit_hash, &query.path).await {
+        Ok(resp) => {
+            let filename = query.path.rsplit('/').next().unwrap_or("file");
+            let content_type = if resp.is_binary {
+                "application/octet-stream"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+            let disposition = format!("attachment; filename=\"{}\"", filename);
+
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, content_type.to_string()),
+                    (header::CONTENT_DISPOSITION, disposition),
+                    (header::CONTENT_LENGTH, resp.content.len().to_string()),
+                ],
+                resp.content,
+            )
+                .into_response()
         }
         Err(e) => internal_error(e),
     }

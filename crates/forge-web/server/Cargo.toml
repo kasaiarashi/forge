@@ -20,4 +20,5 @@ hex = "0.4"
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 bcrypt = "0.17"
+jsonwebtoken = "9"
 toml = "0.8"

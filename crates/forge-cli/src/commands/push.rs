@@ -6,6 +6,7 @@ use forge_core::hash::ForgeHash;
 use forge_core::workspace::Workspace;
 use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
+use std::collections::HashSet;
 
 pub fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -53,8 +54,9 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
     let remote_tip_bytes = refs_resp.refs.get(&ref_name).cloned().unwrap_or_else(|| vec![0u8; 32]);
 
     // Collect all objects from local tip back to remote tip.
+    let mut seen = HashSet::new();
     let mut objects_to_push = Vec::new();
-    collect_snapshot_objects(ws, &local_tip, &remote_tip_bytes, &mut objects_to_push)?;
+    collect_snapshot_objects(ws, &local_tip, &remote_tip_bytes, &mut objects_to_push, &mut seen)?;
 
     if objects_to_push.is_empty() {
         println!("Everything up to date.");
@@ -147,22 +149,19 @@ fn collect_snapshot_objects(
     tip: &ForgeHash,
     stop_hash: &[u8],
     objects: &mut Vec<ForgeHash>,
+    seen: &mut HashSet<ForgeHash>,
 ) -> Result<()> {
-    if tip.is_zero() || tip.as_bytes().as_slice() == stop_hash {
+    if tip.is_zero() || tip.as_bytes().as_slice() == stop_hash || !seen.insert(*tip) {
         return Ok(());
     }
 
-    // Add the snapshot object itself.
     objects.push(*tip);
 
     let snapshot = ws.object_store.get_snapshot(tip)?;
+    collect_tree_objects(ws, &snapshot.tree, objects, seen)?;
 
-    // Add tree objects recursively.
-    collect_tree_objects(ws, &snapshot.tree, objects)?;
-
-    // Recurse into parents (stop at remote tip).
     for parent in &snapshot.parents {
-        collect_snapshot_objects(ws, parent, stop_hash, objects)?;
+        collect_snapshot_objects(ws, parent, stop_hash, objects, seen)?;
     }
 
     Ok(())
@@ -172,8 +171,9 @@ fn collect_tree_objects(
     ws: &Workspace,
     tree_hash: &ForgeHash,
     objects: &mut Vec<ForgeHash>,
+    seen: &mut HashSet<ForgeHash>,
 ) -> Result<()> {
-    if objects.contains(tree_hash) {
+    if !seen.insert(*tree_hash) {
         return Ok(());
     }
     objects.push(*tree_hash);
@@ -182,15 +182,14 @@ fn collect_tree_objects(
     for entry in &tree.entries {
         match entry.kind {
             forge_core::object::tree::EntryKind::Directory => {
-                collect_tree_objects(ws, &entry.hash, objects)?;
+                collect_tree_objects(ws, &entry.hash, objects, seen)?;
             }
             _ => {
-                if !objects.contains(&entry.hash) {
+                if seen.insert(entry.hash) {
                     objects.push(entry.hash);
-                    // For chunked blobs, also collect the chunk data objects.
                     if let Ok(chunked) = ws.object_store.get_chunked_blob(&entry.hash) {
                         for chunk_ref in &chunked.chunks {
-                            if !objects.contains(&chunk_ref.hash) {
+                            if seen.insert(chunk_ref.hash) {
                                 objects.push(chunk_ref.hash);
                             }
                         }

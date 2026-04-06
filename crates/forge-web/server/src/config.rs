@@ -30,10 +30,10 @@ pub struct AuthConfig {
     /// bcrypt hash of the admin password.
     /// Generate with: forge-web hash-password <password>
     pub admin_password_hash: String,
-    /// Secret used to sign session tokens
-    pub session_secret: String,
-    /// How long sessions last, in hours
-    pub session_ttl_hours: u64,
+    /// Secret used to sign JWT tokens
+    pub jwt_secret: String,
+    /// How long tokens last, in hours
+    pub token_ttl_hours: u64,
 }
 
 impl Default for Config {
@@ -48,8 +48,8 @@ impl Default for Config {
             },
             auth: AuthConfig {
                 admin_password_hash: String::new(),
-                session_secret: "change-me-to-random-string".to_string(),
-                session_ttl_hours: 24,
+                jwt_secret: "change-me-to-random-string".to_string(),
+                token_ttl_hours: 24,
             },
         }
     }

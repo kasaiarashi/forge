@@ -10,11 +10,12 @@ import {
   GitCommitIcon,
   CodeIcon,
   LockIcon,
+  GearIcon,
   CopyIcon,
   RepoIcon,
 } from '@primer/octicons-react';
 import type { CommitList } from '../api';
-import api from '../api';
+import api, { copyToClipboard } from '../api';
 
 function timeAgo(epoch: number): string {
   const date = new Date(epoch * 1000);
@@ -74,7 +75,7 @@ export default function Commits() {
   }, [repo, branch, page]);
 
   const handleCopyHash = (hash: string) => {
-    navigator.clipboard.writeText(hash);
+    copyToClipboard(hash);
     setCopiedHash(hash);
     setTimeout(() => setCopiedHash(''), 2000);
   };
@@ -105,12 +106,12 @@ export default function Commits() {
     <div>
       {/* Repo name header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: '#656d76', display: 'inline-flex' }}>
+        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
           <RepoIcon size={20} />
         </span>
         <Link
           to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: '#0969da', textDecoration: 'none' }}
+          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
         >
           {repo}
         </Link>
@@ -136,6 +137,9 @@ export default function Commits() {
         <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} icon={LockIcon}>
           Locks
         </UnderlineNav.Item>
+        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
+          Settings
+        </UnderlineNav.Item>
       </UnderlineNav>
 
       <div style={{ marginTop: '16px' }}>
@@ -147,8 +151,8 @@ export default function Commits() {
           <div key={date} style={{ marginBottom: '16px' }}>
             {/* Date heading */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-              <span style={{ color: '#656d76', display: 'inline-flex' }}><GitCommitIcon size={16} /></span>
-              <span style={{ fontWeight: 600, fontSize: '14px', color: '#1f2328' }}>
+              <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><GitCommitIcon size={16} /></span>
+              <span style={{ fontWeight: 600, fontSize: '14px', color: 'var(--fg-default)' }}>
                 Commits on {date}
               </span>
             </div>
@@ -164,7 +168,7 @@ export default function Commits() {
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     padding: '8px 16px',
-                    borderBottom: i < commits.length - 1 ? '1px solid #d8dee4' : 'none',
+                    borderBottom: i < commits.length - 1 ? '1px solid var(--border-muted)' : 'none',
                     gap: '16px',
                   }}
                 >
@@ -180,19 +184,19 @@ export default function Commits() {
                         style={{
                           fontWeight: 600,
                           fontSize: '14px',
-                          color: '#1f2328',
+                          color: 'var(--fg-default)',
                           textDecoration: 'none',
                           display: 'block',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
                         }}
-                        onMouseOver={(e) => (e.currentTarget.style.color = '#0969da')}
-                        onMouseOut={(e) => (e.currentTarget.style.color = '#1f2328')}
+                        onMouseOver={(e) => (e.currentTarget.style.color = 'var(--fg-accent)')}
+                        onMouseOut={(e) => (e.currentTarget.style.color = 'var(--fg-default)')}
                       >
                         {commit.message}
                       </Link>
-                      <span style={{ fontSize: '12px', color: '#656d76' }}>
+                      <span style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
                         {commit.author_name} committed {timeAgo(commit.timestamp)}
                       </span>
                     </div>
@@ -209,7 +213,7 @@ export default function Commits() {
                         padding: '4px',
                         display: 'flex',
                         alignItems: 'center',
-                        color: copiedHash === commit.hash ? '#2da44e' : '#656d76',
+                        color: copiedHash === commit.hash ? 'var(--fg-success)' : 'var(--fg-muted)',
                       }}
                       aria-label="Copy commit hash"
                     >
@@ -220,7 +224,7 @@ export default function Commits() {
                       className="text-mono"
                       style={{
                         fontSize: '12px',
-                        color: '#0969da',
+                        color: 'var(--fg-accent)',
                         textDecoration: 'none',
                       }}
                     >
@@ -239,7 +243,7 @@ export default function Commits() {
             <Button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
               Newer
             </Button>
-            <span style={{ color: '#656d76', fontSize: '14px' }}>
+            <span style={{ color: 'var(--fg-muted)', fontSize: '14px' }}>
               Page {page} of {totalPages}
             </span>
             <Button disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>

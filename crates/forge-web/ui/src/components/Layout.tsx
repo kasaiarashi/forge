@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState, useCallback } from 'react';
+import { type ReactNode } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import {
   Header,
@@ -11,35 +11,24 @@ import {
   GearIcon,
   SignOutIcon,
   SignInIcon,
-  PersonIcon,
+  SunIcon,
+  MoonIcon,
 } from '@primer/octicons-react';
-import type { User } from '../api';
-import api from '../api';
+import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
 
 interface LayoutProps {
   children: ReactNode;
 }
 
 export default function Layout({ children }: LayoutProps) {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { user, loading, logout } = useAuth();
+  const { colorMode, setColorMode, resolvedMode } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
 
-  const fetchUser = useCallback(() => {
-    api.me().then((u) => {
-      setUser(u);
-      setLoading(false);
-    });
-  }, []);
-
-  useEffect(() => {
-    fetchUser();
-  }, [fetchUser]);
-
   const handleLogout = async () => {
-    await api.logout();
-    setUser(null);
+    await logout();
     navigate('/login');
   };
 
@@ -80,6 +69,19 @@ export default function Layout({ children }: LayoutProps) {
         <Header.Item full />
 
         <Header.Item>
+          <button
+            onClick={() => {
+              const next = colorMode === 'auto' ? 'night' : colorMode === 'night' ? 'day' : 'auto';
+              setColorMode(next);
+            }}
+            style={{ background: 'none', border: 'none', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '4px' }}
+            title={`Theme: ${colorMode}`}
+          >
+            {resolvedMode === 'night' ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+          </button>
+        </Header.Item>
+
+        <Header.Item>
           {loading ? null : user ? (
             <ActionMenu>
               <ActionMenu.Button>
@@ -93,12 +95,20 @@ export default function Layout({ children }: LayoutProps) {
               </ActionMenu.Button>
               <ActionMenu.Overlay>
                 <ActionList>
-                  <ActionList.Item onSelect={() => navigate('/admin')}>
+                  <ActionList.Item onSelect={() => navigate('/')}>
                     <ActionList.LeadingVisual>
-                      <PersonIcon size={16} />
+                      <RepoIcon size={16} />
                     </ActionList.LeadingVisual>
-                    Profile
+                    Your repositories
                   </ActionList.Item>
+                  {user?.is_admin && (
+                    <ActionList.Item onSelect={() => navigate('/admin')}>
+                      <ActionList.LeadingVisual>
+                        <GearIcon size={16} />
+                      </ActionList.LeadingVisual>
+                      Server administration
+                    </ActionList.Item>
+                  )}
                   <ActionList.Divider />
                   <ActionList.Item variant="danger" onSelect={handleLogout}>
                     <ActionList.LeadingVisual>

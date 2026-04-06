@@ -6,33 +6,22 @@ use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::{DateTime, TimeDelta, Utc};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use uuid::Uuid;
 
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
-// Types
+// JWT Claims
 // ---------------------------------------------------------------------------
 
-/// A logged-in session.
-#[derive(Debug, Clone)]
-pub struct Session {
-    pub session_id: String,
-    pub username: String,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
-
-/// Thread-safe session store.
-pub type SessionStore = Arc<RwLock<HashMap<String, Session>>>;
-
-pub fn new_session_store() -> SessionStore {
-    Arc::new(RwLock::new(HashMap::new()))
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,     // username
+    is_admin: bool,
+    exp: usize,      // expiry (unix timestamp)
+    iat: usize,      // issued at
 }
 
 // ---------------------------------------------------------------------------
@@ -54,8 +43,7 @@ pub struct LoginResponse {
 #[derive(Debug, Serialize)]
 pub struct MeResponse {
     pub username: String,
-    pub created_at: String,
-    pub expires_at: String,
+    pub is_admin: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,23 +106,37 @@ pub async fn login(
         }
     }
 
-    // Create session.
-    let session_id = Uuid::new_v4().to_string();
-    let now = Utc::now();
-    let ttl = TimeDelta::hours(state.config.auth.session_ttl_hours as i64);
-    let session = Session {
-        session_id: session_id.clone(),
-        username: "admin".to_string(),
-        created_at: now,
-        expires_at: now + ttl,
+    // Create JWT.
+    let now = chrono::Utc::now().timestamp() as usize;
+    let ttl_secs = state.config.auth.token_ttl_hours as usize * 3600;
+    let claims = Claims {
+        sub: "admin".to_string(),
+        is_admin: true,
+        exp: now + ttl_secs,
+        iat: now,
     };
 
-    state.sessions.write().await.insert(session_id.clone(), session);
+    let token = match encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(state.config.auth.jwt_secret.as_bytes()),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("JWT encode error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: "internal error".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
 
     // Set cookie.
     let cookie_value = format!(
-        "forge_session={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-        ttl.num_seconds()
+        "forge_token={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl_secs}",
     );
 
     (
@@ -149,16 +151,9 @@ pub async fn login(
 }
 
 /// POST /api/auth/logout
-pub async fn logout(
-    State(state): State<Arc<AppState>>,
-    req: Request<axum::body::Body>,
-) -> Response {
-    if let Some(session_id) = extract_session_id(&req) {
-        state.sessions.write().await.remove(&session_id);
-    }
-
+pub async fn logout() -> Response {
     let cookie_value =
-        "forge_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string();
+        "forge_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string();
 
     (
         StatusCode::OK,
@@ -168,13 +163,13 @@ pub async fn logout(
         .into_response()
 }
 
-/// GET /api/auth/me — returns info about the current session.
+/// GET /api/auth/me — returns info about the current user from the JWT.
 pub async fn me(
     State(state): State<Arc<AppState>>,
     req: Request<axum::body::Body>,
 ) -> Response {
-    let session_id = match extract_session_id(&req) {
-        Some(id) => id,
+    let token = match extract_token(&req) {
+        Some(t) => t,
         None => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -186,21 +181,19 @@ pub async fn me(
         }
     };
 
-    let sessions = state.sessions.read().await;
-    match sessions.get(&session_id) {
-        Some(s) if s.expires_at > Utc::now() => (
+    match verify_token(&token, &state.config.auth.jwt_secret) {
+        Ok(claims) => (
             StatusCode::OK,
             Json(MeResponse {
-                username: s.username.clone(),
-                created_at: s.created_at.to_rfc3339(),
-                expires_at: s.expires_at.to_rfc3339(),
+                username: claims.sub,
+                is_admin: claims.is_admin,
             }),
         )
             .into_response(),
-        _ => (
+        Err(_) => (
             StatusCode::UNAUTHORIZED,
             Json(ErrorBody {
-                error: "session expired or invalid".to_string(),
+                error: "token expired or invalid".to_string(),
             }),
         )
             .into_response(),
@@ -218,8 +211,8 @@ pub async fn require_auth(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let session_id = match extract_session_id(&req) {
-        Some(id) => id,
+    let token = match extract_token(&req) {
+        Some(t) => t,
         None => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -231,16 +224,12 @@ pub async fn require_auth(
         }
     };
 
-    let sessions = state.sessions.read().await;
-    match sessions.get(&session_id) {
-        Some(s) if s.expires_at > Utc::now() => {
-            drop(sessions);
-            next.run(req).await
-        }
-        _ => (
+    match verify_token(&token, &state.config.auth.jwt_secret) {
+        Ok(_) => next.run(req).await,
+        Err(_) => (
             StatusCode::UNAUTHORIZED,
             Json(ErrorBody {
-                error: "session expired or invalid".to_string(),
+                error: "token expired or invalid".to_string(),
             }),
         )
             .into_response(),
@@ -251,12 +240,12 @@ pub async fn require_auth(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the session ID from the `Cookie` header.
-fn extract_session_id<B>(req: &Request<B>) -> Option<String> {
+/// Extract the JWT from the `forge_token` cookie.
+fn extract_token<B>(req: &Request<B>) -> Option<String> {
     let cookie_header = req.headers().get(header::COOKIE)?.to_str().ok()?;
     for part in cookie_header.split(';') {
         let part = part.trim();
-        if let Some(value) = part.strip_prefix("forge_session=") {
+        if let Some(value) = part.strip_prefix("forge_token=") {
             let value = value.trim();
             if !value.is_empty() {
                 return Some(value.to_string());
@@ -264,4 +253,15 @@ fn extract_session_id<B>(req: &Request<B>) -> Option<String> {
         }
     }
     None
+}
+
+/// Verify and decode a JWT, returning the claims on success.
+fn verify_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    let validation = Validation::default();
+    let token_data = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )?;
+    Ok(token_data.claims)
 }

@@ -7,6 +7,7 @@ import FileView from './pages/FileView';
 import Commits from './pages/Commits';
 import CommitDetail from './pages/CommitDetail';
 import Locks from './pages/Locks';
+import RepoSettings from './pages/RepoSettings';
 import Admin from './pages/Admin';
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
         <Route path="/:repo/commits/:branch" element={<Commits />} />
         <Route path="/:repo/commit/:hash" element={<CommitDetail />} />
         <Route path="/:repo/locks" element={<Locks />} />
+        <Route path="/:repo/settings" element={<RepoSettings />} />
       </Routes>
     </Layout>
   );

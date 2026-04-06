@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   Breadcrumbs,
@@ -15,10 +15,63 @@ import {
   CodeIcon,
   GitCommitIcon,
   LockIcon,
+  GearIcon,
   RepoIcon,
 } from '@primer/octicons-react';
+import hljs from 'highlight.js';
+import hljsLight from 'highlight.js/styles/github.css?url';
+import hljsDark from 'highlight.js/styles/github-dark.css?url';
 import type { FileContent } from '../api';
-import api from '../api';
+import api, { copyToClipboard } from '../api';
+import { useTheme } from '../context/ThemeContext';
+
+const extToLang: Record<string, string> = {
+  ts: 'typescript',
+  tsx: 'typescript',
+  js: 'javascript',
+  jsx: 'javascript',
+  rs: 'rust',
+  cpp: 'cpp',
+  cc: 'cpp',
+  cxx: 'cpp',
+  h: 'cpp',
+  hpp: 'cpp',
+  cs: 'csharp',
+  py: 'python',
+  json: 'json',
+  toml: 'toml',
+  ini: 'ini',
+  xml: 'xml',
+  yaml: 'yaml',
+  yml: 'yaml',
+  md: 'markdown',
+  css: 'css',
+  html: 'html',
+  htm: 'html',
+  proto: 'protobuf',
+  sql: 'sql',
+  sh: 'bash',
+  bash: 'bash',
+  zsh: 'bash',
+  go: 'go',
+  java: 'java',
+  rb: 'ruby',
+  php: 'php',
+  swift: 'swift',
+  kt: 'kotlin',
+  lua: 'lua',
+  r: 'r',
+  dockerfile: 'dockerfile',
+  makefile: 'makefile',
+};
+
+function getLanguage(filename: string): string | null {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  const baseName = filename.toLowerCase();
+  if (baseName === 'dockerfile') return 'dockerfile';
+  if (baseName === 'makefile' || baseName === 'gnumakefile') return 'makefile';
+  return extToLang[ext] || null;
+}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} bytes`;
@@ -28,6 +81,7 @@ function formatSize(bytes: number): string {
 
 export default function FileView() {
   const { repo = '', branch = 'main', '*': filePath = '' } = useParams();
+  const { resolvedMode } = useTheme();
   const [file, setFile] = useState<FileContent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -46,8 +100,40 @@ export default function FileView() {
       .finally(() => setLoading(false));
   }, [repo, branch, filePath]);
 
+  useEffect(() => {
+    const id = 'hljs-theme';
+    let link = document.getElementById(id) as HTMLLinkElement | null;
+    const href = resolvedMode === 'night' ? hljsDark : hljsLight;
+    if (!link) {
+      link = document.createElement('link');
+      link.id = id;
+      link.rel = 'stylesheet';
+      document.head.appendChild(link);
+    }
+    link.href = href;
+  }, [resolvedMode]);
+
   const pathParts = filePath.split('/');
   const fileName = pathParts[pathParts.length - 1];
+
+  const highlightedLines = useMemo(() => {
+    if (!file?.content) return [];
+    const lang = getLanguage(fileName);
+    let highlighted: string;
+    try {
+      if (lang) {
+        highlighted = hljs.highlight(file.content, { language: lang }).value;
+      } else {
+        highlighted = hljs.highlightAuto(file.content).value;
+      }
+    } catch {
+      highlighted = file.content
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+    return highlighted.split('\n');
+  }, [file?.content, fileName]);
 
   const buildBreadcrumbPath = (index: number): string => {
     if (index < pathParts.length - 1) {
@@ -59,13 +145,11 @@ export default function FileView() {
 
   const handleCopy = () => {
     if (file?.content) {
-      navigator.clipboard.writeText(file.content);
+      copyToClipboard(file.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
   };
-
-  const lines = file?.content?.split('\n') || [];
 
   if (loading) {
     return (
@@ -87,12 +171,12 @@ export default function FileView() {
     <div>
       {/* Repo name header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: '#656d76', display: 'inline-flex' }}>
+        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
           <RepoIcon size={20} />
         </span>
         <Link
           to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: '#0969da', textDecoration: 'none' }}
+          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
         >
           {repo}
         </Link>
@@ -117,6 +201,9 @@ export default function FileView() {
         </UnderlineNav.Item>
         <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} icon={LockIcon}>
           Locks
+        </UnderlineNav.Item>
+        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
+          Settings
         </UnderlineNav.Item>
       </UnderlineNav>
 
@@ -144,14 +231,14 @@ export default function FileView() {
         {/* File header bar */}
         <div className="forge-card-header" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ color: '#656d76', display: 'inline-flex' }}><FileIcon size={16} /></span>
+            <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><FileIcon size={16} /></span>
             <span style={{ fontWeight: 600, fontSize: '14px' }}>{fileName}</span>
             {file && (
               <>
                 <Label variant="secondary" size="small">
                   {formatSize(file.size)}
                 </Label>
-                <span className="text-mono" style={{ fontSize: '12px', color: '#656d76' }}>
+                <span className="text-mono" style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
                   {file.hash.slice(0, 8)}
                 </span>
               </>
@@ -165,7 +252,7 @@ export default function FileView() {
               size="small"
               leadingVisual={DownloadIcon}
               as="a"
-              href={`/api/repos/${encRepo}/blob/${encBranch}?path=${encodeURIComponent(filePath)}`}
+              href={`/api/repos/${encRepo}/raw/${encBranch}?path=${encodeURIComponent(filePath)}`}
             >
               Raw
             </Button>
@@ -174,12 +261,12 @@ export default function FileView() {
 
         {/* File content */}
         {file?.is_binary ? (
-          <div style={{ padding: '24px', textAlign: 'center', color: '#656d76' }}>
+          <div style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)' }}>
             <div style={{ fontSize: '16px' }}>Binary file ({formatSize(file.size)})</div>
             <div style={{ marginTop: '8px' }}>
               <Button
                 as="a"
-                href={`/api/repos/${encRepo}/blob/${encBranch}?path=${encodeURIComponent(filePath)}`}
+                href={`/api/repos/${encRepo}/raw/${encBranch}?path=${encodeURIComponent(filePath)}`}
               >
                 Download
               </Button>
@@ -194,7 +281,7 @@ export default function FileView() {
             lineHeight: '20px',
           }}>
             <tbody>
-              {lines.map((line, i) => (
+              {highlightedLines.map((lineHtml, i) => (
                 <tr key={i}>
                   <td
                     className="line-number"
@@ -202,7 +289,7 @@ export default function FileView() {
                       padding: '0 16px',
                       userSelect: 'none',
                       textAlign: 'right',
-                      color: '#656d76',
+                      color: 'var(--fg-muted)',
                       verticalAlign: 'top',
                       width: 1,
                       whiteSpace: 'nowrap',
@@ -210,9 +297,10 @@ export default function FileView() {
                   >
                     {i + 1}
                   </td>
-                  <td style={{ padding: '0 16px', whiteSpace: 'pre', overflow: 'visible' }}>
-                    {line}
-                  </td>
+                  <td
+                    style={{ padding: '0 16px', whiteSpace: 'pre', overflow: 'visible' }}
+                    dangerouslySetInnerHTML={{ __html: lineHtml }}
+                  />
                 </tr>
               ))}
             </tbody>

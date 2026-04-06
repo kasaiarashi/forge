@@ -10,14 +10,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::middleware;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::auth::SessionStore;
 use crate::config::Config;
 use crate::grpc_client::ForgeGrpcClient;
 
@@ -61,7 +60,6 @@ enum Commands {
 
 pub struct AppState {
     pub config: Config,
-    pub sessions: SessionStore,
     /// Lazily-initialized gRPC client. Protected by RwLock so we can
     /// connect on first request (avoids startup failure if forge-server
     /// is not yet running).
@@ -145,7 +143,6 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         config: cfg,
-        sessions: auth::new_session_store(),
         grpc: RwLock::new(None),
     });
 
@@ -164,12 +161,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/:repo/commits/:branch", get(api::list_commits))
         .route("/repos/:repo/tree/:branch", get(api::get_tree))
         .route("/repos/:repo/blob/:branch", get(api::get_blob))
+        .route("/repos/:repo/raw/:branch", get(api::get_raw))
         .route("/repos/:repo/commit/:hash", get(api::get_commit))
         .route("/repos/:repo/locks", get(api::list_locks));
 
     // Protected API routes (require auth for writes/admin).
     let protected_api = Router::new()
         .route("/repos", post(api::create_repo))
+        .route("/repos/:repo", put(api::update_repo).delete(api::delete_repo))
         .route("/repos/:repo/locks/acquire", post(api::acquire_lock))
         .route("/repos/:repo/locks/:path", delete(api::release_lock))
         .route("/server/info", get(api::server_info))
