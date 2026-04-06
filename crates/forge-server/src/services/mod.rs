@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Krishna Teja. All rights reserved.
+// Licensed under the MIT License.
+
 pub mod objects;
 pub mod refs;
 pub mod locks;
+pub mod grpc;

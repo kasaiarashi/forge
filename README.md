@@ -59,6 +59,10 @@ The `forge` binary will be at `target/release/forge`.
 - **gRPC (tonic)** for client-server protocol
 - **SQLite** for server-side metadata (refs, locks)
 
+## Author
+
+Krishna Teja ([@krishna18developer](mailto:krishna18developer@gmail.com))
+
 ## License
 
-MIT OR Apache-2.0
+MIT

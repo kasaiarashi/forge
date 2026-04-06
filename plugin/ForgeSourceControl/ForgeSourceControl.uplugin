@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Forge Source Control",
+	"Description": "Forge version control provider for Unreal Engine — built for game development with native binary asset support and file locking.",
+	"Category": "Source Control",
+	"CreatedBy": "Krishna Teja",
+	"EnabledByDefault": false,
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Modules": [
+		{
+			"Name": "ForgeSourceControl",
+			"Type": "Developer",
+			"LoadingPhase": "Default"
+		}
+	]
+}
