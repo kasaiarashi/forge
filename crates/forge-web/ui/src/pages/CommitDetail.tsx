@@ -34,11 +34,11 @@ function timeAgo(epoch: number): string {
 
 function StatusIcon({ status }: { status: DiffFile['change_type'] }) {
   const colorMap: Record<string, string> = {
-    added: '#1a7f37',
-    deleted: '#cf222e',
-    modified: '#9a6700',
+    added: 'var(--fg-success)',
+    deleted: 'var(--fg-danger)',
+    modified: 'var(--fg-warning)',
   };
-  const color = colorMap[status] || '#9a6700';
+  const color = colorMap[status] || 'var(--fg-warning)';
   const iconMap: Record<string, typeof DiffModifiedIcon> = {
     added: DiffAddedIcon,
     deleted: DiffRemovedIcon,
@@ -105,12 +105,12 @@ export default function CommitDetail() {
     <div>
       {/* Repo name header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: '#656d76', display: 'inline-flex' }}>
+        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
           <RepoIcon size={20} />
         </span>
         <Link
           to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: '#0969da', textDecoration: 'none' }}
+          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
         >
           {repo}
         </Link>
@@ -120,9 +120,9 @@ export default function CommitDetail() {
       <div className="forge-card" style={{ marginBottom: '16px' }}>
         {/* Message */}
         <div style={{
-          background: '#f6f8fa',
+          background: 'var(--bg-subtle)',
           padding: '16px',
-          borderBottom: '1px solid #d0d7de',
+          borderBottom: '1px solid var(--border-default)',
         }}>
           <h2 style={{
             fontSize: '20px',
@@ -138,7 +138,7 @@ export default function CommitDetail() {
               {info.author_name.charAt(0).toUpperCase()}
             </div>
             <span style={{ fontWeight: 600, fontSize: '14px' }}>{info.author_name}</span>
-            <span style={{ color: '#656d76', fontSize: '14px' }}>
+            <span style={{ color: 'var(--fg-muted)', fontSize: '14px' }}>
               committed {timeAgo(info.timestamp)}
             </span>
           </div>
@@ -154,8 +154,8 @@ export default function CommitDetail() {
             gap: '8px',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ color: '#656d76', display: 'inline-flex' }}><GitCommitIcon size={16} /></span>
-              <span style={{ fontSize: '14px', color: '#656d76' }}>Commit</span>
+              <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><GitCommitIcon size={16} /></span>
+              <span style={{ fontSize: '14px', color: 'var(--fg-muted)' }}>Commit</span>
               <span className="text-mono" style={{ fontSize: '14px', fontWeight: 600 }}>
                 {info.hash.slice(0, 7)}
               </span>
@@ -168,7 +168,7 @@ export default function CommitDetail() {
                   padding: '2px',
                   display: 'flex',
                   alignItems: 'center',
-                  color: copied ? '#2da44e' : '#656d76',
+                  color: copied ? 'var(--fg-success)' : 'var(--fg-muted)',
                 }}
               >
                 <CopyIcon size={14} />
@@ -176,11 +176,11 @@ export default function CommitDetail() {
             </div>
             {parentHash && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <span style={{ fontSize: '14px', color: '#656d76' }}>Parent:</span>
+                <span style={{ fontSize: '14px', color: 'var(--fg-muted)' }}>Parent:</span>
                 <Link
                   to={`/${encRepo}/commit/${parentHash}`}
                   className="text-mono"
-                  style={{ fontSize: '14px', color: '#0969da', textDecoration: 'none' }}
+                  style={{ fontSize: '14px', color: 'var(--fg-accent)', textDecoration: 'none' }}
                 >
                   {parentHash.slice(0, 7)}
                 </Link>
@@ -192,7 +192,7 @@ export default function CommitDetail() {
 
       {/* Diff stats summary */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
-        <span style={{ color: '#656d76', display: 'inline-flex' }}><FileIcon size={16} /></span>
+        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><FileIcon size={16} /></span>
         <span style={{ fontWeight: 600, fontSize: '14px' }}>
           {files.length} file{files.length !== 1 ? 's' : ''} changed
         </span>
@@ -209,7 +209,7 @@ export default function CommitDetail() {
               alignItems: 'center',
               gap: '8px',
               padding: '8px 16px',
-              borderBottom: i < files.length - 1 ? '1px solid #d8dee4' : 'none',
+              borderBottom: i < files.length - 1 ? '1px solid var(--border-muted)' : 'none',
             }}
           >
             <StatusIcon status={file.change_type} />
@@ -243,7 +243,7 @@ export default function CommitDetail() {
         ))}
 
         {files.length === 0 && (
-          <div style={{ padding: '24px', textAlign: 'center', color: '#656d76' }}>
+          <div style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)' }}>
             No files changed in this commit.
           </div>
         )}

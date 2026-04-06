@@ -1,17 +1,42 @@
 @import '@primer/css/dist/primer.css';
 
+:root {
+  --fg-default: #1f2328;
+  --fg-muted: #656d76;
+  --fg-accent: #0969da;
+  --fg-success: #1a7f37;
+  --fg-danger: #d1242f;
+  --fg-warning: #9a6700;
+  --bg-default: #ffffff;
+  --bg-subtle: #f6f8fa;
+  --bg-inset: #f6f8fa;
+  --bg-overlay: #ffffff;
+  --border-default: #d0d7de;
+  --border-muted: #d8dee4;
+}
+
+[data-color-mode="night"] {
+  --fg-default: #e6edf3;
+  --fg-muted: #8b949e;
+  --fg-accent: #58a6ff;
+  --fg-success: #3fb950;
+  --fg-danger: #f85149;
+  --fg-warning: #d29922;
+  --bg-default: #0d1117;
+  --bg-subtle: #161b22;
+  --bg-inset: #010409;
+  --bg-overlay: #1c2128;
+  --border-default: #30363d;
+  --border-muted: #21262d;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
   font-size: 14px;
   line-height: 1.5;
-  color: #1f2328;
-  background-color: #f6f8fa;
-}
-
-[data-color-mode="night"] body {
-  color: #e6edf3;
-  background-color: #0d1117;
+  color: var(--fg-default);
+  background-color: var(--bg-subtle);
 }
 
 #root {
@@ -27,7 +52,7 @@ body {
 
 /* File browser table hover */
 .file-row:hover {
-  background-color: #f6f8fa;
+  background-color: var(--bg-subtle);
 }
 
 /* Line numbers in file view */
@@ -35,12 +60,12 @@ body {
   user-select: none;
   text-align: right;
   padding-right: 16px;
-  color: #656d76;
+  color: var(--fg-muted);
   min-width: 50px;
   cursor: pointer;
 }
 .line-number:hover {
-  color: #1f2328;
+  color: var(--fg-default);
 }
 
 .line-content {
@@ -103,90 +128,64 @@ body {
 
 /* Card/box styling */
 .forge-card {
-  border: 1px solid #d0d7de;
+  border: 1px solid var(--border-default);
   border-radius: 6px;
-  background: white;
+  background: var(--bg-default);
   overflow: hidden;
 }
 
 .forge-card-header {
-  background: #f6f8fa;
+  background: var(--bg-subtle);
   padding: 8px 16px;
-  border-bottom: 1px solid #d0d7de;
+  border-bottom: 1px solid var(--border-default);
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-/* Stat card for admin */
 .stat-card {
-  border: 1px solid #d0d7de;
+  border: 1px solid var(--border-default);
   border-radius: 6px;
   padding: 16px;
-  background: white;
+  background: var(--bg-default);
 }
 
-/* Login page */
 .login-wrapper {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: calc(100vh - 62px);
-  background: #f6f8fa;
+  background: var(--bg-subtle);
 }
 
-/* Footer */
 .forge-footer {
-  border-top: 1px solid #d0d7de;
+  border-top: 1px solid var(--border-default);
   padding: 16px;
   text-align: center;
-  color: #656d76;
+  color: var(--fg-muted);
   font-size: 12px;
+  background: var(--bg-inset);
 }
 
-/* Dark mode overrides */
-[data-color-mode="night"] .forge-card,
-[data-color-mode="night"] .forge-card-header {
-  background: #161b22;
-  border-color: #30363d;
-}
-
-[data-color-mode="night"] .file-row:hover {
-  background: #161b22;
-}
-
-[data-color-mode="night"] .forge-footer {
-  background: #010409;
-  border-color: #30363d;
-  color: #8b949e;
-}
-
-[data-color-mode="night"] .login-wrapper {
-  background: #0d1117;
-}
-
-[data-color-mode="night"] .stat-card {
-  background: #161b22;
-  border-color: #30363d;
-}
-
-[data-color-mode="night"] .line-number {
-  color: #8b949e;
-}
-
-[data-color-mode="night"] .line-number:hover {
-  color: #e6edf3;
-}
-
+/* Dark mode diff overrides */
 [data-color-mode="night"] .diff-add {
   background-color: #1a4721;
 }
-
 [data-color-mode="night"] .diff-del {
   background-color: #542220;
 }
-
 [data-color-mode="night"] .diff-hunk {
   background-color: #1a3a5c;
+}
+
+/* Table borders for file browser and code view */
+.forge-card table,
+.forge-card table td,
+.forge-card table th {
+  border-color: var(--border-muted);
+}
+
+.forge-card table tr + tr td {
+  border-top: 1px solid var(--border-muted);
 }

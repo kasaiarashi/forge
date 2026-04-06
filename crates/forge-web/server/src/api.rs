@@ -44,6 +44,12 @@ pub struct CreateRepoBody {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateRepoBody {
+    pub new_name: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct BranchInfo {
     name: String,
@@ -187,6 +193,62 @@ pub async fn create_repo(
                     Json(serde_json::json!({"success": true})),
                 )
                     .into_response()
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"success": false, "error": resp.error})),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => internal_error(e),
+    }
+}
+
+/// PUT /api/repos/:repo -- update repo (rename/description).
+pub async fn update_repo(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Json(body): Json<UpdateRepoBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    let new_name = body.new_name.unwrap_or_default();
+    let description = body.description.unwrap_or_default();
+
+    match grpc.update_repo(&repo, &new_name, &description).await {
+        Ok(resp) => {
+            if resp.success {
+                (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"success": false, "error": resp.error})),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => internal_error(e),
+    }
+}
+
+/// DELETE /api/repos/:repo -- delete a repo.
+pub async fn delete_repo(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    match grpc.delete_repo(&repo).await {
+        Ok(resp) => {
+            if resp.success {
+                (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
             } else {
                 (
                     StatusCode::BAD_REQUEST,

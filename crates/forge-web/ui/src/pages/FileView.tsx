@@ -15,6 +15,7 @@ import {
   CodeIcon,
   GitCommitIcon,
   LockIcon,
+  GearIcon,
   RepoIcon,
 } from '@primer/octicons-react';
 import hljs from 'highlight.js';
@@ -170,12 +171,12 @@ export default function FileView() {
     <div>
       {/* Repo name header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: '#656d76', display: 'inline-flex' }}>
+        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
           <RepoIcon size={20} />
         </span>
         <Link
           to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: '#0969da', textDecoration: 'none' }}
+          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
         >
           {repo}
         </Link>
@@ -200,6 +201,9 @@ export default function FileView() {
         </UnderlineNav.Item>
         <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} icon={LockIcon}>
           Locks
+        </UnderlineNav.Item>
+        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
+          Settings
         </UnderlineNav.Item>
       </UnderlineNav>
 
@@ -227,14 +231,14 @@ export default function FileView() {
         {/* File header bar */}
         <div className="forge-card-header" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ color: '#656d76', display: 'inline-flex' }}><FileIcon size={16} /></span>
+            <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><FileIcon size={16} /></span>
             <span style={{ fontWeight: 600, fontSize: '14px' }}>{fileName}</span>
             {file && (
               <>
                 <Label variant="secondary" size="small">
                   {formatSize(file.size)}
                 </Label>
-                <span className="text-mono" style={{ fontSize: '12px', color: '#656d76' }}>
+                <span className="text-mono" style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
                   {file.hash.slice(0, 8)}
                 </span>
               </>
@@ -257,7 +261,7 @@ export default function FileView() {
 
         {/* File content */}
         {file?.is_binary ? (
-          <div style={{ padding: '24px', textAlign: 'center', color: '#656d76' }}>
+          <div style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)' }}>
             <div style={{ fontSize: '16px' }}>Binary file ({formatSize(file.size)})</div>
             <div style={{ marginTop: '8px' }}>
               <Button
@@ -285,7 +289,7 @@ export default function FileView() {
                       padding: '0 16px',
                       userSelect: 'none',
                       textAlign: 'right',
-                      color: '#656d76',
+                      color: 'var(--fg-muted)',
                       verticalAlign: 'top',
                       width: 1,
                       whiteSpace: 'nowrap',

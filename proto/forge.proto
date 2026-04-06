@@ -20,6 +20,8 @@ service ForgeService {
     // Repository management
     rpc ListRepos(ListReposRequest) returns (ListReposResponse);
     rpc CreateRepo(CreateRepoRequest) returns (CreateRepoResponse);
+    rpc UpdateRepo(UpdateRepoRequest) returns (UpdateRepoResponse);
+    rpc DeleteRepo(DeleteRepoRequest) returns (DeleteRepoResponse);
 
     // Browsing (used by Web UI)
     rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
@@ -171,6 +173,26 @@ message CreateRepoRequest {
 }
 
 message CreateRepoResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message UpdateRepoRequest {
+    string name = 1;           // current repo name
+    string new_name = 2;       // new name (empty = no rename)
+    string description = 3;    // new description
+}
+
+message UpdateRepoResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message DeleteRepoRequest {
+    string name = 1;
+}
+
+message DeleteRepoResponse {
     bool success = 1;
     string error = 2;
 }

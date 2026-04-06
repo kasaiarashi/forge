@@ -52,7 +52,7 @@ function CopyableCodeBlock({ lines, label }: { lines: string[]; label: string })
 
   return (
     <div style={{ marginBottom: '16px' }}>
-      <div style={{ fontSize: '14px', fontWeight: 600, color: '#1f2328', marginBottom: '8px' }}>
+      <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--fg-default)', marginBottom: '8px' }}>
         {label}
       </div>
       <div style={{
@@ -217,13 +217,13 @@ export default function Dashboard() {
       {/* Repository list */}
       {filtered.length === 0 ? (
         <div className="forge-card" style={{ padding: '48px', textAlign: 'center' }}>
-          <div style={{ color: '#656d76', marginBottom: '8px', display: 'flex', justifyContent: 'center' }}>
+          <div style={{ color: 'var(--fg-muted)', marginBottom: '8px', display: 'flex', justifyContent: 'center' }}>
             <RepoIcon size={40} />
           </div>
-          <p style={{ fontSize: '16px', fontWeight: 600, color: '#1f2328', margin: '0 0 4px 0' }}>
+          <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--fg-default)', margin: '0 0 4px 0' }}>
             {repos.length === 0 ? 'No repositories yet' : 'No matching repositories'}
           </p>
-          <p style={{ color: '#656d76', fontSize: '14px', margin: 0 }}>
+          <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: 0 }}>
             {repos.length === 0
               ? 'Create a repository to get started with Forge VCS.'
               : 'Try a different search term.'}
@@ -240,10 +240,10 @@ export default function Dashboard() {
                 alignItems: 'flex-start',
                 gap: '12px',
                 padding: '16px',
-                borderBottom: i < filtered.length - 1 ? '1px solid #d8dee4' : 'none',
+                borderBottom: i < filtered.length - 1 ? '1px solid var(--border-muted)' : 'none',
               }}
             >
-              <span style={{ color: '#656d76', display: 'inline-flex', marginTop: '2px', flexShrink: 0 }}>
+              <span style={{ color: 'var(--fg-muted)', display: 'inline-flex', marginTop: '2px', flexShrink: 0 }}>
                 <RepoIcon size={16} />
               </span>
 
@@ -254,7 +254,7 @@ export default function Dashboard() {
                     style={{
                       fontWeight: 600,
                       fontSize: '16px',
-                      color: '#0969da',
+                      color: 'var(--fg-accent)',
                       textDecoration: 'none',
                     }}
                     onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
@@ -273,12 +273,12 @@ export default function Dashboard() {
                 </div>
 
                 {repo.description && (
-                  <p style={{ color: '#656d76', fontSize: '14px', margin: '0 0 8px 0', lineHeight: 1.5 }}>
+                  <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 8px 0', lineHeight: 1.5 }}>
                     {repo.description}
                   </p>
                 )}
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '16px', fontSize: '12px', color: '#656d76', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px', fontSize: '12px', color: 'var(--fg-muted)', flexWrap: 'wrap' }}>
                   {repo.last_commit_message && (
                     <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                       <ClockIcon size={12} />

@@ -43,7 +43,7 @@ export default function Login() {
         </svg>
       </div>
 
-      <h1 style={{ fontSize: '24px', fontWeight: 300, color: '#1f2328', marginBottom: '16px', marginTop: 0 }}>
+      <h1 style={{ fontSize: '24px', fontWeight: 300, color: 'var(--fg-default)', marginBottom: '16px', marginTop: 0 }}>
         Sign in to Forge
       </h1>
 
@@ -58,8 +58,8 @@ export default function Login() {
         style={{
           width: 308,
           padding: '16px',
-          background: 'white',
-          border: '1px solid #d0d7de',
+          background: 'var(--bg-default)',
+          border: '1px solid var(--border-default)',
           borderRadius: '6px',
         }}
       >
@@ -104,11 +104,11 @@ export default function Login() {
           width: 308,
           marginTop: '16px',
           padding: '16px',
-          border: '1px solid #d0d7de',
+          border: '1px solid var(--border-default)',
           borderRadius: '6px',
           textAlign: 'center',
           fontSize: '12px',
-          background: 'white',
+          background: 'var(--bg-default)',
         }}
       >
         Forge VCS server login. Contact your admin for credentials.

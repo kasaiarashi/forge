@@ -15,6 +15,25 @@ impl FsStorage {
         Self { base_path }
     }
 
+    /// Rename a repo directory from old name to new name.
+    pub fn rename_repo(&self, old_name: &str, new_name: &str) -> std::io::Result<()> {
+        let old_dir = self.base_path.join(old_name);
+        let new_dir = self.base_path.join(new_name);
+        if old_dir.exists() {
+            std::fs::rename(&old_dir, &new_dir)?;
+        }
+        Ok(())
+    }
+
+    /// Delete a repo directory recursively.
+    pub fn delete_repo(&self, name: &str) -> std::io::Result<()> {
+        let dir = self.base_path.join(name);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        Ok(())
+    }
+
     /// Get a ChunkStore for a specific repo's objects directory.
     pub fn repo_store(&self, repo: &str) -> ChunkStore {
         let dir = self.base_path.join(repo).join("objects");

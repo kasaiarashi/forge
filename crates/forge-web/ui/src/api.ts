@@ -159,6 +159,14 @@ const api = {
     });
   },
 
+  // Repo management
+  updateRepo(repo: string, data: { new_name?: string; description?: string }): Promise<{ success: boolean }> {
+    return request(`/api/repos/${enc(repo)}`, { method: 'PUT', body: JSON.stringify(data) });
+  },
+  deleteRepo(repo: string): Promise<{ success: boolean }> {
+    return request(`/api/repos/${enc(repo)}`, { method: 'DELETE' });
+  },
+
   // Server info
   getServerInfo() {
     return request<ServerInfo>('/api/server/info');

@@ -428,6 +428,92 @@ impl ForgeService for ForgeGrpcService {
         }))
     }
 
+    async fn update_repo(
+        &self,
+        request: Request<UpdateRepoRequest>,
+    ) -> Result<Response<UpdateRepoResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.name.is_empty() {
+            return Ok(Response::new(UpdateRepoResponse {
+                success: false,
+                error: "repo name cannot be empty".into(),
+            }));
+        }
+
+        // Update the database record.
+        match self.db.update_repo(&req.name, &req.new_name, &req.description) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(Response::new(UpdateRepoResponse {
+                    success: false,
+                    error: format!("repo '{}' not found", req.name),
+                }));
+            }
+            Err(e) => {
+                return Ok(Response::new(UpdateRepoResponse {
+                    success: false,
+                    error: e.to_string(),
+                }));
+            }
+        }
+
+        // If renamed, also rename the filesystem directory.
+        if !req.new_name.is_empty() && req.new_name != req.name {
+            if let Err(e) = self.fs.rename_repo(&req.name, &req.new_name) {
+                return Ok(Response::new(UpdateRepoResponse {
+                    success: false,
+                    error: format!("db updated but fs rename failed: {}", e),
+                }));
+            }
+        }
+
+        Ok(Response::new(UpdateRepoResponse {
+            success: true,
+            error: String::new(),
+        }))
+    }
+
+    async fn delete_repo(
+        &self,
+        request: Request<DeleteRepoRequest>,
+    ) -> Result<Response<DeleteRepoResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.name.is_empty() {
+            return Ok(Response::new(DeleteRepoResponse {
+                success: false,
+                error: "repo name cannot be empty".into(),
+            }));
+        }
+
+        // Delete from the database.
+        let deleted = self
+            .db
+            .delete_repo(&req.name)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !deleted {
+            return Ok(Response::new(DeleteRepoResponse {
+                success: false,
+                error: format!("repo '{}' not found", req.name),
+            }));
+        }
+
+        // Delete from the filesystem.
+        if let Err(e) = self.fs.delete_repo(&req.name) {
+            return Ok(Response::new(DeleteRepoResponse {
+                success: false,
+                error: format!("db deleted but fs cleanup failed: {}", e),
+            }));
+        }
+
+        Ok(Response::new(DeleteRepoResponse {
+            success: true,
+            error: String::new(),
+        }))
+    }
+
     // ================================================================
     // Browsing RPCs (for Web UI)
     // ================================================================

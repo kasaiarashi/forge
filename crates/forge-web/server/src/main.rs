@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::middleware;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use tokio::sync::RwLock;
@@ -167,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
     // Protected API routes (require auth for writes/admin).
     let protected_api = Router::new()
         .route("/repos", post(api::create_repo))
+        .route("/repos/:repo", put(api::update_repo).delete(api::delete_repo))
         .route("/repos/:repo/locks/acquire", post(api::acquire_lock))
         .route("/repos/:repo/locks/:path", delete(api::release_lock))
         .route("/server/info", get(api::server_info))

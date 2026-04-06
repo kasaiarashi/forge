@@ -7,6 +7,8 @@ import {
   Spinner,
   Flash,
   UnderlineNav,
+  TextInput,
+  Button,
 } from '@primer/react';
 import {
   FileDirectoryFillIcon,
@@ -15,8 +17,10 @@ import {
   CodeIcon,
   GitCommitIcon,
   LockIcon,
+  GearIcon,
   ChevronRightIcon,
   RepoIcon,
+  CopyIcon,
 } from '@primer/octicons-react';
 import type { TreeEntry, Branch } from '../api';
 import api from '../api';
@@ -38,6 +42,14 @@ export default function RepoTree() {
   const [activeBranch, setActiveBranch] = useState(branch || '');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [cloneCopied, setCloneCopied] = useState(false);
+
+  const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
+  const copyCloneUrl = () => {
+    navigator.clipboard.writeText(`forge clone ${cloneUrl}`);
+    setCloneCopied(true);
+    setTimeout(() => setCloneCopied(false), 2000);
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -116,12 +128,12 @@ export default function RepoTree() {
     <div>
       {/* Repo name header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: '#656d76', display: 'inline-flex' }}>
+        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
           <RepoIcon size={20} />
         </span>
         <Link
           to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: '#0969da', textDecoration: 'none' }}
+          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
         >
           {repo}
         </Link>
@@ -146,6 +158,9 @@ export default function RepoTree() {
         </UnderlineNav.Item>
         <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} icon={LockIcon}>
           Locks
+        </UnderlineNav.Item>
+        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
+          Settings
         </UnderlineNav.Item>
       </UnderlineNav>
 
@@ -190,16 +205,48 @@ export default function RepoTree() {
         )}
       </div>
 
+      {/* Code clone button */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
+        <ActionMenu>
+          <ActionMenu.Button variant="primary" leadingVisual={CodeIcon}>
+            Code
+          </ActionMenu.Button>
+          <ActionMenu.Overlay width="large">
+            <div style={{ padding: '16px' }}>
+              <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '8px', color: 'var(--fg-default)' }}>Clone</div>
+              <div style={{ fontSize: '12px', color: 'var(--fg-muted)', marginBottom: '8px' }}>
+                Use Forge CLI to clone this repository.
+              </div>
+              <div style={{ display: 'flex', gap: '4px', marginBottom: '12px' }}>
+                <TextInput
+                  value={`forge clone ${cloneUrl}`}
+                  readOnly
+                  block
+                  monospace
+                  size="small"
+                />
+                <Button size="small" onClick={copyCloneUrl}>
+                  {cloneCopied ? 'Copied!' : <CopyIcon size={16} />}
+                </Button>
+              </div>
+              <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
+                Then run: <code style={{ background: 'var(--bg-subtle)', padding: '2px 6px', borderRadius: '3px' }}>forge config repo {repo}</code>
+              </div>
+            </div>
+          </ActionMenu.Overlay>
+        </ActionMenu>
+      </div>
+
       {/* File table */}
       <div className="forge-card">
         {/* Table header */}
         <div className="forge-card-header">
-          <span style={{ color: '#656d76', display: 'inline-flex' }}><GitBranchIcon size={16} /></span>
+          <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><GitBranchIcon size={16} /></span>
           <span style={{ fontWeight: 600, fontSize: '14px' }}>{activeBranch}</span>
           {path && (
             <>
-              <span style={{ color: '#656d76', display: 'inline-flex' }}><ChevronRightIcon size={12} /></span>
-              <span style={{ fontSize: '14px', color: '#656d76' }}>{path}</span>
+              <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><ChevronRightIcon size={12} /></span>
+              <span style={{ fontSize: '14px', color: 'var(--fg-muted)' }}>{path}</span>
             </>
           )}
         </div>
@@ -217,9 +264,9 @@ export default function RepoTree() {
               display: 'flex',
               alignItems: 'center',
               padding: '6px 16px',
-              borderBottom: '1px solid #d8dee4',
+              borderBottom: '1px solid var(--border-muted)',
               textDecoration: 'none',
-              color: '#0969da',
+              color: 'var(--fg-accent)',
               fontSize: '14px',
             }}
           >
@@ -239,14 +286,14 @@ export default function RepoTree() {
               gap: '8px',
               alignItems: 'center',
               padding: '6px 16px',
-              borderBottom: i < entries.length - 1 ? '1px solid #d8dee4' : 'none',
+              borderBottom: i < entries.length - 1 ? '1px solid var(--border-muted)' : 'none',
               textDecoration: 'none',
-              color: '#1f2328',
+              color: 'var(--fg-default)',
               fontSize: '14px',
             }}
           >
             {/* Icon */}
-            <span style={{ display: 'inline-flex', color: entry.kind === 'directory' ? '#54aeff' : '#656d76' }}>
+            <span style={{ display: 'inline-flex', color: entry.kind === 'directory' ? 'var(--fg-accent)' : 'var(--fg-muted)' }}>
               {entry.kind === 'directory' ? (
                 <FileDirectoryFillIcon size={16} />
               ) : (
@@ -256,7 +303,7 @@ export default function RepoTree() {
 
             {/* Name */}
             <span style={{
-              color: entry.kind === 'directory' ? '#0969da' : '#1f2328',
+              color: entry.kind === 'directory' ? 'var(--fg-accent)' : 'var(--fg-default)',
               fontWeight: entry.kind === 'directory' ? 600 : 400,
               overflow: 'hidden',
               textOverflow: 'ellipsis',
@@ -267,7 +314,7 @@ export default function RepoTree() {
 
             {/* Size */}
             <span style={{
-              color: '#656d76',
+              color: 'var(--fg-muted)',
               whiteSpace: 'nowrap',
               textAlign: 'right',
               minWidth: 60,
@@ -278,7 +325,7 @@ export default function RepoTree() {
         ))}
 
         {entries.length === 0 && (
-          <div style={{ padding: '24px', textAlign: 'center', color: '#656d76' }}>
+          <div style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)' }}>
             This directory is empty.
           </div>
         )}
