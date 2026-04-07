@@ -113,25 +113,30 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         }
 
         let obj_count = raw_objects.len();
-        println!(
-            "Pushing {} object(s), {:.2} MiB total",
-            obj_count,
-            total_bytes as f64 / (1024.0 * 1024.0)
-        );
+        let show_progress = total_bytes > 1024 * 1024; // progress bar for >1 MiB
 
-        // Set up progress bar.
-        let pb = ProgressBar::new(total_bytes);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{msg}\n{wide_bar:.cyan/blue} {percent}% ({bytes}/{total_bytes}) {bytes_per_sec} ETA {eta}")
-                .expect("valid template")
-                .progress_chars("=>-"),
-        );
-        pb.set_message(format!("Writing objects: 0/{obj_count} objects"));
+        if show_progress {
+            println!(
+                "Pushing {} object(s), {:.2} MiB total",
+                obj_count,
+                total_bytes as f64 / (1024.0 * 1024.0)
+            );
+        }
 
-        // Build chunks eagerly, then stream them.
-        // Progress updates happen as gRPC consumes each item from the stream,
-        // so the bar reflects actual network progress, not local buffering.
+        let pb = if show_progress {
+            let pb = ProgressBar::new(total_bytes);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{msg}\n{wide_bar:.cyan/blue} {percent}% ({bytes}/{total_bytes}) {bytes_per_sec} ETA {eta}")
+                    .expect("valid template")
+                    .progress_chars("=>-"),
+            );
+            pb.set_message(format!("Writing objects: 0/{obj_count} objects"));
+            pb
+        } else {
+            ProgressBar::hidden()
+        };
+
         let repo_name_owned = repo_name.to_string();
         let chunks: Vec<ObjectChunk> = raw_objects
             .into_iter()
@@ -148,7 +153,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
 
         let mut sent_bytes: u64 = 0;
         let mut sent_objs: usize = 0;
-        let (tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(2); // tiny buffer = backpressure
+        let (tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(64);
 
         let pb_clone = pb.clone();
         let send_handle = tokio::spawn(async move {
@@ -169,7 +174,9 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         send_handle.abort();
 
         pb.set_position(total_bytes);
-        pb.finish_with_message(format!("Writing objects: {obj_count}/{obj_count} objects, done."));
+        if show_progress {
+            pb.finish_with_message(format!("Writing objects: {obj_count}/{obj_count} objects, done."));
+        }
     }
 
     // Update remote ref.

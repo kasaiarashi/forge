@@ -91,10 +91,15 @@ impl ForgeService for ForgeGrpcService {
                 let s = store.as_ref().ok_or_else(|| Status::internal("no repo specified in stream"))?;
 
                 if chunk.object_type == 1 {
-                    // Pre-compressed data — verify it's valid zstd before storing.
-                    if forge_core::compress::decompress(&current_buf).is_err() {
+                    // Pre-compressed data — verify zstd magic bytes (0xFD2FB528).
+                    if current_buf.len() < 4
+                        || current_buf[0] != 0x28
+                        || current_buf[1] != 0xB5
+                        || current_buf[2] != 0x2F
+                        || current_buf[3] != 0xFD
+                    {
                         return Err(Status::data_loss(format!(
-                            "corrupt compressed data for {}",
+                            "invalid compressed data for {} (bad magic bytes)",
                             hex::encode(&hash_bytes)
                         )));
                     }

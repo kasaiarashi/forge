@@ -296,22 +296,40 @@ impl Workspace {
         Ok(())
     }
 
-    /// List all branches.
+    /// List all branches (supports nested names like `feature/foo`).
     pub fn list_branches(&self) -> Result<Vec<String>, ForgeError> {
         let heads_dir = self.forge_dir().join("refs").join("heads");
         let mut branches = Vec::new();
         if heads_dir.exists() {
-            for entry in std::fs::read_dir(&heads_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        branches.push(name.to_string());
-                    }
-                }
-            }
+            Self::collect_branches(&heads_dir, "", &mut branches)?;
         }
         branches.sort();
         Ok(branches)
+    }
+
+    fn collect_branches(
+        dir: &std::path::Path,
+        prefix: &str,
+        out: &mut Vec<String>,
+    ) -> Result<(), ForgeError> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = match entry.file_name().to_str() {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let full = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            if entry.file_type()?.is_file() {
+                out.push(full);
+            } else if entry.file_type()?.is_dir() {
+                Self::collect_branches(&entry.path(), &full, out)?;
+            }
+        }
+        Ok(())
     }
 
     /// Get the current branch name (if HEAD points to a branch).
