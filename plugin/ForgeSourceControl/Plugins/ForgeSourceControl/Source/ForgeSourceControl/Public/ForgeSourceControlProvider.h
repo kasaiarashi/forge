@@ -16,15 +16,26 @@ public:
 	virtual void Init(bool bForceConnection = true) override;
 	virtual void Close() override;
 
-	virtual FName GetName() const override;
+	virtual const FName& GetName() const override;
 	virtual FText GetStatusText() const override;
 
+	virtual TMap<EStatus, FString> GetStatus() const override;
 	virtual bool IsEnabled() const override;
 	virtual bool IsAvailable() const override;
+
+	virtual bool QueryStateBranchConfig(const FString& ConfigSrc, const FString& ConfigDest) override { return false; }
+	virtual void RegisterStateBranches(const TArray<FString>& BranchNames, const FString& ContentRoot) override {}
+	virtual int32 GetStateBranchIndex(const FString& BranchName) const override { return INDEX_NONE; }
+	virtual bool GetStateBranchAtIndex(int32 BranchIndex, FString& OutBranchName) const override { return false; }
 
 	virtual ECommandResult::Type GetState(
 		const TArray<FString>& InFiles,
 		TArray<FSourceControlStateRef>& OutState,
+		EStateCacheUsage::Type InStateCacheUsage) override;
+
+	virtual ECommandResult::Type GetState(
+		const TArray<FSourceControlChangelistRef>& InChangelists,
+		TArray<FSourceControlChangelistStateRef>& OutState,
 		EStateCacheUsage::Type InStateCacheUsage) override;
 
 	virtual TArray<FSourceControlStateRef> GetCachedStateByPredicate(
@@ -42,6 +53,7 @@ public:
 		EConcurrency::Type InConcurrency,
 		const FSourceControlOperationComplete& InOperationCompleteDelegate) override;
 
+	virtual bool CanExecuteOperation(const FSourceControlOperationRef& InOperation) const override { return true; }
 	virtual bool CanCancelOperation(const FSourceControlOperationRef& InOperation) const override;
 	virtual void CancelOperation(const FSourceControlOperationRef& InOperation) override;
 
@@ -49,9 +61,23 @@ public:
 
 	virtual TArray<TSharedRef<class ISourceControlLabel>> GetLabels(const FString& InMatchingSpec) const override;
 
-#if SOURCE_CONTROL_WITH_SLATE
+	virtual TArray<FSourceControlChangelistRef> GetChangelists(EStateCacheUsage::Type InStateCacheUsage) override;
+
+	virtual bool UsesLocalReadOnlyState() const override { return false; }
+	virtual bool UsesChangelists() const override { return false; }
+	virtual bool UsesUncontrolledChangelists() const override { return false; }
+	virtual bool UsesCheckout() const override { return true; }
+	virtual bool UsesFileRevisions() const override { return false; }
+	virtual bool UsesSnapshots() const override { return true; }
+	virtual bool AllowsDiffAgainstDepot() const override { return false; }
+
+	virtual TOptional<bool> IsAtLatestRevision() const override { return TOptional<bool>(); }
+	virtual TOptional<int> GetNumLocalChanges() const override { return TOptional<int>(); }
+
 	virtual TSharedRef<class SWidget> MakeSettingsWidget() const override;
-#endif
+
+	/** Explicitly refresh the status cache by running forge status --json. */
+	void RefreshStatusCache();
 
 private:
 	/** Run the forge CLI and return parsed JSON output. */
@@ -62,6 +88,9 @@ private:
 
 	/** Whether we successfully connected to a forge workspace. */
 	bool bIsAvailable = false;
+
+	/** Whether the cache needs a background refresh. */
+	bool bNeedsCacheRefresh = false;
 
 	/** Cached file states. */
 	TMap<FString, FSourceControlStateRef> StateCache;
