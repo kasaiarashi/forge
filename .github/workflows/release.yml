@@ -44,6 +44,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: '27.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -72,6 +73,7 @@ jobs:
     needs: build-ui
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -84,11 +86,12 @@ jobs:
             name: Linux x64
             artifact: forge-server-linux-amd64
             exe_suffix: ''
-          - os: macos-13
+          - os: macos-14
             target: x86_64-apple-darwin
             name: macOS x64
             artifact: forge-server-macos-amd64
             exe_suffix: ''
+            cross: true
           - os: macos-14
             target: aarch64-apple-darwin
             name: macOS ARM64
@@ -100,6 +103,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: '27.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -111,18 +115,18 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ matrix.os }}-cargo-server-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.os }}-cargo-server-
+          key: ${{ matrix.os }}-${{ matrix.target }}-cargo-server-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.target }}-cargo-server-
 
       - name: Build server binaries
-        run: cargo build --release --bin forge-server --bin forge-web
+        run: cargo build --release --target ${{ matrix.target }} --bin forge-server --bin forge-web
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
-            target/release/forge-server${{ matrix.exe_suffix }}
-            target/release/forge-web${{ matrix.exe_suffix }}
+            target/${{ matrix.target }}/release/forge-server${{ matrix.exe_suffix }}
+            target/${{ matrix.target }}/release/forge-web${{ matrix.exe_suffix }}
 
   # ─── Package and release ───
   release:
