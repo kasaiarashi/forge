@@ -297,4 +297,61 @@ impl ForgeGrpcClient {
         let resp = client.get_release(GetReleaseRequest { release_id }).await?;
         Ok(resp.into_inner())
     }
+
+    // ── Issues ──
+
+    pub async fn list_issues(&self, repo: &str, status: &str, limit: i32, offset: i32) -> anyhow::Result<ListIssuesResponse> {
+        let mut client = self.client.clone();
+        let resp = client.list_issues(ListIssuesRequest {
+            repo: repo.to_string(), status: status.to_string(), limit, offset,
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn create_issue(&self, repo: &str, title: &str, body: &str, author: &str, labels: Vec<String>) -> anyhow::Result<CreateIssueResponse> {
+        let mut client = self.client.clone();
+        let resp = client.create_issue(CreateIssueRequest {
+            repo: repo.to_string(), title: title.to_string(), body: body.to_string(),
+            author: author.to_string(), labels,
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn update_issue(&self, id: i64, title: &str, body: &str, status: &str, labels: Vec<String>) -> anyhow::Result<UpdateIssueResponse> {
+        let mut client = self.client.clone();
+        let resp = client.update_issue(UpdateIssueRequest {
+            id, title: title.to_string(), body: body.to_string(),
+            status: status.to_string(), labels,
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    // ── Pull Requests ──
+
+    pub async fn list_pull_requests(&self, repo: &str, status: &str, limit: i32, offset: i32) -> anyhow::Result<ListPullRequestsResponse> {
+        let mut client = self.client.clone();
+        let resp = client.list_pull_requests(ListPullRequestsRequest {
+            repo: repo.to_string(), status: status.to_string(), limit, offset,
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn create_pull_request(&self, repo: &str, title: &str, body: &str, author: &str, source_branch: &str, target_branch: &str, labels: Vec<String>) -> anyhow::Result<CreatePullRequestResponse> {
+        let mut client = self.client.clone();
+        let resp = client.create_pull_request(CreatePullRequestRequest {
+            repo: repo.to_string(), title: title.to_string(), body: body.to_string(),
+            author: author.to_string(), source_branch: source_branch.to_string(),
+            target_branch: target_branch.to_string(), labels,
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn update_pull_request(&self, id: i64, title: &str, body: &str, status: &str, labels: Vec<String>) -> anyhow::Result<UpdatePullRequestResponse> {
+        let mut client = self.client.clone();
+        let resp = client.update_pull_request(UpdatePullRequestRequest {
+            id, title: title.to_string(), body: body.to_string(),
+            status: status.to_string(), labels,
+        }).await?;
+        Ok(resp.into_inner())
+    }
 }

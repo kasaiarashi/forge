@@ -641,6 +641,207 @@ pub async fn server_info(State(state): State<Arc<AppState>>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// Issues
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct IssueQuery {
+    pub status: Option<String>,
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct IssueJson {
+    id: i64,
+    title: String,
+    body: String,
+    author: String,
+    status: String,
+    labels: Vec<String>,
+    created_at: i64,
+    updated_at: i64,
+    comment_count: i32,
+}
+
+pub async fn list_issues(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Query(q): Query<IssueQuery>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.list_issues(&repo, q.status.as_deref().unwrap_or(""), q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    let issues: Vec<IssueJson> = resp.issues.into_iter().map(|i| IssueJson {
+        id: i.id, title: i.title, body: i.body, author: i.author,
+        status: i.status, labels: i.labels, created_at: i.created_at,
+        updated_at: i.updated_at, comment_count: i.comment_count,
+    }).collect();
+    Json(serde_json::json!({
+        "issues": issues,
+        "total": resp.total,
+        "open_count": resp.open_count,
+        "closed_count": resp.closed_count,
+    })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateIssueBody {
+    pub title: String,
+    pub body: Option<String>,
+    pub author: Option<String>,
+    pub labels: Option<Vec<String>>,
+}
+
+pub async fn create_issue(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Json(body): Json<CreateIssueBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.create_issue(
+        &repo, &body.title, body.body.as_deref().unwrap_or(""),
+        body.author.as_deref().unwrap_or("web-user"),
+        body.labels.unwrap_or_default(),
+    ).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(serde_json::json!({ "success": resp.success, "id": resp.id })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateIssueBody {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub status: Option<String>,
+    pub labels: Option<Vec<String>>,
+}
+
+pub async fn update_issue(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, id)): Path<(String, i64)>,
+    Json(body): Json<UpdateIssueBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.update_issue(
+        id, body.title.as_deref().unwrap_or(""), body.body.as_deref().unwrap_or(""),
+        body.status.as_deref().unwrap_or(""), body.labels.unwrap_or_default(),
+    ).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(serde_json::json!({ "success": resp.success })).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Pull Requests
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct PullRequestJson {
+    id: i64,
+    title: String,
+    body: String,
+    author: String,
+    status: String,
+    source_branch: String,
+    target_branch: String,
+    labels: Vec<String>,
+    created_at: i64,
+    updated_at: i64,
+    comment_count: i32,
+}
+
+pub async fn list_pull_requests(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Query(q): Query<IssueQuery>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.list_pull_requests(&repo, q.status.as_deref().unwrap_or(""), q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    let prs: Vec<PullRequestJson> = resp.pull_requests.into_iter().map(|p| PullRequestJson {
+        id: p.id, title: p.title, body: p.body, author: p.author,
+        status: p.status, source_branch: p.source_branch, target_branch: p.target_branch,
+        labels: p.labels, created_at: p.created_at, updated_at: p.updated_at,
+        comment_count: p.comment_count,
+    }).collect();
+    Json(serde_json::json!({
+        "pull_requests": prs,
+        "total": resp.total,
+        "open_count": resp.open_count,
+        "closed_count": resp.closed_count,
+    })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePrBody {
+    pub title: String,
+    pub body: Option<String>,
+    pub author: Option<String>,
+    pub source_branch: String,
+    pub target_branch: Option<String>,
+    pub labels: Option<Vec<String>>,
+}
+
+pub async fn create_pull_request(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Json(body): Json<CreatePrBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.create_pull_request(
+        &repo, &body.title, body.body.as_deref().unwrap_or(""),
+        body.author.as_deref().unwrap_or("web-user"),
+        &body.source_branch, body.target_branch.as_deref().unwrap_or("main"),
+        body.labels.unwrap_or_default(),
+    ).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(serde_json::json!({ "success": resp.success, "id": resp.id })).into_response()
+}
+
+pub async fn update_pull_request(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, id)): Path<(String, i64)>,
+    Json(body): Json<UpdateIssueBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.update_pull_request(
+        id, body.title.as_deref().unwrap_or(""), body.body.as_deref().unwrap_or(""),
+        body.status.as_deref().unwrap_or(""), body.labels.unwrap_or_default(),
+    ).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(serde_json::json!({ "success": resp.success })).into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
