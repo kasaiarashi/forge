@@ -22,8 +22,8 @@ import {
   GearIcon,
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
-import type { TreeEntry, Branch, CommitSummary, RepoInfo } from '../api';
-import api, { copyToClipboard } from '../api';
+import type { TreeEntry, Branch, CommitSummary, RepoInfo, LanguageStat } from '../api';
+import api, { copyToClipboard, getLanguageStats } from '../api';
 import { useAuth } from '../context/AuthContext';
 
 function timeAgo(epoch: number): string {
@@ -58,6 +58,8 @@ export default function RepoTree() {
   const [repoInfo, setRepoInfo] = useState<RepoInfo | null>(null);
   const [cloneCopied, setCloneCopied] = useState(false);
   const [showCloneMenu, setShowCloneMenu] = useState(false);
+  const [languages, setLanguages] = useState<LanguageStat[]>([]);
+  const [recentCommits, setRecentCommits] = useState<CommitSummary[]>([]);
   const { user } = useAuth();
 
   const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
@@ -87,9 +89,11 @@ export default function RepoTree() {
         const resolvedBranch = branch || (br.find(b => b.name === 'main') || br[0])?.name || 'main';
         setActiveBranch(resolvedBranch);
 
-        const [tree, commits] = await Promise.all([
+        const [tree, commits, langs, recent] = await Promise.all([
           api.getTree(repo, resolvedBranch, path),
           api.listCommits(repo, resolvedBranch, 1, 1),
+          getLanguageStats(repo, resolvedBranch),
+          api.listCommits(repo, resolvedBranch, 1, 3),
         ]);
 
         const sorted = [...tree.entries].sort((a, b) => {
@@ -99,6 +103,8 @@ export default function RepoTree() {
         setEntries(sorted);
         setLatestCommit(commits.commits[0] || null);
         setCommitCount(commits.total);
+        setLanguages(langs);
+        setRecentCommits(recent.commits);
       } catch (e: any) {
         setError(e.message);
       } finally {
@@ -451,32 +457,37 @@ export default function RepoTree() {
             </div>
 
             {/* Languages */}
-            <div style={{ marginBottom: '24px', borderTop: '1px solid var(--border-muted)', paddingTop: '16px' }}>
-              <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Languages</h3>
-              <div style={{ display: 'flex', height: '8px', borderRadius: '4px', overflow: 'hidden', marginBottom: '8px' }}>
-                <div style={{ width: '60%', backgroundColor: '#3178c6' }}></div>
-                <div style={{ width: '40%', backgroundColor: '#f1e05a' }}></div>
+            {languages.length > 0 && (
+              <div style={{ marginBottom: '24px', borderTop: '1px solid var(--border-muted)', paddingTop: '16px' }}>
+                <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Languages</h3>
+                <div style={{ display: 'flex', height: '8px', borderRadius: '4px', overflow: 'hidden', marginBottom: '8px' }}>
+                  {languages.map(lang => (
+                    <div key={lang.name} style={{ width: `${lang.percentage}%`, backgroundColor: lang.color }} title={`${lang.name} ${lang.percentage.toFixed(1)}%`}></div>
+                  ))}
+                </div>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '12px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {languages.map(lang => (
+                    <li key={lang.name} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: lang.color, display: 'inline-block' }}></span>
+                      <span style={{ fontWeight: 600 }}>{lang.name}</span>
+                      <span style={{ color: 'var(--fg-muted)' }}>{lang.percentage.toFixed(1)}%</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
-              <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '12px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                <li style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#3178c6' }}></span>
-                  <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>TypeScript</span> <span style={{ color: 'var(--fg-muted)' }}>60.0%</span>
-                </li>
-                <li style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#f1e05a' }}></span>
-                  <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>JavaScript</span> <span style={{ color: 'var(--fg-muted)' }}>40.0%</span>
-                </li>
-              </ul>
-            </div>
+            )}
 
-            {/* Activity */}
-            <div>
-              <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Activity</h3>
-              <div style={{ fontSize: '13px', color: 'var(--fg-muted)' }}>
-                {latestCommit && (
-                  <span>Last updated {timeAgo(latestCommit.timestamp)}</span>
-                )}
-              </div>
+            {/* Recent activity */}
+            <div style={{ marginBottom: '24px', borderTop: '1px solid var(--border-muted)', paddingTop: '16px' }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Recent activity</h3>
+              {recentCommits.map(c => (
+                <div key={c.hash} style={{ fontSize: '12px', marginBottom: '8px' }}>
+                  <Link to={`/${encodeURIComponent(repo)}/commit/${c.hash}`} style={{ color: 'var(--fg-accent)', textDecoration: 'none' }}>
+                    {c.message.length > 50 ? c.message.slice(0, 50) + '...' : c.message}
+                  </Link>
+                  <div style={{ color: 'var(--fg-muted)' }}>{c.author_name} · {timeAgo(c.timestamp)}</div>
+                </div>
+              ))}
             </div>
           </div>
         )}

@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   Spinner,
   Flash,
   Button,
+  ActionMenu,
+  ActionList,
 } from '@primer/react';
 import {
   GitCommitIcon,
+  GitBranchIcon,
   CopyIcon,
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
-import type { CommitList } from '../api';
+import type { CommitList, Branch } from '../api';
 import api, { copyToClipboard } from '../api';
 
 function timeAgo(epoch: number): string {
@@ -52,7 +55,9 @@ function groupByDate(commits: CommitSummary[]): Map<string, CommitSummary[]> {
 
 export default function Commits() {
   const { repo = '', branch = 'main' } = useParams();
+  const navigate = useNavigate();
   const [commitList, setCommitList] = useState<CommitList | null>(null);
+  const [branches, setBranches] = useState<Branch[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
@@ -63,9 +68,14 @@ export default function Commits() {
   useEffect(() => {
     setLoading(true);
     setError('');
-    api
-      .listCommits(repo, branch, page)
-      .then(setCommitList)
+    Promise.all([
+      api.listCommits(repo, branch, page),
+      api.listBranches(repo),
+    ])
+      .then(([commits, br]) => {
+        setCommitList(commits);
+        setBranches(br);
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, [repo, branch, page]);
@@ -103,9 +113,25 @@ export default function Commits() {
       <RepoHeader repo={repo} currentTab="commits" activeBranch={branch} />
 
       <div style={{ marginTop: '16px' }}>
-        <h2 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '16px' }}>
-          Commits on {branch}
-        </h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+          <h2 style={{ fontSize: '20px', fontWeight: 600, margin: 0 }}>
+            Commits
+          </h2>
+          <ActionMenu>
+            <ActionMenu.Button variant="default" size="small">
+              <GitBranchIcon size={16} /> {branch}
+            </ActionMenu.Button>
+            <ActionMenu.Overlay>
+              <ActionList>
+                {branches.map(b => (
+                  <ActionList.Item key={b.name} onSelect={() => navigate(`/${encodeURIComponent(repo)}/commits/${encodeURIComponent(b.name)}`)}>
+                    {b.name}
+                  </ActionList.Item>
+                ))}
+              </ActionList>
+            </ActionMenu.Overlay>
+          </ActionMenu>
+        </div>
 
         {Array.from(groups.entries()).map(([date, commits]) => (
           <div key={date} style={{ marginBottom: '16px' }}>

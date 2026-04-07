@@ -166,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/:repo/raw/:branch", get(api::get_raw))
         .route("/repos/:repo/commit/:hash", get(api::get_commit))
         .route("/repos/:repo/locks", get(api::list_locks))
+        .route("/repos/:repo/stats/languages", get(api::language_stats))
         // Issues & Pull Requests (public read)
         .route("/repos/:repo/issues", get(api::list_issues))
         .route("/repos/:repo/issues/:id", get(api::get_issue))
