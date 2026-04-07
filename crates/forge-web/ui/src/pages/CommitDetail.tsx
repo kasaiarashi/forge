@@ -32,6 +32,12 @@ function timeAgo(epoch: number): string {
   return `${months} month${months > 1 ? 's' : ''} ago`;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function StatusIcon({ status }: { status: DiffFile['change_type'] }) {
   const colorMap: Record<string, string> = {
     added: 'var(--fg-success)',
@@ -203,18 +209,44 @@ export default function CommitDetail() {
           >
             <StatusIcon status={file.change_type} />
 
-            <span
-              className="text-mono"
-              style={{
-                flex: 1,
-                fontSize: '14px',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {file.path}
-            </span>
+            {file.change_type !== 'deleted' ? (
+              <Link
+                to={`/${encRepo}/blob/${info.hash.slice(0, 12)}/${file.path}`}
+                className="text-mono"
+                style={{
+                  flex: 1,
+                  fontSize: '14px',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  color: 'var(--fg-accent)',
+                  textDecoration: 'none',
+                }}
+              >
+                {file.path}
+              </Link>
+            ) : (
+              <span
+                className="text-mono"
+                style={{
+                  flex: 1,
+                  fontSize: '14px',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  color: 'var(--fg-muted)',
+                  textDecoration: 'line-through',
+                }}
+              >
+                {file.path}
+              </span>
+            )}
+
+            {file.old_size > 0 && file.new_size > 0 && (
+              <span className="text-mono" style={{ fontSize: '12px', color: 'var(--fg-muted)', flexShrink: 0 }}>
+                {formatBytes(file.old_size)} → {formatBytes(file.new_size)}
+              </span>
+            )}
 
             <Label
               size="small"

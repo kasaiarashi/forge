@@ -89,11 +89,10 @@ export default function RepoTree() {
         const resolvedBranch = branch || (br.find(b => b.name === 'main') || br[0])?.name || 'main';
         setActiveBranch(resolvedBranch);
 
-        const [tree, commits, langs, recent] = await Promise.all([
+        // Fetch critical data first (tree + latest commit), defer sidebar data.
+        const [tree, commits] = await Promise.all([
           api.getTree(repo, resolvedBranch, path),
           api.listCommits(repo, resolvedBranch, 1, 1),
-          getLanguageStats(repo, resolvedBranch),
-          api.listCommits(repo, resolvedBranch, 1, 3),
         ]);
 
         const sorted = [...tree.entries].sort((a, b) => {
@@ -103,8 +102,10 @@ export default function RepoTree() {
         setEntries(sorted);
         setLatestCommit(commits.commits[0] || null);
         setCommitCount(commits.total);
-        setLanguages(langs);
-        setRecentCommits(recent.commits);
+
+        // Load sidebar data in background (non-blocking).
+        getLanguageStats(repo, resolvedBranch).then(setLanguages).catch(() => {});
+        api.listCommits(repo, resolvedBranch, 1, 3).then(r => setRecentCommits(r.commits)).catch(() => {});
       } catch (e: any) {
         setError(e.message);
       } finally {
