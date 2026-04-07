@@ -7,7 +7,7 @@ use forge_core::object::tree::{EntryKind, Tree, TreeEntry};
 use forge_core::workspace::{HeadRef, Workspace};
 use std::collections::BTreeMap;
 
-pub fn run(message: String, all: bool) -> Result<()> {
+pub fn run(message: String, all: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
     let mut index = Index::load(&ws.forge_dir().join("index"))?;
@@ -68,8 +68,20 @@ pub fn run(message: String, all: bool) -> Result<()> {
     index.clear_staged();
     index.save(&ws.forge_dir().join("index"))?;
 
-    println!("Committed {}", snap_hash.short());
-    println!("  {} file(s) | {}", staged.len(), message);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hash": snap_hash.to_hex(),
+                "short_hash": snap_hash.short(),
+                "message": message,
+                "files": staged.len(),
+            }))?
+        );
+    } else {
+        println!("Committed {}", snap_hash.short());
+        println!("  {} file(s) | {}", staged.len(), message);
+    }
 
     Ok(())
 }

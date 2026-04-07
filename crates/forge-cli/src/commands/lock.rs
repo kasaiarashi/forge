@@ -5,8 +5,9 @@ use anyhow::{bail, Result};
 use forge_core::workspace::Workspace;
 use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
+use serde_json::json;
 
-pub fn run(path: String, reason: Option<String>) -> Result<()> {
+pub fn run(path: String, reason: Option<String>, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
     let config = ws.config()?;
@@ -35,18 +36,44 @@ pub fn run(path: String, reason: Option<String>) -> Result<()> {
             .into_inner();
 
         if resp.granted {
-            println!("\x1b[32mLocked:\x1b[0m {}", rel_path);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "path": rel_path,
+                    "owner": config.user.name,
+                }))?);
+            } else {
+                println!("\x1b[32mLocked:\x1b[0m {}", rel_path);
+            }
         } else if let Some(lock) = resp.existing_lock {
-            bail!(
-                "File '{}' is already locked by '{}' (since {})",
-                rel_path,
-                lock.owner,
-                chrono::DateTime::from_timestamp(lock.created_at, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                    .unwrap_or_else(|| "unknown".into())
-            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&json!({
+                    "ok": false,
+                    "error": format!("already locked by '{}'", lock.owner),
+                    "path": rel_path,
+                    "owner": lock.owner,
+                    "created_at": lock.created_at,
+                }))?);
+            } else {
+                bail!(
+                    "File '{}' is already locked by '{}' (since {})",
+                    rel_path,
+                    lock.owner,
+                    chrono::DateTime::from_timestamp(lock.created_at, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                        .unwrap_or_else(|| "unknown".into())
+                );
+            }
         } else {
-            bail!("Failed to acquire lock on '{}': server denied without details", rel_path);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&json!({
+                    "ok": false,
+                    "error": "server denied without details",
+                    "path": rel_path,
+                }))?);
+            } else {
+                bail!("Failed to acquire lock on '{}': server denied without details", rel_path);
+            }
         }
 
         Ok(())

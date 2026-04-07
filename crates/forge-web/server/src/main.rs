@@ -15,7 +15,7 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Config;
@@ -141,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listen_addr = cfg.web.listen.clone();
     let static_dir = PathBuf::from(&cfg.web.static_dir);
+    let allowed_origins = cfg.web.allowed_origins.clone();
 
     let state = Arc::new(AppState {
         config: cfg,
@@ -219,10 +220,32 @@ async fn main() -> anyhow::Result<()> {
         ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html")))
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = {
+        let base = CorsLayer::new()
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+                axum::http::Method::OPTIONS,
+            ])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::COOKIE,
+            ])
+            .allow_credentials(true);
+
+        if allowed_origins.is_empty() {
+            base.allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+        } else {
+            let origins: Vec<axum::http::HeaderValue> = allowed_origins
+                .iter()
+                .filter_map(|o| o.parse().ok())
+                .collect();
+            base.allow_origin(origins)
+        }
+    };
 
     let app = Router::new()
         .nest("/api", api_routes)

@@ -116,12 +116,17 @@ async fn main() -> Result<()> {
 
     let max_msg = config.server.max_message_size as usize;
 
+    let auth_interceptor = services::auth::make_auth_interceptor(
+        config.auth.enabled,
+        config.auth.tokens.clone(),
+    );
+
+    let svc = ForgeServiceServer::new(service)
+        .max_decoding_message_size(max_msg)
+        .max_encoding_message_size(max_msg);
+
     Server::builder()
-        .add_service(
-            ForgeServiceServer::new(service)
-                .max_decoding_message_size(max_msg)
-                .max_encoding_message_size(max_msg),
-        )
+        .add_service(tonic::service::interceptor::InterceptedService::new(svc, auth_interceptor))
         .serve(addr)
         .await?;
 

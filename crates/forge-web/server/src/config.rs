@@ -17,6 +17,9 @@ pub struct WebConfig {
     pub listen: String,
     /// Path to the static UI build output directory
     pub static_dir: String,
+    /// Allowed CORS origins. Empty = mirror request origin (same-origin friendly).
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +45,7 @@ impl Default for Config {
             web: WebConfig {
                 listen: "0.0.0.0:3000".to_string(),
                 static_dir: "./ui/dist".to_string(),
+                allowed_origins: vec![],
             },
             server: ServerConfig {
                 grpc_url: "http://localhost:9876".to_string(),
