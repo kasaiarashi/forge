@@ -1,0 +1,222 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─── Build React UI (platform-independent) ───
+  build-ui:
+    name: Build Web UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: crates/forge-web/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: crates/forge-web/ui
+        run: npm ci && npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forge-web-ui-dist
+          path: crates/forge-web/ui/dist/
+
+  # ─── Build forge CLI (Windows only) ───
+  build-client:
+    name: Build Client (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '27.x'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-client-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-cargo-client-
+
+      - name: Build forge CLI
+        run: cargo build --release --bin forge
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forge-windows-client
+          path: target/release/forge.exe
+
+  # ─── Build server binaries (all platforms) ───
+  build-server:
+    name: Build Server (${{ matrix.name }})
+    needs: build-ui
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: Windows x64
+            artifact: forge-server-windows
+            exe_suffix: .exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: Linux x64
+            artifact: forge-server-linux-amd64
+            exe_suffix: ''
+          - os: macos-13
+            target: x86_64-apple-darwin
+            name: macOS x64
+            artifact: forge-server-macos-amd64
+            exe_suffix: ''
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: macOS ARM64
+            artifact: forge-server-macos-arm64
+            exe_suffix: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '27.x'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-server-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-server-
+
+      - name: Build server binaries
+        run: cargo build --release --bin forge-server --bin forge-web
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/release/forge-server${{ matrix.exe_suffix }}
+            target/release/forge-web${{ matrix.exe_suffix }}
+
+  # ─── Package and release ───
+  release:
+    name: Create Release
+    needs: [build-client, build-server]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: Get-ChildItem -Recurse artifacts/ | Select-Object FullName
+        shell: pwsh
+
+      # ── Windows Client Installer ──
+      - name: Build Windows Client Installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DAppVersion="${{ github.ref_name }}" `
+            /DArtifactDir="..\..\artifacts" `
+            /DPluginDir="..\..\plugin\ForgeSourceControl\Plugins\ForgeSourceControl" `
+            installers\windows\forge-client.iss
+        shell: pwsh
+
+      # ── Windows Server Installer ──
+      - name: Build Windows Server Installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DAppVersion="${{ github.ref_name }}" `
+            /DArtifactDir="..\..\artifacts" `
+            /DConfigDir="..\config" `
+            installers\windows\forge-server.iss
+        shell: pwsh
+
+      # ── Linux x64 tar.gz ──
+      - name: Package Linux x64
+        shell: bash
+        run: |
+          mkdir -p staging/forge-server-linux-amd64
+          cp artifacts/forge-server-linux-amd64/forge-server staging/forge-server-linux-amd64/
+          cp artifacts/forge-server-linux-amd64/forge-web    staging/forge-server-linux-amd64/
+          cp -r artifacts/forge-web-ui-dist                  staging/forge-server-linux-amd64/ui
+          cp installers/config/forge-server.toml             staging/forge-server-linux-amd64/
+          cp installers/config/forge-web.toml                staging/forge-server-linux-amd64/
+          cp installers/linux/install.sh                     staging/forge-server-linux-amd64/
+          chmod +x staging/forge-server-linux-amd64/forge-server
+          chmod +x staging/forge-server-linux-amd64/forge-web
+          chmod +x staging/forge-server-linux-amd64/install.sh
+          cd staging && tar czf ../forge-server-linux-amd64.tar.gz forge-server-linux-amd64
+
+      # ── macOS x64 tar.gz ──
+      - name: Package macOS x64
+        shell: bash
+        run: |
+          mkdir -p staging/forge-server-macos-amd64
+          cp artifacts/forge-server-macos-amd64/forge-server staging/forge-server-macos-amd64/
+          cp artifacts/forge-server-macos-amd64/forge-web    staging/forge-server-macos-amd64/
+          cp -r artifacts/forge-web-ui-dist                  staging/forge-server-macos-amd64/ui
+          cp installers/config/forge-server.toml             staging/forge-server-macos-amd64/
+          cp installers/config/forge-web.toml                staging/forge-server-macos-amd64/
+          cp installers/macos/install.sh                     staging/forge-server-macos-amd64/
+          chmod +x staging/forge-server-macos-amd64/forge-server
+          chmod +x staging/forge-server-macos-amd64/forge-web
+          chmod +x staging/forge-server-macos-amd64/install.sh
+          cd staging && tar czf ../forge-server-macos-amd64.tar.gz forge-server-macos-amd64
+
+      # ── macOS ARM64 tar.gz ──
+      - name: Package macOS ARM64
+        shell: bash
+        run: |
+          mkdir -p staging/forge-server-macos-arm64
+          cp artifacts/forge-server-macos-arm64/forge-server staging/forge-server-macos-arm64/
+          cp artifacts/forge-server-macos-arm64/forge-web    staging/forge-server-macos-arm64/
+          cp -r artifacts/forge-web-ui-dist                  staging/forge-server-macos-arm64/ui
+          cp installers/config/forge-server.toml             staging/forge-server-macos-arm64/
+          cp installers/config/forge-web.toml                staging/forge-server-macos-arm64/
+          cp installers/macos/install.sh                     staging/forge-server-macos-arm64/
+          chmod +x staging/forge-server-macos-arm64/forge-server
+          chmod +x staging/forge-server-macos-arm64/forge-web
+          chmod +x staging/forge-server-macos-arm64/install.sh
+          cd staging && tar czf ../forge-server-macos-arm64.tar.gz forge-server-macos-arm64
+
+      # ── Create GitHub Release ──
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            installers/windows/Output/ForgeClient-Windows-x64-Setup.exe
+            installers/windows/Output/ForgeServer-Windows-x64-Setup.exe
+            forge-server-linux-amd64.tar.gz
+            forge-server-macos-amd64.tar.gz
+            forge-server-macos-arm64.tar.gz

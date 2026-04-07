@@ -104,8 +104,14 @@ async fn main() -> Result<()> {
     info!("Storage: {}", base.display());
     info!("Database: {}", db_path.display());
 
+    let max_msg = config.server.max_message_size as usize;
+
     Server::builder()
-        .add_service(ForgeServiceServer::new(service))
+        .add_service(
+            ForgeServiceServer::new(service)
+                .max_decoding_message_size(max_msg)
+                .max_encoding_message_size(max_msg),
+        )
         .serve(addr)
         .await?;
 

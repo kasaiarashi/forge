@@ -27,9 +27,11 @@ pub struct ServerSection {
     #[serde(default = "default_listen")]
     pub listen: String,
 
-    /// Maximum upload size per push stream (bytes).
+    /// Maximum size per gRPC message in bytes (not total push size).
+    /// Individual objects larger than this are rejected.
+    /// Push streams have no total size limit.
     #[serde(default = "default_max_upload")]
-    pub max_upload_size: u64,
+    pub max_message_size: u64,
 
     /// Number of worker threads (0 = auto, uses all cores).
     #[serde(default)]
@@ -63,7 +65,7 @@ fn default_listen() -> String {
     "0.0.0.0:9876".into()
 }
 fn default_max_upload() -> u64 {
-    512 * 1024 * 1024 // 512 MiB
+    256 * 1024 * 1024 // 256 MiB per message (objects are chunked, so this is generous)
 }
 fn default_base_path() -> PathBuf {
     PathBuf::from("./forge-data")
@@ -76,7 +78,7 @@ impl Default for ServerSection {
     fn default() -> Self {
         Self {
             listen: default_listen(),
-            max_upload_size: default_max_upload(),
+            max_message_size: default_max_upload(),
             workers: 0,
         }
     }
@@ -123,8 +125,10 @@ impl ServerConfig {
 # Address and port to listen on.
 listen = "0.0.0.0:9876"
 
-# Maximum upload size per push (bytes). Default 512 MiB.
-max_upload_size = 536870912
+# Maximum size per gRPC message in bytes. Default 256 MiB.
+# This is per-message, NOT total push size — push streams are unlimited.
+# Objects are chunked by FastCDC so individual messages are typically small.
+max_message_size = 268435456
 
 # Worker threads. 0 = auto (all CPU cores).
 workers = 0
