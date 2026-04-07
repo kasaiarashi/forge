@@ -1,0 +1,19 @@
+# UE build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+.vs/
+*.sln
+*.suo
+
+# Keep plugin binaries
+!Plugins/ForgeSourceControl/Binaries/
+!Plugins/ForgeSourceControl/Binaries/**
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Forge workspace
+.forge/

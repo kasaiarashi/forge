@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "ForgeSourceControlState.h"
+#include "Styling/AppStyle.h"
 
 #define LOCTEXT_NAMESPACE "ForgeSourceControl"
 
@@ -29,23 +30,18 @@ FForgeSourceControlState::FindHistoryRevision(const FString& InRevision) const
 	return nullptr;
 }
 
-FName FForgeSourceControlState::GetIconName() const
+FSlateIcon FForgeSourceControlState::GetIcon() const
 {
 	switch (FileState)
 	{
-	case EFileState::Modified:      return FName("Subversion.CheckedOut");
-	case EFileState::Added:         return FName("Subversion.OpenForAdd");
-	case EFileState::Deleted:       return FName("Subversion.MarkedForDelete");
-	case EFileState::Locked:        return FName("Subversion.CheckedOut");
-	case EFileState::LockedByOther: return FName("Subversion.CheckedOutByOtherUser");
-	case EFileState::Untracked:     return FName("Subversion.NotInDepot");
-	default:                        return NAME_None;
+	case EFileState::Modified:      return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Perforce.CheckedOut");
+	case EFileState::Added:         return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Perforce.OpenForAdd");
+	case EFileState::Deleted:       return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Perforce.MarkedForDelete");
+	case EFileState::Locked:        return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Perforce.CheckedOut");
+	case EFileState::LockedByOther: return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Perforce.CheckedOutByOtherUser");
+	case EFileState::Untracked:     return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Perforce.NotInDepot");
+	default:                        return FSlateIcon();
 	}
-}
-
-FName FForgeSourceControlState::GetSmallIconName() const
-{
-	return GetIconName();
 }
 
 FText FForgeSourceControlState::GetDisplayName() const

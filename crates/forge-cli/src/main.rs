@@ -95,6 +95,22 @@ enum Commands {
     /// List active locks
     Locks,
 
+    /// Unstage files (undo forge add)
+    Unstage {
+        /// Files or directories to unstage (use . for all)
+        paths: Vec<String>,
+    },
+
+    /// Restore files (git-compatible alias)
+    Restore {
+        /// Unstage files (like git restore --staged)
+        #[arg(long)]
+        staged: bool,
+
+        /// Files or directories to restore
+        paths: Vec<String>,
+    },
+
     /// Create or list branches
     Branch {
         /// Branch name (omit to list)
@@ -134,6 +150,105 @@ enum Commands {
         /// Value to set
         value: Option<String>,
     },
+
+    /// Create or list tags
+    Tag {
+        /// Tag name (omit to list)
+        name: Option<String>,
+
+        /// Commit hash (defaults to HEAD)
+        #[arg(long)]
+        commit: Option<String>,
+
+        /// Delete the tag
+        #[arg(short, long)]
+        delete: bool,
+    },
+
+    /// Remove files from the working tree and index
+    Rm {
+        /// Files to remove
+        paths: Vec<String>,
+
+        /// Only remove from the index (keep file on disk)
+        #[arg(long)]
+        cached: bool,
+    },
+
+    /// Move or rename a file
+    Mv {
+        /// Source path
+        source: String,
+
+        /// Destination path
+        dest: String,
+    },
+
+    /// Show commit details and diff
+    Show {
+        /// Commit hash (defaults to HEAD)
+        commit: Option<String>,
+    },
+
+    /// Merge a branch into the current branch
+    Merge {
+        /// Branch to merge
+        branch: String,
+    },
+
+    /// Apply changes from a specific commit
+    #[command(name = "cherry-pick")]
+    CherryPick {
+        /// Commit to cherry-pick
+        commit: String,
+    },
+
+    /// Checkout a branch or restore files
+    Checkout {
+        /// Branch name or commit hash
+        target: Option<String>,
+        /// File paths to restore (after --)
+        #[arg(last = true)]
+        paths: Vec<String>,
+    },
+
+    /// Remove untracked files from the working tree
+    Clean {
+        /// Force deletion (required to actually delete)
+        #[arg(short, long)]
+        force: bool,
+
+        /// Also remove untracked directories
+        #[arg(short = 'd', long)]
+        directories: bool,
+    },
+
+    /// Reset HEAD to a specific commit
+    Reset {
+        /// Target commit (defaults to HEAD)
+        commit: Option<String>,
+        /// Soft reset (move HEAD only)
+        #[arg(long)]
+        soft: bool,
+        /// Hard reset (restore working tree)
+        #[arg(long)]
+        hard: bool,
+    },
+
+    /// Stash working directory changes
+    Stash {
+        /// Action: push (default), pop, apply, list, drop
+        action: Option<String>,
+        /// Stash message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
+    /// Revert a commit by creating a new inverse commit
+    Revert {
+        /// Commit to revert
+        commit: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -154,11 +269,30 @@ fn main() -> anyhow::Result<()> {
         Commands::Lock { path, reason } => commands::lock::run(path, reason)?,
         Commands::Unlock { path, force } => commands::unlock::run(path, force)?,
         Commands::Locks => commands::locks::run()?,
+        Commands::Unstage { paths } => commands::unstage::run(paths)?,
+        Commands::Restore { staged, paths } => {
+            if staged {
+                commands::unstage::run(paths)?;
+            } else {
+                anyhow::bail!("forge restore currently only supports --staged. Use: forge restore --staged <path>");
+            }
+        }
         Commands::Branch { name, delete } => commands::branch::run(name, delete)?,
         Commands::Switch { name } => commands::switch::run(name)?,
         Commands::Ignore { patterns } => commands::ignore::run(patterns)?,
         Commands::Remote { action, args } => commands::remote::run(action, args)?,
         Commands::Config { key, value } => commands::config_cmd::run(key, value)?,
+        Commands::Tag { name, commit, delete } => commands::tag::run(name, commit, delete)?,
+        Commands::Rm { paths, cached } => commands::rm::run(paths, cached)?,
+        Commands::Mv { source, dest } => commands::mv::run(source, dest)?,
+        Commands::Show { commit } => commands::show::run(commit)?,
+        Commands::Merge { branch } => commands::merge::run(branch)?,
+        Commands::CherryPick { commit } => commands::cherry_pick::run(commit)?,
+        Commands::Checkout { target, paths } => commands::checkout::run(target, paths)?,
+        Commands::Clean { force, directories } => commands::clean::run(force, directories)?,
+        Commands::Reset { commit, soft, hard } => commands::reset::run(commit, soft, hard)?,
+        Commands::Stash { action, message } => commands::stash::run(action, message)?,
+        Commands::Revert { commit } => commands::revert::run(commit)?,
     }
 
     Ok(())

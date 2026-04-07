@@ -1,0 +1,4 @@
+#include "ForgeVCS.h"
+#include "Modules/ModuleManager.h"
+
+IMPLEMENT_PRIMARY_GAME_MODULE( FDefaultGameModuleImpl, ForgeVCS, "ForgeVCS" );

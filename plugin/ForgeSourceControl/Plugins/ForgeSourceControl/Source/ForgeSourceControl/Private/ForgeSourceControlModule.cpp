@@ -3,7 +3,7 @@
 
 #include "ForgeSourceControlModule.h"
 #include "ForgeSourceControlProvider.h"
-#include "ISourceControlModule.h"
+#include "Features/IModularFeatures.h"
 #include "Modules/ModuleManager.h"
 
 #define LOCTEXT_NAMESPACE "ForgeSourceControl"
@@ -11,16 +11,12 @@
 void FForgeSourceControlModule::StartupModule()
 {
 	Provider = new FForgeSourceControlProvider();
-	ISourceControlModule::Get().RegisterProvider(
-		FName("Forge"),
-		LOCTEXT("ForgeProviderName", "Forge"),
-		*Provider
-	);
+	IModularFeatures::Get().RegisterModularFeature("SourceControl", Provider);
 }
 
 void FForgeSourceControlModule::ShutdownModule()
 {
-	ISourceControlModule::Get().UnregisterProvider(*Provider);
+	IModularFeatures::Get().UnregisterModularFeature("SourceControl", Provider);
 	delete Provider;
 	Provider = nullptr;
 }

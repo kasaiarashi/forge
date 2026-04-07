@@ -35,16 +35,18 @@ pub fn run(path: String, reason: Option<String>) -> Result<()> {
             .into_inner();
 
         if resp.granted {
-            println!("Locked: {}", rel_path);
+            println!("\x1b[32mLocked:\x1b[0m {}", rel_path);
         } else if let Some(lock) = resp.existing_lock {
             bail!(
-                "File '{}' is locked by {} (since {})",
+                "File '{}' is already locked by '{}' (since {})",
                 rel_path,
                 lock.owner,
                 chrono::DateTime::from_timestamp(lock.created_at, 0)
                     .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
                     .unwrap_or_else(|| "unknown".into())
             );
+        } else {
+            bail!("Failed to acquire lock on '{}': server denied without details", rel_path);
         }
 
         Ok(())
