@@ -57,3 +57,4 @@ forge-core = { path = "crates/forge-core" }
 forge-proto = { path = "crates/forge-proto" }
 forge-ignore = { path = "crates/forge-ignore" }
 tempfile = "3"
+indicatif = "0.17"

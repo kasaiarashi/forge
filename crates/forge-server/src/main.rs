@@ -68,8 +68,13 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
-    // Load config file (uses defaults if file doesn't exist).
-    let mut config = ServerConfig::load(std::path::Path::new(&cli.config))?;
+    // Load config file; auto-create default if it doesn't exist.
+    let config_path = std::path::Path::new(&cli.config);
+    if !config_path.exists() {
+        std::fs::write(config_path, ServerConfig::generate_default())?;
+        info!("Created default config: {}", config_path.display());
+    }
+    let mut config = ServerConfig::load(config_path)?;
 
     // CLI overrides.
     if let Some(listen) = cli.listen {

@@ -56,6 +56,8 @@ impl ForgeService for ForgeGrpcService {
             // Read repo from the first chunk.
             if store.is_none() {
                 let repo = repo_name(&chunk.repo);
+                // Auto-register repo if it doesn't exist.
+                let _ = self.db.create_repo(repo, "");
                 store = Some(self.fs.repo_store(repo));
             }
 
@@ -197,6 +199,9 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<UpdateRefResponse>, Status> {
         let req = request.into_inner();
         let repo = repo_name(&req.repo);
+
+        // Auto-register repo if it doesn't exist (first push creates it).
+        let _ = self.db.create_repo(repo, "");
 
         let success = self
             .db
