@@ -239,6 +239,7 @@ message TreeEntryInfo {
     string kind = 2;
     string hash = 3;
     uint64 size = 4;
+    string asset_class = 5;
 }
 
 message GetFileContentRequest {
@@ -252,6 +253,14 @@ message GetFileContentResponse {
     uint64 size = 2;
     bool is_binary = 3;
     string hash = 4;
+    AssetMetadata asset_metadata = 5;
+}
+
+message AssetMetadata {
+    string asset_class = 1;
+    string engine_version = 2;
+    repeated string package_flags = 3;
+    repeated string dependencies = 4;
 }
 
 message GetCommitDetailRequest {

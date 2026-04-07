@@ -6,6 +6,7 @@ members = [
     "crates/forge-proto",
     "crates/forge-ignore",
     "crates/forge-web/server",
+    "crates/uasset",
 ]
 resolver = "2"
 
@@ -58,3 +59,4 @@ forge-proto = { path = "crates/forge-proto" }
 forge-ignore = { path = "crates/forge-ignore" }
 tempfile = "3"
 indicatif = "0.17"
+uasset = { path = "crates/uasset" }

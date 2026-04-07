@@ -259,6 +259,68 @@ export default function FileView() {
           </div>
         </div>
 
+        {/* UE Asset metadata panel */}
+        {file?.asset_metadata && (
+          <div style={{
+            padding: '12px 16px',
+            borderBottom: '1px solid var(--border-default)',
+            backgroundColor: 'var(--bg-subtle)',
+            fontSize: '13px',
+          }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', alignItems: 'center' }}>
+              {file.asset_metadata.asset_class && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ color: 'var(--fg-muted)' }}>Class:</span>
+                  <span style={{
+                    padding: '2px 8px',
+                    borderRadius: '12px',
+                    backgroundColor: 'var(--bg-accent-emphasis, #1f6feb)',
+                    color: '#fff',
+                    fontWeight: 600,
+                    fontSize: '12px',
+                  }}>
+                    {file.asset_metadata.asset_class}
+                  </span>
+                </div>
+              )}
+              {file.asset_metadata.engine_version && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ color: 'var(--fg-muted)' }}>Engine:</span>
+                  <span style={{ fontWeight: 500 }}>UE {file.asset_metadata.engine_version}</span>
+                </div>
+              )}
+              {file.asset_metadata.package_flags.length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                  <span style={{ color: 'var(--fg-muted)' }}>Flags:</span>
+                  {file.asset_metadata.package_flags.map((flag: string) => (
+                    <span key={flag} style={{
+                      padding: '1px 6px',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-default)',
+                      fontSize: '11px',
+                      color: 'var(--fg-muted)',
+                    }}>
+                      {flag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            {file.asset_metadata.dependencies.length > 0 && (
+              <details style={{ marginTop: '8px' }}>
+                <summary style={{ cursor: 'pointer', color: 'var(--fg-muted)', fontSize: '12px' }}>
+                  Dependencies ({file.asset_metadata.dependencies.length} packages)
+                </summary>
+                <ul style={{ margin: '4px 0 0 0', padding: '0 0 0 20px', fontSize: '12px', color: 'var(--fg-muted)' }}>
+                  {file.asset_metadata.dependencies.map((dep: string) => (
+                    <li key={dep}>{dep}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )}
+
         {/* File content */}
         {file?.is_binary ? (
           <div style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)' }}>

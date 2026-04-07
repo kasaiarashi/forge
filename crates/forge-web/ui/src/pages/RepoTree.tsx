@@ -369,6 +369,23 @@ export default function RepoTree() {
                 >
                   {entry.name}
                 </Link>
+                {entry.asset_class && (
+                  <span style={{
+                    display: 'inline-block',
+                    marginLeft: '8px',
+                    padding: '1px 6px',
+                    fontSize: '11px',
+                    borderRadius: '8px',
+                    backgroundColor: 'var(--bg-accent-emphasis, #1f6feb)',
+                    color: '#fff',
+                    fontWeight: 500,
+                    lineHeight: '16px',
+                    whiteSpace: 'nowrap',
+                    flexShrink: 0,
+                  }}>
+                    {entry.asset_class}
+                  </span>
+                )}
 
                 {/* Last commit message placeholder */}
                 <span style={{ color: 'var(--fg-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
