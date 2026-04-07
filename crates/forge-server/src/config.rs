@@ -30,7 +30,7 @@ pub struct ServerSection {
     /// Maximum size per gRPC message in bytes (not total push size).
     /// Individual objects larger than this are rejected.
     /// Push streams have no total size limit.
-    #[serde(default = "default_max_upload")]
+    #[serde(default = "default_max_upload", alias = "max_upload_size")]
     pub max_message_size: u64,
 
     /// Number of worker threads (0 = auto, uses all cores).
