@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ue5-compile": {
+      "type": "stdio",
+      "command": "node",
+      "args": [".claude/mcp/compile-server.mjs"],
+      "cwd": "W:/Projects/forge",
+      "env": {
+        "PROJECT_ROOT": "W:/Projects/forge"
+      }
+    }
+  }
+}

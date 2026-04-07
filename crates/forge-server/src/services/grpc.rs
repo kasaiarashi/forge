@@ -18,6 +18,8 @@ pub struct ForgeGrpcService {
     pub fs: Arc<FsStorage>,
     pub db: Arc<MetadataDb>,
     pub start_time: Instant,
+    /// Channel to queue workflow runs for execution (Phase 3).
+    pub workflow_engine: Option<tokio::sync::mpsc::Sender<i64>>,
 }
 
 /// Normalize repo name: empty string defaults to "default".
@@ -79,11 +81,21 @@ impl ForgeService for ForgeGrpcService {
                 let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
                     .map_err(|e| Status::internal(e.to_string()))?;
 
-                store
-                    .as_ref()
-                    .unwrap()
-                    .put(&forge_hash, &current_buf)
-                    .map_err(|e| Status::internal(e.to_string()))?;
+                if chunk.object_type == 1 {
+                    // Pre-compressed data — store directly without re-compressing.
+                    store
+                        .as_ref()
+                        .unwrap()
+                        .put_raw(&forge_hash, &current_buf)
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                } else {
+                    // Uncompressed data — compress and store.
+                    store
+                        .as_ref()
+                        .unwrap()
+                        .put(&forge_hash, &current_buf)
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                }
 
                 received.push(chunk.hash.clone());
                 current_buf.clear();
@@ -207,6 +219,15 @@ impl ForgeService for ForgeGrpcService {
             .db
             .update_ref(repo, &req.ref_name, &req.old_hash, &req.new_hash)
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Check push triggers on successful ref update.
+        if success {
+            if let Some(engine_tx) = &self.workflow_engine {
+                crate::services::actions::trigger::check_push_triggers(
+                    &self.db, engine_tx, repo, &req.ref_name, &req.new_hash,
+                );
+            }
+        }
 
         Ok(Response::new(UpdateRefResponse {
             success,
@@ -804,6 +825,464 @@ impl ForgeService for ForgeGrpcService {
             total_size_bytes: 0,
             repos: repo_names,
             active_locks: total_locks,
+        }))
+    }
+
+    // ================================================================
+    // Actions — Workflows
+    // ================================================================
+
+    async fn list_workflows(
+        &self,
+        request: Request<ListWorkflowsRequest>,
+    ) -> Result<Response<ListWorkflowsResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let workflows = self.db.list_workflows(repo)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let infos = workflows.into_iter().map(|w| WorkflowInfo {
+            id: w.id, repo: w.repo, name: w.name, yaml: w.yaml,
+            enabled: w.enabled, created_at: w.created_at, updated_at: w.updated_at,
+        }).collect();
+        Ok(Response::new(ListWorkflowsResponse { workflows: infos }))
+    }
+
+    async fn create_workflow(
+        &self,
+        request: Request<CreateWorkflowRequest>,
+    ) -> Result<Response<CreateWorkflowResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        // Validate YAML before saving.
+        if let Err(e) = crate::services::actions::yaml::WorkflowDef::parse(&req.yaml) {
+            return Ok(Response::new(CreateWorkflowResponse {
+                success: false, error: format!("Invalid workflow YAML: {e}"), id: 0,
+            }));
+        }
+        match self.db.create_workflow(repo, &req.name, &req.yaml) {
+            Ok(id) => Ok(Response::new(CreateWorkflowResponse { success: true, error: String::new(), id })),
+            Err(e) => Ok(Response::new(CreateWorkflowResponse { success: false, error: e.to_string(), id: 0 })),
+        }
+    }
+
+    async fn update_workflow(
+        &self,
+        request: Request<UpdateWorkflowRequest>,
+    ) -> Result<Response<UpdateWorkflowResponse>, Status> {
+        let req = request.into_inner();
+        if !req.yaml.is_empty() {
+            if let Err(e) = crate::services::actions::yaml::WorkflowDef::parse(&req.yaml) {
+                return Ok(Response::new(UpdateWorkflowResponse {
+                    success: false, error: format!("Invalid workflow YAML: {e}"),
+                }));
+            }
+        }
+        match self.db.update_workflow(req.id, &req.name, &req.yaml, req.enabled) {
+            Ok(true) => Ok(Response::new(UpdateWorkflowResponse { success: true, error: String::new() })),
+            Ok(false) => Ok(Response::new(UpdateWorkflowResponse { success: false, error: "Workflow not found".into() })),
+            Err(e) => Ok(Response::new(UpdateWorkflowResponse { success: false, error: e.to_string() })),
+        }
+    }
+
+    async fn delete_workflow(
+        &self,
+        request: Request<DeleteWorkflowRequest>,
+    ) -> Result<Response<DeleteWorkflowResponse>, Status> {
+        let req = request.into_inner();
+        match self.db.delete_workflow(req.id) {
+            Ok(true) => Ok(Response::new(DeleteWorkflowResponse { success: true, error: String::new() })),
+            Ok(false) => Ok(Response::new(DeleteWorkflowResponse { success: false, error: "Workflow not found".into() })),
+            Err(e) => Ok(Response::new(DeleteWorkflowResponse { success: false, error: e.to_string() })),
+        }
+    }
+
+    // ================================================================
+    // Actions — Runs
+    // ================================================================
+
+    async fn trigger_workflow(
+        &self,
+        request: Request<TriggerWorkflowRequest>,
+    ) -> Result<Response<TriggerWorkflowResponse>, Status> {
+        let req = request.into_inner();
+        let workflow = self.db.get_workflow(req.workflow_id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Workflow not found"))?;
+        if !workflow.enabled {
+            return Ok(Response::new(TriggerWorkflowResponse {
+                success: false, error: "Workflow is disabled".into(), run_id: 0,
+            }));
+        }
+        // Resolve commit hash from the ref.
+        let ref_name = if req.ref_name.is_empty() { "refs/heads/main".to_string() } else { req.ref_name };
+        let commit_hash = self.db.get_ref(&workflow.repo, &ref_name)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map(|h| hex::encode(&h))
+            .unwrap_or_default();
+
+        let run_id = self.db.create_run(
+            &workflow.repo, workflow.id, "manual", &ref_name, &commit_hash, &req.triggered_by,
+        ).map_err(|e| Status::internal(e.to_string()))?;
+
+        // Queue the run for execution (engine integration in Phase 3).
+        if let Some(engine) = &self.workflow_engine {
+            let _ = engine.send(run_id);
+        }
+
+        Ok(Response::new(TriggerWorkflowResponse { success: true, error: String::new(), run_id }))
+    }
+
+    async fn list_workflow_runs(
+        &self,
+        request: Request<ListWorkflowRunsRequest>,
+    ) -> Result<Response<ListWorkflowRunsResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let (runs, total) = self.db.list_runs(repo, req.workflow_id, req.limit, req.offset)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let infos = runs.into_iter().map(|r| WorkflowRunInfo {
+            id: r.id, repo: r.repo, workflow_id: r.workflow_id,
+            workflow_name: r.workflow_name, trigger: r.trigger,
+            trigger_ref: r.trigger_ref, commit_hash: r.commit_hash,
+            status: r.status, started_at: r.started_at.unwrap_or(0),
+            finished_at: r.finished_at.unwrap_or(0), created_at: r.created_at,
+            triggered_by: r.triggered_by,
+        }).collect();
+        Ok(Response::new(ListWorkflowRunsResponse { runs: infos, total }))
+    }
+
+    async fn get_workflow_run(
+        &self,
+        request: Request<GetWorkflowRunRequest>,
+    ) -> Result<Response<GetWorkflowRunResponse>, Status> {
+        let req = request.into_inner();
+        let run = self.db.get_run(req.run_id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Run not found"))?;
+        let steps = self.db.list_steps(req.run_id)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let artifacts_list = self.db.list_artifacts(req.run_id)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let run_info = WorkflowRunInfo {
+            id: run.id, repo: run.repo, workflow_id: run.workflow_id,
+            workflow_name: run.workflow_name, trigger: run.trigger,
+            trigger_ref: run.trigger_ref, commit_hash: run.commit_hash,
+            status: run.status, started_at: run.started_at.unwrap_or(0),
+            finished_at: run.finished_at.unwrap_or(0), created_at: run.created_at,
+            triggered_by: run.triggered_by,
+        };
+        let step_infos = steps.into_iter().map(|s| StepInfo {
+            id: s.id, job_name: s.job_name, step_index: s.step_index,
+            name: s.name, status: s.status, exit_code: s.exit_code.unwrap_or(-1),
+            log: s.log, started_at: s.started_at.unwrap_or(0),
+            finished_at: s.finished_at.unwrap_or(0),
+        }).collect();
+        let artifact_infos = artifacts_list.into_iter().map(|a| ArtifactInfo {
+            id: a.id, run_id: a.run_id, name: a.name,
+            size_bytes: a.size_bytes, created_at: a.created_at,
+        }).collect();
+
+        Ok(Response::new(GetWorkflowRunResponse {
+            run: Some(run_info), steps: step_infos, artifacts: artifact_infos,
+        }))
+    }
+
+    async fn cancel_workflow_run(
+        &self,
+        request: Request<CancelWorkflowRunRequest>,
+    ) -> Result<Response<CancelWorkflowRunResponse>, Status> {
+        let req = request.into_inner();
+        let run = self.db.get_run(req.run_id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Run not found"))?;
+        if run.status != "queued" && run.status != "running" {
+            return Ok(Response::new(CancelWorkflowRunResponse {
+                success: false, error: format!("Cannot cancel run in '{}' state", run.status),
+            }));
+        }
+        self.db.update_run_status(req.run_id, "cancelled")
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(CancelWorkflowRunResponse { success: true, error: String::new() }))
+    }
+
+    // ================================================================
+    // Actions — Artifacts & Releases
+    // ================================================================
+
+    async fn list_artifacts(
+        &self,
+        request: Request<ListArtifactsRequest>,
+    ) -> Result<Response<ListArtifactsResponse>, Status> {
+        let req = request.into_inner();
+        let artifacts = self.db.list_artifacts(req.run_id)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let infos = artifacts.into_iter().map(|a| ArtifactInfo {
+            id: a.id, run_id: a.run_id, name: a.name,
+            size_bytes: a.size_bytes, created_at: a.created_at,
+        }).collect();
+        Ok(Response::new(ListArtifactsResponse { artifacts: infos }))
+    }
+
+    async fn list_releases(
+        &self,
+        request: Request<ListReleasesRequest>,
+    ) -> Result<Response<ListReleasesResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let releases = self.db.list_releases(repo)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let mut infos = Vec::new();
+        for r in releases {
+            let artifact_ids = self.db.get_release_artifact_ids(r.id)
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let mut artifacts = Vec::new();
+            for aid in artifact_ids {
+                if let Ok(Some(a)) = self.db.get_artifact(aid) {
+                    artifacts.push(ArtifactInfo {
+                        id: a.id, run_id: a.run_id, name: a.name,
+                        size_bytes: a.size_bytes, created_at: a.created_at,
+                    });
+                }
+            }
+            infos.push(ReleaseInfo {
+                id: r.id, repo: r.repo, tag: r.tag, name: r.name,
+                run_id: r.run_id.unwrap_or(0), created_at: r.created_at, artifacts,
+            });
+        }
+        Ok(Response::new(ListReleasesResponse { releases: infos }))
+    }
+
+    async fn get_release(
+        &self,
+        request: Request<GetReleaseRequest>,
+    ) -> Result<Response<GetReleaseResponse>, Status> {
+        let req = request.into_inner();
+        let r = self.db.get_release(req.release_id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Release not found"))?;
+        let artifact_ids = self.db.get_release_artifact_ids(r.id)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let mut artifacts = Vec::new();
+        for aid in artifact_ids {
+            if let Ok(Some(a)) = self.db.get_artifact(aid) {
+                artifacts.push(ArtifactInfo {
+                    id: a.id, run_id: a.run_id, name: a.name,
+                    size_bytes: a.size_bytes, created_at: a.created_at,
+                });
+            }
+        }
+        Ok(Response::new(GetReleaseResponse {
+            release: Some(ReleaseInfo {
+                id: r.id, repo: r.repo, tag: r.tag, name: r.name,
+                run_id: r.run_id.unwrap_or(0), created_at: r.created_at, artifacts,
+            }),
+        }))
+    }
+
+    // ── Issues ──
+
+    async fn list_issues(
+        &self,
+        request: Request<ListIssuesRequest>,
+    ) -> Result<Response<ListIssuesResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let (issues, total, open_count, closed_count) = self.db
+            .list_issues(repo, &req.status, req.limit, req.offset)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let infos: Vec<IssueInfo> = issues.into_iter().map(|i| {
+            let labels = if i.labels.is_empty() { vec![] } else {
+                i.labels.split(',').map(|s| s.trim().to_string()).collect()
+            };
+            IssueInfo {
+                id: i.id, repo: i.repo, title: i.title, body: i.body,
+                author: i.author, status: i.status, labels,
+                created_at: i.created_at, updated_at: i.updated_at,
+                comment_count: i.comment_count, assignee: i.assignee,
+            }
+        }).collect();
+
+        Ok(Response::new(ListIssuesResponse { issues: infos, total, open_count, closed_count }))
+    }
+
+    async fn create_issue(
+        &self,
+        request: Request<CreateIssueRequest>,
+    ) -> Result<Response<CreateIssueResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let labels = req.labels.join(",");
+        let id = self.db.create_issue(repo, &req.title, &req.body, &req.author, &labels)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(CreateIssueResponse { success: true, error: String::new(), id }))
+    }
+
+    async fn update_issue(
+        &self,
+        request: Request<UpdateIssueRequest>,
+    ) -> Result<Response<UpdateIssueResponse>, Status> {
+        let req = request.into_inner();
+        let labels = req.labels.join(",");
+        let ok = self.db.update_issue(req.id, &req.title, &req.body, &req.status, &labels, &req.assignee)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if !ok {
+            return Ok(Response::new(UpdateIssueResponse { success: false, error: "Issue not found".into() }));
+        }
+        Ok(Response::new(UpdateIssueResponse { success: true, error: String::new() }))
+    }
+
+    // ── Pull Requests ──
+
+    async fn list_pull_requests(
+        &self,
+        request: Request<ListPullRequestsRequest>,
+    ) -> Result<Response<ListPullRequestsResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let (prs, total, open_count, closed_count) = self.db
+            .list_pull_requests(repo, &req.status, req.limit, req.offset)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let infos: Vec<PullRequestInfo> = prs.into_iter().map(|p| {
+            let labels = if p.labels.is_empty() { vec![] } else {
+                p.labels.split(',').map(|s| s.trim().to_string()).collect()
+            };
+            PullRequestInfo {
+                id: p.id, repo: p.repo, title: p.title, body: p.body,
+                author: p.author, status: p.status,
+                source_branch: p.source_branch, target_branch: p.target_branch,
+                labels, created_at: p.created_at, updated_at: p.updated_at,
+                comment_count: p.comment_count, assignee: p.assignee,
+            }
+        }).collect();
+
+        Ok(Response::new(ListPullRequestsResponse { pull_requests: infos, total, open_count, closed_count }))
+    }
+
+    async fn create_pull_request(
+        &self,
+        request: Request<CreatePullRequestRequest>,
+    ) -> Result<Response<CreatePullRequestResponse>, Status> {
+        let req = request.into_inner();
+        let repo = repo_name(&req.repo);
+        let labels = req.labels.join(",");
+        let id = self.db.create_pull_request(
+            repo, &req.title, &req.body, &req.author,
+            &req.source_branch, &req.target_branch, &labels,
+        ).map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(CreatePullRequestResponse { success: true, error: String::new(), id }))
+    }
+
+    async fn update_pull_request(
+        &self,
+        request: Request<UpdatePullRequestRequest>,
+    ) -> Result<Response<UpdatePullRequestResponse>, Status> {
+        let req = request.into_inner();
+        let labels = req.labels.join(",");
+        let ok = self.db.update_pull_request(req.id, &req.title, &req.body, &req.status, &labels, &req.assignee)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if !ok {
+            return Ok(Response::new(UpdatePullRequestResponse { success: false, error: "Pull request not found".into() }));
+        }
+        Ok(Response::new(UpdatePullRequestResponse { success: true, error: String::new() }))
+    }
+
+    // ── Merge Pull Request ──
+
+    async fn merge_pull_request(
+        &self,
+        request: Request<MergePullRequestRequest>,
+    ) -> Result<Response<MergePullRequestResponse>, Status> {
+        let req = request.into_inner();
+
+        // Get the PR to find source/target branches
+        let pr = self.db.get_pull_request(req.id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Pull request not found"))?;
+
+        if pr.status != "open" {
+            return Ok(Response::new(MergePullRequestResponse {
+                success: false,
+                error: format!("Pull request is already {}", pr.status),
+            }));
+        }
+
+        // Get the source branch HEAD hash
+        let source_ref = format!("refs/heads/{}", pr.source_branch);
+        let source_hash = self.db.get_ref(&pr.repo, &source_ref)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found(format!("Source branch '{}' not found", pr.source_branch)))?;
+
+        // Get the target branch HEAD hash
+        let target_ref = format!("refs/heads/{}", pr.target_branch);
+        let target_hash = self.db.get_ref(&pr.repo, &target_ref)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found(format!("Target branch '{}' not found", pr.target_branch)))?;
+
+        // Fast-forward merge: update target branch to point to source branch's HEAD
+        let updated = self.db.update_ref(&pr.repo, &target_ref, &target_hash, &source_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !updated {
+            return Ok(Response::new(MergePullRequestResponse {
+                success: false,
+                error: "Failed to update target branch ref (concurrent modification?)".into(),
+            }));
+        }
+
+        // Mark PR as merged
+        self.db.update_pull_request(req.id, "", "", "merged", "", "")
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(MergePullRequestResponse { success: true, error: String::new() }))
+    }
+
+    // ── Single item getters ──
+
+    async fn get_issue(
+        &self,
+        request: Request<GetIssueRequest>,
+    ) -> Result<Response<GetIssueResponse>, Status> {
+        let req = request.into_inner();
+        let issue = self.db.get_issue(req.id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Issue not found"))?;
+
+        let labels = if issue.labels.is_empty() { vec![] } else {
+            issue.labels.split(',').map(|s| s.trim().to_string()).collect()
+        };
+        Ok(Response::new(GetIssueResponse {
+            issue: Some(IssueInfo {
+                id: issue.id, repo: issue.repo, title: issue.title, body: issue.body,
+                author: issue.author, status: issue.status, labels,
+                created_at: issue.created_at, updated_at: issue.updated_at,
+                comment_count: issue.comment_count, assignee: issue.assignee,
+            }),
+        }))
+    }
+
+    async fn get_pull_request(
+        &self,
+        request: Request<GetPullRequestRequest>,
+    ) -> Result<Response<GetPullRequestResponse>, Status> {
+        let req = request.into_inner();
+        let pr = self.db.get_pull_request(req.id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Pull request not found"))?;
+
+        let labels = if pr.labels.is_empty() { vec![] } else {
+            pr.labels.split(',').map(|s| s.trim().to_string()).collect()
+        };
+        Ok(Response::new(GetPullRequestResponse {
+            pull_request: Some(PullRequestInfo {
+                id: pr.id, repo: pr.repo, title: pr.title, body: pr.body,
+                author: pr.author, status: pr.status,
+                source_branch: pr.source_branch, target_branch: pr.target_branch,
+                labels, created_at: pr.created_at, updated_at: pr.updated_at,
+                comment_count: pr.comment_count, assignee: pr.assignee,
+            }),
         }))
     }
 }

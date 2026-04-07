@@ -4,16 +4,12 @@ import {
   Spinner,
   Flash,
   Button,
-  UnderlineNav,
 } from '@primer/react';
 import {
   GitCommitIcon,
-  CodeIcon,
-  LockIcon,
-  GearIcon,
   CopyIcon,
-  RepoIcon,
 } from '@primer/octicons-react';
+import RepoHeader from '../components/RepoHeader';
 import type { CommitList } from '../api';
 import api, { copyToClipboard } from '../api';
 
@@ -104,43 +100,7 @@ export default function Commits() {
 
   return (
     <div>
-      {/* Repo name header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
-          <RepoIcon size={20} />
-        </span>
-        <Link
-          to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
-        >
-          {repo}
-        </Link>
-      </div>
-
-      {/* Repository tabs */}
-      <UnderlineNav aria-label="Repository">
-        <UnderlineNav.Item
-          as={Link}
-          to={`/${encRepo}/tree/${encodeURIComponent(branch)}`}
-          icon={CodeIcon}
-        >
-          Code
-        </UnderlineNav.Item>
-        <UnderlineNav.Item
-          as={Link}
-          to={`/${encRepo}/commits/${encodeURIComponent(branch)}`}
-          aria-current="page"
-          icon={GitCommitIcon}
-        >
-          Commits
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} icon={LockIcon}>
-          Locks
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
-          Settings
-        </UnderlineNav.Item>
-      </UnderlineNav>
+      <RepoHeader repo={repo} currentTab="commits" activeBranch={branch} />
 
       <div style={{ marginTop: '16px' }}>
         <h2 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '16px' }}>

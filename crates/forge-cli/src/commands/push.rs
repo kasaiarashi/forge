@@ -8,8 +8,6 @@ use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn run(force: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -56,14 +54,13 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
 
     let remote_tip_bytes = refs_resp.refs.get(&ref_name).cloned().unwrap_or_else(|| vec![0u8; 32]);
 
-    // For force push, collect all objects from local tip (ignore remote tip).
     let stop_hash = if force {
         vec![0u8; 32]
     } else {
         remote_tip_bytes.clone()
     };
 
-    // Collect all objects from local tip back to remote tip (or all if force).
+    // Collect all objects from local tip back to remote tip.
     let mut seen = HashSet::new();
     let mut objects_to_push = Vec::new();
     collect_snapshot_objects(ws, &local_tip, &stop_hash, &mut objects_to_push, &mut seen)?;
@@ -95,22 +92,22 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
     };
 
     if !missing.is_empty() {
-        // Calculate total bytes to push.
         let store = forge_core::store::chunk_store::ChunkStore::new(ws.forge_dir().join("objects"));
+
+        // Single pass: read compressed sizes for progress bar without decompressing.
+        let mut raw_objects: Vec<(ForgeHash, Vec<u8>)> = Vec::with_capacity(missing.len());
         let mut total_bytes: u64 = 0;
-        let mut object_sizes: Vec<(ForgeHash, u64)> = Vec::with_capacity(missing.len());
         for hash in &missing {
-            match store.get(hash) {
-                Ok(data) => {
-                    let size = data.len() as u64;
-                    total_bytes += size;
-                    object_sizes.push((*hash, size));
+            match store.get_raw(hash) {
+                Ok(compressed) => {
+                    total_bytes += compressed.len() as u64;
+                    raw_objects.push((*hash, compressed));
                 }
                 Err(_) => continue,
             }
         }
 
-        let obj_count = object_sizes.len();
+        let obj_count = raw_objects.len();
         println!(
             "Pushing {} object(s), {:.2} MiB total",
             obj_count,
@@ -125,76 +122,52 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
                 .expect("valid template")
                 .progress_chars("=>-"),
         );
-        pb.set_message(format!("Writing objects: {obj_count} objects"));
+        pb.set_message(format!("Writing objects: 0/{obj_count} objects"));
 
-        let bytes_sent = Arc::new(AtomicU64::new(0));
-        let objects_sent = Arc::new(AtomicU64::new(0));
+        // Build chunks eagerly, then stream them.
+        // Progress updates happen as gRPC consumes each item from the stream,
+        // so the bar reflects actual network progress, not local buffering.
+        let repo_name_owned = repo_name.to_string();
+        let chunks: Vec<ObjectChunk> = raw_objects
+            .into_iter()
+            .map(|(hash, compressed_data)| ObjectChunk {
+                hash: hash.as_bytes().to_vec(),
+                object_type: 1, // 1 = pre-compressed
+                total_size: compressed_data.len() as u64,
+                offset: 0,
+                data: compressed_data,
+                is_last: true,
+                repo: repo_name_owned.clone(),
+            })
+            .collect();
 
-        // Stream objects to server.
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let mut sent_bytes: u64 = 0;
+        let mut sent_objs: usize = 0;
+        let (tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(2); // tiny buffer = backpressure
 
-        let forge_dir = ws.forge_dir();
-        let repo_name_clone = repo_name.to_string();
-        let bytes_sent_clone = Arc::clone(&bytes_sent);
-        let objects_sent_clone = Arc::clone(&objects_sent);
-        let obj_count_u64 = obj_count as u64;
-
-        tokio::spawn(async move {
-            let store = forge_core::store::chunk_store::ChunkStore::new(forge_dir.join("objects"));
-            for (hash, _) in object_sizes {
-                match store.get(&hash) {
-                    Ok(data) => {
-                        let data_len = data.len() as u64;
-                        let chunk = ObjectChunk {
-                            hash: hash.as_bytes().to_vec(),
-                            object_type: 0,
-                            total_size: data_len,
-                            offset: 0,
-                            data,
-                            is_last: true,
-                            repo: repo_name_clone.clone(),
-                        };
-                        if tx.send(chunk).await.is_err() {
-                            break;
-                        }
-                        bytes_sent_clone.fetch_add(data_len, Ordering::Relaxed);
-                        objects_sent_clone.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(_) => continue,
-                }
-            }
-        });
-
-        // Tick progress bar while streaming.
         let pb_clone = pb.clone();
-        let bytes_sent_tick = Arc::clone(&bytes_sent);
-        let objects_sent_tick = Arc::clone(&objects_sent);
-        let tick_handle = tokio::spawn(async move {
-            loop {
-                let sent = bytes_sent_tick.load(Ordering::Relaxed);
-                let obj_done = objects_sent_tick.load(Ordering::Relaxed);
-                pb_clone.set_position(sent);
-                pb_clone.set_message(format!("Writing objects: {obj_done}/{obj_count_u64} objects"));
-                if sent >= total_bytes {
+        let send_handle = tokio::spawn(async move {
+            for chunk in chunks {
+                let data_len = chunk.total_size;
+                if tx.send(chunk).await.is_err() {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                sent_bytes += data_len;
+                sent_objs += 1;
+                pb_clone.set_position(sent_bytes);
+                pb_clone.set_message(format!("Writing objects: {sent_objs}/{obj_count} objects"));
             }
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         client.push_objects(stream).await?;
+        send_handle.abort();
 
-        // Ensure progress bar completes.
         pb.set_position(total_bytes);
-        pb.set_message(format!("Writing objects: {obj_count}/{obj_count} objects"));
         pb.finish_with_message(format!("Writing objects: {obj_count}/{obj_count} objects, done."));
-        tick_handle.abort();
     }
 
     // Update remote ref.
-    // For force push, send the current remote tip as old_hash (valid CAS),
-    // or zero if the ref doesn't exist yet.
     let old_hash_for_cas = if force {
         remote_tip_bytes.clone()
     } else {

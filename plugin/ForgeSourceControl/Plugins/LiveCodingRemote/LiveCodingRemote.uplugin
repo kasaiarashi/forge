@@ -1,0 +1,18 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Live Coding Remote",
+	"Description": "HTTP endpoint for triggering Live Coding compilation remotely. Modular - drop into any UE5 project.",
+	"Category": "Editor",
+	"CreatedBy": "Kriaa Systems",
+	"EnabledByDefault": true,
+	"CanContainContent": false,
+	"Modules": [
+		{
+			"Name": "LiveCodingRemote",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

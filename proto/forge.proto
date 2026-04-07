@@ -29,6 +29,38 @@ service ForgeService {
     rpc GetFileContent(GetFileContentRequest) returns (GetFileContentResponse);
     rpc GetCommitDetail(GetCommitDetailRequest) returns (GetCommitDetailResponse);
     rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+    // Actions (Workflows)
+    rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
+    rpc CreateWorkflow(CreateWorkflowRequest) returns (CreateWorkflowResponse);
+    rpc UpdateWorkflow(UpdateWorkflowRequest) returns (UpdateWorkflowResponse);
+    rpc DeleteWorkflow(DeleteWorkflowRequest) returns (DeleteWorkflowResponse);
+
+    // Workflow Runs
+    rpc TriggerWorkflow(TriggerWorkflowRequest) returns (TriggerWorkflowResponse);
+    rpc ListWorkflowRuns(ListWorkflowRunsRequest) returns (ListWorkflowRunsResponse);
+    rpc GetWorkflowRun(GetWorkflowRunRequest) returns (GetWorkflowRunResponse);
+    rpc CancelWorkflowRun(CancelWorkflowRunRequest) returns (CancelWorkflowRunResponse);
+
+    // Artifacts & Releases
+    rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+    rpc ListReleases(ListReleasesRequest) returns (ListReleasesResponse);
+    rpc GetRelease(GetReleaseRequest) returns (GetReleaseResponse);
+
+    // Issues
+    rpc ListIssues(ListIssuesRequest) returns (ListIssuesResponse);
+    rpc CreateIssue(CreateIssueRequest) returns (CreateIssueResponse);
+    rpc UpdateIssue(UpdateIssueRequest) returns (UpdateIssueResponse);
+
+    // Pull Requests
+    rpc ListPullRequests(ListPullRequestsRequest) returns (ListPullRequestsResponse);
+    rpc CreatePullRequest(CreatePullRequestRequest) returns (CreatePullRequestResponse);
+    rpc UpdatePullRequest(UpdatePullRequestRequest) returns (UpdatePullRequestResponse);
+    rpc MergePullRequest(MergePullRequestRequest) returns (MergePullRequestResponse);
+
+    // Single item getters
+    rpc GetIssue(GetIssueRequest) returns (GetIssueResponse);
+    rpc GetPullRequest(GetPullRequestRequest) returns (GetPullRequestResponse);
 }
 
 // ============================================================
@@ -289,4 +321,268 @@ message GetServerInfoResponse {
     int64 total_size_bytes = 4;
     repeated string repos = 5;
     int32 active_locks = 6;
+}
+
+// ============================================================
+// Actions — Workflows
+// ============================================================
+
+message WorkflowInfo {
+    int64 id = 1;
+    string repo = 2;
+    string name = 3;
+    string yaml = 4;
+    bool enabled = 5;
+    int64 created_at = 6;
+    int64 updated_at = 7;
+}
+
+message ListWorkflowsRequest { string repo = 1; }
+message ListWorkflowsResponse { repeated WorkflowInfo workflows = 1; }
+
+message CreateWorkflowRequest {
+    string repo = 1;
+    string name = 2;
+    string yaml = 3;
+}
+message CreateWorkflowResponse { bool success = 1; string error = 2; int64 id = 3; }
+
+message UpdateWorkflowRequest {
+    int64 id = 1;
+    string name = 2;
+    string yaml = 3;
+    bool enabled = 4;
+}
+message UpdateWorkflowResponse { bool success = 1; string error = 2; }
+
+message DeleteWorkflowRequest { int64 id = 1; }
+message DeleteWorkflowResponse { bool success = 1; string error = 2; }
+
+// ============================================================
+// Actions — Workflow Runs
+// ============================================================
+
+message TriggerWorkflowRequest {
+    int64 workflow_id = 1;
+    string ref_name = 2;
+    string triggered_by = 3;
+}
+message TriggerWorkflowResponse { bool success = 1; string error = 2; int64 run_id = 3; }
+
+message WorkflowRunInfo {
+    int64 id = 1;
+    string repo = 2;
+    int64 workflow_id = 3;
+    string workflow_name = 4;
+    string trigger = 5;
+    string trigger_ref = 6;
+    string commit_hash = 7;
+    string status = 8;
+    int64 started_at = 9;
+    int64 finished_at = 10;
+    int64 created_at = 11;
+    string triggered_by = 12;
+}
+
+message StepInfo {
+    int64 id = 1;
+    string job_name = 2;
+    int32 step_index = 3;
+    string name = 4;
+    string status = 5;
+    int32 exit_code = 6;
+    string log = 7;
+    int64 started_at = 8;
+    int64 finished_at = 9;
+}
+
+message ListWorkflowRunsRequest {
+    string repo = 1;
+    int64 workflow_id = 2;
+    int32 limit = 3;
+    int32 offset = 4;
+}
+message ListWorkflowRunsResponse {
+    repeated WorkflowRunInfo runs = 1;
+    int32 total = 2;
+}
+
+message GetWorkflowRunRequest { int64 run_id = 1; }
+message GetWorkflowRunResponse {
+    WorkflowRunInfo run = 1;
+    repeated StepInfo steps = 2;
+    repeated ArtifactInfo artifacts = 3;
+}
+
+message CancelWorkflowRunRequest { int64 run_id = 1; }
+message CancelWorkflowRunResponse { bool success = 1; string error = 2; }
+
+// ============================================================
+// Actions — Artifacts & Releases
+// ============================================================
+
+message ArtifactInfo {
+    int64 id = 1;
+    int64 run_id = 2;
+    string name = 3;
+    int64 size_bytes = 4;
+    int64 created_at = 5;
+}
+
+message ListArtifactsRequest { int64 run_id = 1; }
+message ListArtifactsResponse { repeated ArtifactInfo artifacts = 1; }
+
+message ReleaseInfo {
+    int64 id = 1;
+    string repo = 2;
+    string tag = 3;
+    string name = 4;
+    int64 run_id = 5;
+    int64 created_at = 6;
+    repeated ArtifactInfo artifacts = 7;
+}
+
+message ListReleasesRequest { string repo = 1; }
+message ListReleasesResponse { repeated ReleaseInfo releases = 1; }
+
+message GetReleaseRequest { int64 release_id = 1; }
+message GetReleaseResponse { ReleaseInfo release = 1; }
+
+// ============================================================
+// Issues
+// ============================================================
+
+message IssueInfo {
+    int64 id = 1;
+    string repo = 2;
+    string title = 3;
+    string body = 4;
+    string author = 5;
+    string status = 6;         // open, closed
+    repeated string labels = 7;
+    int64 created_at = 8;
+    int64 updated_at = 9;
+    int32 comment_count = 10;
+    string assignee = 11;
+}
+
+message GetIssueRequest { int64 id = 1; }
+message GetIssueResponse { IssueInfo issue = 1; }
+
+message ListIssuesRequest {
+    string repo = 1;
+    string status = 2;        // open, closed, or empty for all
+    int32 limit = 3;
+    int32 offset = 4;
+}
+
+message ListIssuesResponse {
+    repeated IssueInfo issues = 1;
+    int32 total = 2;
+    int32 open_count = 3;
+    int32 closed_count = 4;
+}
+
+message CreateIssueRequest {
+    string repo = 1;
+    string title = 2;
+    string body = 3;
+    string author = 4;
+    repeated string labels = 5;
+}
+
+message CreateIssueResponse {
+    bool success = 1;
+    string error = 2;
+    int64 id = 3;
+}
+
+message UpdateIssueRequest {
+    int64 id = 1;
+    string title = 2;
+    string body = 3;
+    string status = 4;
+    repeated string labels = 5;
+    string assignee = 6;
+}
+
+message UpdateIssueResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// ============================================================
+// Pull Requests
+// ============================================================
+
+message PullRequestInfo {
+    int64 id = 1;
+    string repo = 2;
+    string title = 3;
+    string body = 4;
+    string author = 5;
+    string status = 6;            // open, closed, merged
+    string source_branch = 7;
+    string target_branch = 8;
+    repeated string labels = 9;
+    int64 created_at = 10;
+    int64 updated_at = 11;
+    int32 comment_count = 12;
+    string assignee = 13;
+}
+
+message GetPullRequestRequest { int64 id = 1; }
+message GetPullRequestResponse { PullRequestInfo pull_request = 1; }
+
+message ListPullRequestsRequest {
+    string repo = 1;
+    string status = 2;
+    int32 limit = 3;
+    int32 offset = 4;
+}
+
+message ListPullRequestsResponse {
+    repeated PullRequestInfo pull_requests = 1;
+    int32 total = 2;
+    int32 open_count = 3;
+    int32 closed_count = 4;
+}
+
+message CreatePullRequestRequest {
+    string repo = 1;
+    string title = 2;
+    string body = 3;
+    string author = 4;
+    string source_branch = 5;
+    string target_branch = 6;
+    repeated string labels = 7;
+}
+
+message CreatePullRequestResponse {
+    bool success = 1;
+    string error = 2;
+    int64 id = 3;
+}
+
+message UpdatePullRequestRequest {
+    int64 id = 1;
+    string title = 2;
+    string body = 3;
+    string status = 4;
+    repeated string labels = 5;
+    string assignee = 6;
+}
+
+message UpdatePullRequestResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message MergePullRequestRequest {
+    int64 id = 1;
+}
+
+message MergePullRequestResponse {
+    bool success = 1;
+    string error = 2;
 }

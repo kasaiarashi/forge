@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 mod api;
+mod api_actions;
 mod auth;
 mod config;
 mod grpc_client;
@@ -163,15 +164,38 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/:repo/blob/:branch", get(api::get_blob))
         .route("/repos/:repo/raw/:branch", get(api::get_raw))
         .route("/repos/:repo/commit/:hash", get(api::get_commit))
-        .route("/repos/:repo/locks", get(api::list_locks));
+        .route("/repos/:repo/locks", get(api::list_locks))
+        // Issues & Pull Requests (public read)
+        .route("/repos/:repo/issues", get(api::list_issues))
+        .route("/repos/:repo/issues/:id", get(api::get_issue))
+        .route("/repos/:repo/pulls", get(api::list_pull_requests))
+        .route("/repos/:repo/pulls/:id", get(api::get_pull_request))
+        // Actions (public read)
+        .route("/repos/:repo/workflows", get(api_actions::list_workflows))
+        .route("/repos/:repo/runs", get(api_actions::list_runs))
+        .route("/repos/:repo/runs/:run_id", get(api_actions::get_run))
+        .route("/repos/:repo/runs/:run_id/artifacts", get(api_actions::list_artifacts))
+        .route("/repos/:repo/releases", get(api_actions::list_releases))
+        .route("/repos/:repo/releases/:release_id", get(api_actions::get_release));
 
     // Protected API routes (require auth for writes/admin).
     let protected_api = Router::new()
         .route("/repos", post(api::create_repo))
         .route("/repos/:repo", put(api::update_repo).delete(api::delete_repo))
+        // Issues & Pull Requests (protected writes)
+        .route("/repos/:repo/issues", post(api::create_issue))
+        .route("/repos/:repo/issues/:id", put(api::update_issue))
+        .route("/repos/:repo/pulls", post(api::create_pull_request))
+        .route("/repos/:repo/pulls/:id", put(api::update_pull_request))
+        .route("/repos/:repo/pulls/:id/merge", post(api::merge_pull_request))
         .route("/repos/:repo/locks/acquire", post(api::acquire_lock))
         .route("/repos/:repo/locks/:path", delete(api::release_lock))
         .route("/server/info", get(api::server_info))
+        // Actions (protected writes)
+        .route("/repos/:repo/workflows", post(api_actions::create_workflow))
+        .route("/repos/:repo/workflows/:id", put(api_actions::update_workflow).delete(api_actions::delete_workflow))
+        .route("/repos/:repo/workflows/:id/trigger", post(api_actions::trigger_workflow))
+        .route("/repos/:repo/runs/:run_id/cancel", post(api_actions::cancel_run))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

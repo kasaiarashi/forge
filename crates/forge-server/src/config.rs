@@ -19,6 +19,10 @@ pub struct ServerConfig {
     /// Per-repository overrides. Key = repo name.
     #[serde(default)]
     pub repos: std::collections::HashMap<String, RepoConfig>,
+
+    /// Actions/workflow engine settings.
+    #[serde(default)]
+    pub actions: ActionsSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +65,48 @@ pub struct RepoConfig {
     pub description: Option<String>,
 }
 
+/// Actions/workflow engine settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionsSection {
+    /// Enable the actions engine.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Base directory for artifacts storage (relative to base_path, or absolute).
+    #[serde(default = "default_artifacts_path")]
+    pub artifacts_path: PathBuf,
+
+    /// Base directory for temporary workspace checkouts.
+    #[serde(default = "default_workspaces_path")]
+    pub workspaces_path: PathBuf,
+
+    /// Maximum concurrent workflow runs across all repos.
+    #[serde(default = "default_max_runs")]
+    pub max_concurrent_runs: usize,
+
+    /// Execution environment: "native" (default) or "container" (stubbed).
+    #[serde(default = "default_executor")]
+    pub executor: String,
+}
+
+fn default_true() -> bool { true }
+fn default_artifacts_path() -> PathBuf { PathBuf::from("artifacts") }
+fn default_workspaces_path() -> PathBuf { PathBuf::from("workspaces") }
+fn default_max_runs() -> usize { 1 }
+fn default_executor() -> String { "native".into() }
+
+impl Default for ActionsSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            artifacts_path: default_artifacts_path(),
+            workspaces_path: default_workspaces_path(),
+            max_concurrent_runs: default_max_runs(),
+            executor: default_executor(),
+        }
+    }
+}
+
 fn default_listen() -> String {
     "0.0.0.0:9876".into()
 }
@@ -99,6 +145,7 @@ impl Default for ServerConfig {
             server: ServerSection::default(),
             storage: StorageSection::default(),
             repos: std::collections::HashMap::new(),
+            actions: ActionsSection::default(),
         }
     }
 }
@@ -175,6 +222,24 @@ db_path = "forge.db"
             self.storage.db_path.clone()
         } else {
             self.storage.base_path.join(&self.storage.db_path)
+        }
+    }
+
+    /// Resolve the artifacts directory.
+    pub fn resolved_artifacts_path(&self) -> PathBuf {
+        if self.actions.artifacts_path.is_absolute() {
+            self.actions.artifacts_path.clone()
+        } else {
+            self.storage.base_path.join(&self.actions.artifacts_path)
+        }
+    }
+
+    /// Resolve the workspaces directory.
+    pub fn resolved_workspaces_path(&self) -> PathBuf {
+        if self.actions.workspaces_path.is_absolute() {
+            self.actions.workspaces_path.clone()
+        } else {
+            self.storage.base_path.join(&self.actions.workspaces_path)
         }
     }
 }

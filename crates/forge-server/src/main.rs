@@ -93,10 +93,20 @@ async fn main() -> Result<()> {
 
     let fs = Arc::new(FsStorage::new(base.join("repos")));
 
+    // Start workflow engine if actions are enabled.
+    let workflow_engine = if config.actions.enabled {
+        let tx = services::actions::engine::start(&config, Arc::clone(&db), Arc::clone(&fs));
+        info!("Actions engine started (executor: {})", config.actions.executor);
+        Some(tx)
+    } else {
+        None
+    };
+
     let service = ForgeGrpcService {
         fs: Arc::clone(&fs),
         db: Arc::clone(&db),
         start_time: std::time::Instant::now(),
+        workflow_engine,
     };
 
     let addr = config.server.listen.parse()?;

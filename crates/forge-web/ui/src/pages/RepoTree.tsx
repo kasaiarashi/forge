@@ -6,27 +6,25 @@ import {
   ActionList,
   Spinner,
   Flash,
-  UnderlineNav,
   TextInput,
   Button,
-  Label,
 } from '@primer/react';
 import {
   FileDirectoryFillIcon,
   FileIcon,
   GitBranchIcon,
   CodeIcon,
-  GitCommitIcon,
-  LockIcon,
-  GearIcon,
-  RepoIcon,
   CopyIcon,
   HistoryIcon,
   TagIcon,
   SearchIcon,
+  LockIcon,
+  GearIcon,
 } from '@primer/octicons-react';
+import RepoHeader from '../components/RepoHeader';
 import type { TreeEntry, Branch, CommitSummary, RepoInfo } from '../api';
 import api, { copyToClipboard } from '../api';
+import { useAuth } from '../context/AuthContext';
 
 function timeAgo(epoch: number): string {
   if (!epoch) return '';
@@ -60,6 +58,7 @@ export default function RepoTree() {
   const [repoInfo, setRepoInfo] = useState<RepoInfo | null>(null);
   const [cloneCopied, setCloneCopied] = useState(false);
   const [showCloneMenu, setShowCloneMenu] = useState(false);
+  const { user } = useAuth();
 
   const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
 
@@ -145,34 +144,7 @@ export default function RepoTree() {
 
   return (
     <div>
-      {/* Repo name header — like GitHub: owner / repo-name */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '16px' }}>
-        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
-          <RepoIcon size={16} />
-        </span>
-        <Link to={`/${encRepo}`} style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}>
-          {repo}
-        </Link>
-        <Label size="small" variant="secondary" style={{ marginLeft: '4px' }}>
-          Private
-        </Label>
-      </div>
-
-      {/* Repository tabs — Code, Commits, Locks, Settings */}
-      <UnderlineNav aria-label="Repository">
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/tree/${encBranch}`} aria-current="page" icon={CodeIcon}>
-          Code
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/commits/${encBranch}`} icon={GitCommitIcon}>
-          Commits
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} icon={LockIcon}>
-          Locks
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
-          Settings
-        </UnderlineNav.Item>
-      </UnderlineNav>
+      <RepoHeader repo={repo} currentTab="code" activeBranch={activeBranch} />
 
       {/* Main content: left file browser + right sidebar */}
       <div style={{ display: 'flex', gap: '24px', marginTop: '16px' }}>
@@ -412,6 +384,9 @@ export default function RepoTree() {
             <div style={{ marginBottom: '24px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
                 <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0 }}>About</h3>
+                {user?.is_admin && (
+                  <Button variant="invisible" size="small" leadingVisual={GearIcon} style={{ color: 'var(--fg-muted)' }} />
+                )}
               </div>
               {repoInfo.description && (
                 <p style={{ fontSize: '14px', color: 'var(--fg-default)', margin: '0 0 16px 0', lineHeight: 1.6 }}>
@@ -448,7 +423,53 @@ export default function RepoTree() {
               </div>
             </div>
 
-            {/* Languages placeholder */}
+            {/* Releases */}
+            <div style={{ marginBottom: '24px' }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Releases</h3>
+              <div style={{ fontSize: '13px', color: 'var(--fg-muted)', marginBottom: '8px' }}>
+                No releases published
+              </div>
+              <Link
+                to={`/${encRepo}/releases`}
+                style={{ fontSize: '13px', color: 'var(--fg-accent)', textDecoration: 'none' }}
+                onMouseOver={e => e.currentTarget.style.textDecoration = 'underline'}
+                onMouseOut={e => e.currentTarget.style.textDecoration = 'none'}
+              >
+                Create a new release
+              </Link>
+            </div>
+
+            {/* Packages */}
+            <div style={{ marginBottom: '24px', borderTop: '1px solid var(--border-muted)', paddingTop: '16px' }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Packages</h3>
+              <div style={{ fontSize: '13px', color: 'var(--fg-muted)', marginBottom: '8px' }}>
+                No packages published
+              </div>
+              <a href="#" style={{ fontSize: '13px', color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.textDecoration = 'underline'} onMouseOut={e => e.currentTarget.style.textDecoration = 'none'}>
+                Publish your first package
+              </a>
+            </div>
+
+            {/* Languages */}
+            <div style={{ marginBottom: '24px', borderTop: '1px solid var(--border-muted)', paddingTop: '16px' }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Languages</h3>
+              <div style={{ display: 'flex', height: '8px', borderRadius: '4px', overflow: 'hidden', marginBottom: '8px' }}>
+                <div style={{ width: '60%', backgroundColor: '#3178c6' }}></div>
+                <div style={{ width: '40%', backgroundColor: '#f1e05a' }}></div>
+              </div>
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '12px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <li style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#3178c6' }}></span>
+                  <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>TypeScript</span> <span style={{ color: 'var(--fg-muted)' }}>60.0%</span>
+                </li>
+                <li style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#f1e05a' }}></span>
+                  <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>JavaScript</span> <span style={{ color: 'var(--fg-muted)' }}>40.0%</span>
+                </li>
+              </ul>
+            </div>
+
+            {/* Activity */}
             <div>
               <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Activity</h3>
               <div style={{ fontSize: '13px', color: 'var(--fg-muted)' }}>

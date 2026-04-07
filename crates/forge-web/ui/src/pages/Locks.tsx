@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import {
   Spinner,
   Flash,
   Button,
   Label,
-  UnderlineNav,
 } from '@primer/react';
 import {
   LockIcon,
@@ -13,11 +12,8 @@ import {
   FileIcon,
   PersonIcon,
   ClockIcon,
-  CodeIcon,
-  GitCommitIcon,
-  GearIcon,
-  RepoIcon,
 } from '@primer/octicons-react';
+import RepoHeader from '../components/RepoHeader';
 import type { Lock, Branch } from '../api';
 import api from '../api';
 
@@ -43,8 +39,6 @@ export default function Locks() {
   const [error, setError] = useState('');
   const [unlocking, setUnlocking] = useState<string | null>(null);
   const [defaultBranch, setDefaultBranch] = useState('main');
-
-  const encRepo = encodeURIComponent(repo);
 
   const fetchLocks = () => {
     setLoading(true);
@@ -84,42 +78,7 @@ export default function Locks() {
 
   return (
     <div>
-      {/* Repo name header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
-          <RepoIcon size={20} />
-        </span>
-        <Link
-          to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
-        >
-          {repo}
-        </Link>
-      </div>
-
-      {/* Repository tabs */}
-      <UnderlineNav aria-label="Repository">
-        <UnderlineNav.Item
-          as={Link}
-          to={`/${encRepo}/tree/${encodeURIComponent(defaultBranch)}`}
-          icon={CodeIcon}
-        >
-          Code
-        </UnderlineNav.Item>
-        <UnderlineNav.Item
-          as={Link}
-          to={`/${encRepo}/commits/${encodeURIComponent(defaultBranch)}`}
-          icon={GitCommitIcon}
-        >
-          Commits
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} aria-current="page" icon={LockIcon}>
-          Locks
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
-          Settings
-        </UnderlineNav.Item>
-      </UnderlineNav>
+      <RepoHeader repo={repo} currentTab="locks" activeBranch={defaultBranch} />
 
       {/* Page header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '16px 0' }}>

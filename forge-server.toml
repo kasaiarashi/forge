@@ -1,0 +1,34 @@
+# Forge Server Configuration
+# ========================
+
+[server]
+# Address and port to listen on.
+listen = "0.0.0.0:9876"
+
+# Maximum size per gRPC message in bytes. Default 256 MiB.
+# This is per-message, NOT total push size — push streams are unlimited.
+# Objects are chunked by FastCDC so individual messages are typically small.
+max_message_size = 268435456
+
+# Worker threads. 0 = auto (all CPU cores).
+workers = 0
+
+[storage]
+# Base directory for all repository data.
+# Each repo is stored in: <base_path>/repos/<repo-name>/objects/
+base_path = "D:/Softwares/ForgeServer/forge-data"
+
+# SQLite database path (relative to base_path, or absolute).
+# Stores refs (branch tips) and lock metadata.
+db_path = "forge.db"
+
+# Per-repo overrides (optional).
+# Useful for placing large repos on a different disk.
+#
+# [repos.my-game]
+# path = "D:/fast-ssd/my-game"
+# description = "Main game project"
+#
+# [repos.art-assets]
+# path = "E:/large-hdd/art-assets"
+# description = "Art asset repository (large storage)"

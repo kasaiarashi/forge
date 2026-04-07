@@ -9,36 +9,21 @@ import {
   Dialog,
   FormControl,
   IconButton,
+  Avatar,
 } from '@primer/react';
 import {
   RepoIcon,
   SearchIcon,
   PlusIcon,
-  GitBranchIcon,
-  ClockIcon,
   CopyIcon,
   CheckIcon,
   XIcon,
+  TelescopeIcon,
+  LightBulbIcon,
 } from '@primer/octicons-react';
 import type { RepoInfo } from '../api';
 import api, { copyToClipboard } from '../api';
 import { useAuth } from '../context/AuthContext';
-
-function timeAgo(epoch: number): string {
-  if (!epoch) return '';
-  const date = new Date(epoch * 1000);
-  const now = new Date();
-  const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} day${days > 1 ? 's' : ''} ago`;
-  const months = Math.floor(days / 30);
-  return `${months} month${months > 1 ? 's' : ''} ago`;
-}
 
 function CopyableCodeBlock({ lines, label }: { lines: string[]; label: string }) {
   const [copied, setCopied] = useState(false);
@@ -95,6 +80,12 @@ export default function Dashboard() {
   const [newDesc, setNewDesc] = useState('');
   const [creating, setCreating] = useState(false);
   const [createdRepo, setCreatedRepo] = useState<string | null>(null);
+  const [flashMsg, setFlashMsg] = useState('');
+
+  const triggerMockAction = (msg: string) => {
+    setFlashMsg(msg);
+    setTimeout(() => setFlashMsg(''), 3000);
+  };
 
   useEffect(() => {
     api.listRepos()
@@ -146,163 +137,179 @@ export default function Dashboard() {
   }
 
   return (
-    <div>
-      {/* Quick setup after repo creation */}
-      {createdRepo && (
-        <div className="forge-card" style={{ marginBottom: '24px', position: 'relative' }}>
-          <div className="forge-card-header" style={{ justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <RepoIcon size={16} />
-              <span style={{ fontWeight: 600 }}>Quick setup for {createdRepo}</span>
-            </div>
-            <IconButton
-              aria-label="Dismiss"
-              icon={XIcon}
-              variant="invisible"
-              size="small"
-              onClick={() => setCreatedRepo(null)}
-            />
-          </div>
-          <div style={{ padding: '16px' }}>
-            <CopyableCodeBlock
-              label="...or create a new repository on the command line"
-              lines={[
-                'forge init',
-                `forge config repo ${createdRepo}`,
-                'forge config user.name "Your Name"',
-                `forge remote add origin ${serverUrl}:9876`,
-                'forge add .',
-                'forge commit -m "Initial commit"',
-                'forge push',
-              ]}
-            />
-            <CopyableCodeBlock
-              label="...or push an existing repository"
-              lines={[
-                `forge config repo ${createdRepo}`,
-                `forge remote add origin ${serverUrl}:9876`,
-                'forge push',
-              ]}
-            />
-          </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1280px', margin: '0 auto' }}>
+      {flashMsg && (
+        <div style={{ padding: '0' }}>
+          <Flash variant="success">{flashMsg}</Flash>
         </div>
       )}
-
-      {/* Page header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <h2 style={{ fontSize: '20px', fontWeight: 600, margin: 0 }}>
-            Repositories
+      <div style={{ display: 'flex', gap: '32px' }}>
+      
+      {/* Left Sidebar: Repositories */}
+      <div style={{ width: '320px', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <h2 style={{ fontSize: '14px', fontWeight: 600, margin: 0, color: 'var(--fg-default)' }}>
+            Top Repositories
           </h2>
-          <Label variant="secondary">{repos.length}</Label>
+          {user?.is_admin && (
+            <Button size="small" variant="primary" leadingVisual={PlusIcon} onClick={() => setShowCreate(true)}>
+              New
+            </Button>
+          )}
         </div>
-        {user?.is_admin && (
-          <Button variant="primary" leadingVisual={PlusIcon} onClick={() => setShowCreate(true)}>
-            New repository
-          </Button>
+        
+        <div style={{ marginBottom: '16px' }}>
+          <TextInput
+            leadingVisual={SearchIcon}
+            placeholder="Find a repository..."
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            block
+            size="small"
+          />
+        </div>
+
+        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+          {filtered.length === 0 ? (
+            <li style={{ color: 'var(--fg-muted)', fontSize: '13px', padding: '8px 0' }}>
+              No repositories found.
+            </li>
+          ) : (
+            filtered.map((repo) => (
+              <li key={repo.name} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', borderBottom: '1px solid var(--border-muted)' }}>
+                <Avatar src={`https://github.com/identicons/${user?.username}.png`} size={16} />
+                <Link
+                  to={`/${encodeURIComponent(repo.name)}`}
+                  style={{
+                    fontWeight: 500,
+                    fontSize: '14px',
+                    color: 'var(--fg-default)',
+                    textDecoration: 'none',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    flex: 1
+                  }}
+                  onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  {user?.username}/{repo.name}
+                </Link>
+                <Label size="small" variant="secondary" style={{ flexShrink: 0 }}>
+                  Public
+                </Label>
+              </li>
+            ))
+          )}
+        </ul>
+        
+        <div style={{ marginTop: '16px', fontSize: '12px', color: 'var(--fg-muted)' }}>
+          <span style={{ color: 'var(--fg-muted)', cursor: 'pointer' }} onMouseOver={(e) => (e.currentTarget.style.color = 'var(--fg-accent)')} onMouseOut={(e) => (e.currentTarget.style.color = 'var(--fg-muted)')} onClick={() => triggerMockAction('Showing more repositories...')}>Show more</span>
+        </div>
+      </div>
+
+      {/* Main Content: Feed */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        
+        {/* Quick setup after repo creation */}
+        {createdRepo && (
+          <div className="forge-card" style={{ marginBottom: '24px', position: 'relative' }}>
+            <div className="forge-card-header" style={{ justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <RepoIcon size={16} />
+                <span style={{ fontWeight: 600 }}>Quick setup for {createdRepo}</span>
+              </div>
+              <IconButton
+                aria-label="Dismiss"
+                icon={XIcon}
+                variant="invisible"
+                size="small"
+                onClick={() => setCreatedRepo(null)}
+              />
+            </div>
+            <div style={{ padding: '16px' }}>
+              <CopyableCodeBlock
+                label="...or create a new repository on the command line"
+                lines={[
+                  'forge init',
+                  `forge config repo ${createdRepo}`,
+                  'forge config user.name "Your Name"',
+                  `forge remote add origin ${serverUrl}:9876`,
+                  'forge add .',
+                  'forge commit -m "Initial commit"',
+                  'forge push',
+                ]}
+              />
+              <CopyableCodeBlock
+                label="...or push an existing repository"
+                lines={[
+                  `forge config repo ${createdRepo}`,
+                  `forge remote add origin ${serverUrl}:9876`,
+                  'forge push',
+                ]}
+              />
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+          <h2 style={{ fontSize: '20px', fontWeight: 600, margin: 0 }}>
+            Home
+          </h2>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <Button size="small" variant="invisible" onClick={() => triggerMockAction('Feedback recorded! Thank you.')}>Send feedback</Button>
+            <Button size="small" leadingVisual={SearchIcon} onClick={() => triggerMockAction('Filter options opened...')}>Filter</Button>
+          </div>
+        </div>
+
+        {repos.length === 0 ? (
+          <div className="forge-card" style={{ padding: '48px', textAlign: 'center' }}>
+            <div style={{ color: 'var(--fg-muted)', marginBottom: '8px', display: 'flex', justifyContent: 'center' }}>
+              <TelescopeIcon size={40} />
+            </div>
+            <p style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-default)', margin: '0 0 8px 0' }}>
+              Welcome to Forge VCS
+            </p>
+            <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 16px 0', maxWidth: '400px', marginLeft: 'auto', marginRight: 'auto' }}>
+              It looks like you don't have any repositories yet. Create your first repository or connect to an existing one to get started.
+            </p>
+            {user?.is_admin && (
+              <Button variant="primary" leadingVisual={PlusIcon} onClick={() => setShowCreate(true)}>
+                Create your first repository
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="forge-card" style={{ padding: '32px', textAlign: 'center' }}>
+            <div style={{ color: 'var(--fg-muted)', marginBottom: '16px', display: 'flex', justifyContent: 'center' }}>
+              <LightBulbIcon size={32} />
+            </div>
+            <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--fg-default)', margin: '0 0 8px 0' }}>
+              Discover interesting projects and people to populate your personal news feed.
+            </p>
+            <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 16px 0' }}>
+              Your news feed helps you keep up with recent activity on repositories you watch and people you follow.
+            </p>
+            <Button onClick={() => triggerMockAction('Navigating to Explore...')}>Explore Forge</Button>
+          </div>
         )}
       </div>
 
-      {/* Search */}
-      <div style={{ marginBottom: '16px' }}>
-        <TextInput
-          leadingVisual={SearchIcon}
-          placeholder="Find a repository..."
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          block
-        />
-      </div>
-
-      {/* Repository list */}
-      {filtered.length === 0 ? (
-        <div className="forge-card" style={{ padding: '48px', textAlign: 'center' }}>
-          <div style={{ color: 'var(--fg-muted)', marginBottom: '8px', display: 'flex', justifyContent: 'center' }}>
-            <RepoIcon size={40} />
+      {/* Right Sidebar: Explore/Sponsor */}
+      <div style={{ width: '296px', flexShrink: 0 }}>
+        <div style={{ borderBottom: '1px solid var(--border-muted)', paddingBottom: '16px', marginBottom: '16px' }}>
+          <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0', color: 'var(--fg-default)' }}>Latest changes</h3>
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '12px', color: 'var(--fg-muted)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <li><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: 'var(--fg-accent)', marginRight: '8px' }}></span> Yesterday • Welcome to the new Forge Dashboard interface! Enjoy the clean layout.</li>
+          </ul>
+        </div>
+        <div>
+          <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0', color: 'var(--fg-default)' }}>Explore repositories</h3>
+          <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
+            No recommendations yet. Check back later once you watch more repositories.
           </div>
-          <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--fg-default)', margin: '0 0 4px 0' }}>
-            {repos.length === 0 ? 'No repositories yet' : 'No matching repositories'}
-          </p>
-          <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: 0 }}>
-            {repos.length === 0
-              ? 'Create a repository to get started with Forge VCS.'
-              : 'Try a different search term.'}
-          </p>
         </div>
-      ) : (
-        <div className="forge-card">
-          {filtered.map((repo, i) => (
-            <div
-              key={repo.name}
-              className="file-row"
-              style={{
-                display: 'flex',
-                alignItems: 'flex-start',
-                gap: '12px',
-                padding: '16px',
-                borderBottom: i < filtered.length - 1 ? '1px solid var(--border-muted)' : 'none',
-              }}
-            >
-              <span style={{ color: 'var(--fg-muted)', display: 'inline-flex', marginTop: '2px', flexShrink: 0 }}>
-                <RepoIcon size={16} />
-              </span>
-
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
-                  <Link
-                    to={`/${encodeURIComponent(repo.name)}`}
-                    style={{
-                      fontWeight: 600,
-                      fontSize: '16px',
-                      color: 'var(--fg-accent)',
-                      textDecoration: 'none',
-                    }}
-                    onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
-                    onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}
-                  >
-                    {repo.name}
-                  </Link>
-                  {repo.default_branch && (
-                    <Label size="small" variant="secondary">
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
-                        <GitBranchIcon size={12} />
-                        {repo.branch_count}
-                      </span>
-                    </Label>
-                  )}
-                </div>
-
-                {repo.description && (
-                  <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 8px 0', lineHeight: 1.5 }}>
-                    {repo.description}
-                  </p>
-                )}
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '16px', fontSize: '12px', color: 'var(--fg-muted)', flexWrap: 'wrap' }}>
-                  {repo.last_commit_message && (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                      <ClockIcon size={12} />
-                      <span style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {repo.last_commit_message}
-                      </span>
-                    </span>
-                  )}
-                  {repo.last_commit_author && (
-                    <span>
-                      by {repo.last_commit_author}
-                    </span>
-                  )}
-                  {repo.last_commit_time > 0 && (
-                    <span>
-                      {timeAgo(repo.last_commit_time)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      </div>
 
       {/* Create repo dialog */}
       {showCreate && (
@@ -340,6 +347,7 @@ export default function Dashboard() {
           </div>
         </Dialog>
       )}
+      </div>
     </div>
   );
 }

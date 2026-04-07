@@ -13,6 +13,11 @@
   --bg-overlay: #ffffff;
   --border-default: #d0d7de;
   --border-muted: #d8dee4;
+  --header-bg: #24292f;
+  --header-fg: rgba(255, 255, 255, 0.7);
+  --header-logo: #ffffff;
+  --header-search-bg: rgba(255, 255, 255, 0.125);
+  --header-search-border: rgba(255, 255, 255, 0);
 }
 
 [data-color-mode="night"] {
@@ -28,6 +33,11 @@
   --bg-overlay: #1c2128;
   --border-default: #30363d;
   --border-muted: #21262d;
+  --header-bg: #010409;
+  --header-fg: rgba(255, 255, 255, 0.7);
+  --header-logo: #ffffff;
+  --header-search-bg: #0d1117;
+  --header-search-border: #30363d;
 }
 
 body {
@@ -188,4 +198,178 @@ body {
 
 .forge-card table tr + tr td {
   border-top: 1px solid var(--border-muted);
+}
+
+/* ── Actions layout: sidebar + main content ── */
+.actions-layout {
+  display: flex;
+  gap: 24px;
+  margin-top: 16px;
+}
+.actions-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+}
+.actions-main {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Sidebar nav items */
+.actions-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg-default);
+  text-decoration: none;
+  cursor: pointer;
+}
+.actions-nav-item:hover {
+  background: var(--bg-subtle);
+}
+.actions-nav-item.active {
+  background: var(--bg-subtle);
+  font-weight: 600;
+}
+
+/* Run row in the Actions run list */
+.run-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-muted);
+  text-decoration: none;
+  color: inherit;
+  gap: 12px;
+}
+.run-row:hover {
+  background: var(--bg-subtle);
+}
+.run-row:last-child {
+  border-bottom: none;
+}
+
+/* Status icon colors */
+.status-icon-success { color: var(--fg-success); }
+.status-icon-failure { color: var(--fg-danger); }
+.status-icon-running { color: var(--fg-warning); }
+.status-icon-queued  { color: var(--fg-muted); }
+.status-icon-cancelled { color: var(--fg-muted); }
+
+/* Branch badge */
+.branch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--fg-accent);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  white-space: nowrap;
+}
+
+/* Filter bar */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-subtle);
+  border-radius: 6px 6px 0 0;
+  flex-wrap: wrap;
+}
+
+/* Jobs sidebar in RunDetail */
+.job-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg-default);
+  cursor: pointer;
+  text-decoration: none;
+}
+.job-list-item:hover {
+  background: var(--bg-subtle);
+}
+.job-list-item.active {
+  background: var(--bg-subtle);
+  font-weight: 600;
+  border-left: 2px solid var(--fg-warning);
+}
+
+/* Run detail info bar */
+.run-info-bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 16px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  margin-bottom: 16px;
+}
+.run-info-bar > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.run-info-bar > div > span:first-child {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.run-info-bar > div > span:last-child {
+  color: var(--fg-default);
+  font-weight: 500;
+}
+
+/* Step row in job cards */
+.step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-muted);
+  font-size: 13px;
+}
+.step-row:hover {
+  background: var(--bg-subtle);
+}
+.step-row:last-child {
+  border-bottom: none;
+}
+
+/* Step log output */
+.step-log {
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--bg-inset);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow: auto;
+  max-height: 400px;
+  border-top: 1px solid var(--border-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* Sidebar section headers */
+.sidebar-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 12px 12px 4px;
 }

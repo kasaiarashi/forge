@@ -91,6 +91,110 @@ export interface ServerInfo {
   active_locks: number;
 }
 
+// ── Actions types ──
+
+export interface WorkflowInfo {
+  id: number;
+  name: string;
+  yaml: string;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface RunInfo {
+  id: number;
+  workflow_id: number;
+  workflow_name: string;
+  trigger: string;
+  trigger_ref: string;
+  commit_hash: string;
+  status: 'queued' | 'running' | 'success' | 'failure' | 'cancelled';
+  started_at: number;
+  finished_at: number;
+  created_at: number;
+  triggered_by: string;
+}
+
+export interface StepInfo {
+  id: number;
+  job_name: string;
+  step_index: number;
+  name: string;
+  status: string;
+  exit_code: number;
+  log: string;
+  started_at: number;
+  finished_at: number;
+}
+
+export interface ArtifactListInfo {
+  id: number;
+  run_id: number;
+  name: string;
+  size_bytes: number;
+  created_at: number;
+}
+
+export interface RunDetail {
+  run: RunInfo | null;
+  steps: StepInfo[];
+  artifacts: ArtifactListInfo[];
+}
+
+export interface ReleaseInfo {
+  id: number;
+  tag: string;
+  name: string;
+  run_id: number;
+  created_at: number;
+  artifacts: ArtifactListInfo[];
+}
+
+// ── Issues & Pull Requests ──
+
+export interface IssueInfo {
+  id: number;
+  title: string;
+  body: string;
+  author: string;
+  status: string;
+  labels: string[];
+  assignee: string;
+  created_at: number;
+  updated_at: number;
+  comment_count: number;
+}
+
+export interface IssueListResponse {
+  issues: IssueInfo[];
+  total: number;
+  open_count: number;
+  closed_count: number;
+}
+
+export interface PullRequestInfo {
+  id: number;
+  title: string;
+  body: string;
+  author: string;
+  status: string;
+  source_branch: string;
+  target_branch: string;
+  labels: string[];
+  assignee: string;
+  created_at: number;
+  updated_at: number;
+  comment_count: number;
+}
+
+export interface PullRequestListResponse {
+  pull_requests: PullRequestInfo[];
+  total: number;
+  open_count: number;
+  closed_count: number;
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     credentials: 'same-origin',
@@ -179,6 +283,81 @@ const api = {
   // Server info
   getServerInfo() {
     return request<ServerInfo>('/api/server/info');
+  },
+
+  // ── Actions ──
+
+  listWorkflows(repo: string) {
+    return request<WorkflowInfo[]>(`/api/repos/${enc(repo)}/workflows`);
+  },
+  createWorkflow(repo: string, name: string, yaml: string) {
+    return request<{ success: boolean; id?: number }>(`/api/repos/${enc(repo)}/workflows`, {
+      method: 'POST', body: JSON.stringify({ name, yaml }),
+    });
+  },
+  updateWorkflow(repo: string, id: number, data: { name?: string; yaml?: string; enabled?: boolean }) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/workflows/${id}`, {
+      method: 'PUT', body: JSON.stringify(data),
+    });
+  },
+  deleteWorkflow(repo: string, id: number) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/workflows/${id}`, { method: 'DELETE' });
+  },
+  triggerWorkflow(repo: string, workflowId: number, refName = 'refs/heads/main') {
+    return request<{ success: boolean; run_id?: number }>(`/api/repos/${enc(repo)}/workflows/${workflowId}/trigger`, {
+      method: 'POST', body: JSON.stringify({ ref_name: refName, triggered_by: 'web-user' }),
+    });
+  },
+  listRuns(repo: string, workflowId = 0, limit = 50, offset = 0) {
+    return request<{ runs: RunInfo[]; total: number }>(`/api/repos/${enc(repo)}/runs?workflow_id=${workflowId}&limit=${limit}&offset=${offset}`);
+  },
+  getRun(repo: string, runId: number) {
+    return request<RunDetail>(`/api/repos/${enc(repo)}/runs/${runId}`);
+  },
+  cancelRun(repo: string, runId: number) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/runs/${runId}/cancel`, { method: 'POST' });
+  },
+  listReleases(repo: string) {
+    return request<ReleaseInfo[]>(`/api/repos/${enc(repo)}/releases`);
+  },
+
+  // ── Issues ──
+  listIssues(repo: string, status = '', limit = 50, offset = 0) {
+    return request<IssueListResponse>(`/api/repos/${enc(repo)}/issues?status=${status}&limit=${limit}&offset=${offset}`);
+  },
+  getIssue(repo: string, id: number) {
+    return request<IssueInfo>(`/api/repos/${enc(repo)}/issues/${id}`);
+  },
+  createIssue(repo: string, title: string, body = '', labels: string[] = []) {
+    return request<{ success: boolean; id: number }>(`/api/repos/${enc(repo)}/issues`, {
+      method: 'POST', body: JSON.stringify({ title, body, labels }),
+    });
+  },
+  updateIssue(repo: string, id: number, data: { title?: string; body?: string; status?: string; labels?: string[]; assignee?: string }) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/issues/${id}`, {
+      method: 'PUT', body: JSON.stringify(data),
+    });
+  },
+
+  // ── Pull Requests ──
+  listPullRequests(repo: string, status = '', limit = 50, offset = 0) {
+    return request<PullRequestListResponse>(`/api/repos/${enc(repo)}/pulls?status=${status}&limit=${limit}&offset=${offset}`);
+  },
+  getPullRequest(repo: string, id: number) {
+    return request<PullRequestInfo>(`/api/repos/${enc(repo)}/pulls/${id}`);
+  },
+  createPullRequest(repo: string, title: string, sourceBranch: string, targetBranch = 'main', body = '', labels: string[] = []) {
+    return request<{ success: boolean; id: number }>(`/api/repos/${enc(repo)}/pulls`, {
+      method: 'POST', body: JSON.stringify({ title, body, source_branch: sourceBranch, target_branch: targetBranch, labels }),
+    });
+  },
+  mergePullRequest(repo: string, id: number) {
+    return request<{ success: boolean; error: string }>(`/api/repos/${enc(repo)}/pulls/${id}/merge`, { method: 'POST' });
+  },
+  updatePullRequest(repo: string, id: number, data: { title?: string; body?: string; status?: string; labels?: string[]; assignee?: string }) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/pulls/${id}`, {
+      method: 'PUT', body: JSON.stringify(data),
+    });
   },
 };
 
