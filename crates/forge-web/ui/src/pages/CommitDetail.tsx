@@ -60,76 +60,94 @@ function StatusIcon({ status }: { status: DiffFile['change_type'] }) {
   );
 }
 
-/** Simple unified diff: compare old and new line arrays, render with +/- coloring. */
+/** Compute unified diff between old and new text using LCS. */
 function computeDiff(oldText: string, newText: string): { tag: 'equal' | 'add' | 'del'; line: string }[] {
-  const oldLines = oldText.split('\n');
-  const newLines = newText.split('\n');
+  // Normalize line endings to LF.
+  const oldLines = oldText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const newLines = newText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+
+  // Remove trailing empty line from split (artifact of trailing newline).
+  if (oldLines.length > 0 && oldLines[oldLines.length - 1] === '') oldLines.pop();
+  if (newLines.length > 0 && newLines[newLines.length - 1] === '') newLines.pop();
+
   const result: { tag: 'equal' | 'add' | 'del'; line: string }[] = [];
 
-  // Simple LCS-based diff (Myers-like for small files, fallback for large)
-  const maxLines = 5000;
-  if (oldLines.length > maxLines || newLines.length > maxLines) {
-    // Too large — just show as full replacement
+  // Too large — show as full replacement.
+  if (oldLines.length > 5000 || newLines.length > 5000) {
     for (const l of oldLines) result.push({ tag: 'del', line: l });
     for (const l of newLines) result.push({ tag: 'add', line: l });
     return result;
   }
 
-  // Build edit script using simple O(ND) approach
+  // Build LCS table (Hunt-McIlroy style with O(NM) DP for correctness).
   const n = oldLines.length, m = newLines.length;
-  const max = n + m;
-  const v = new Int32Array(2 * max + 1).fill(-1);
-  const trace: Int32Array[] = [];
 
-  outer:
-  for (let d = 0; d <= max; d++) {
-    trace.push(v.slice());
-    for (let k = -d; k <= d; k += 2) {
-      let x: number;
-      if (k === -d || (k !== d && v[k - 1 + max] < v[k + 1 + max])) {
-        x = v[k + 1 + max];
+  // For moderate sizes, use full DP. For very large, fall back to line-hash matching.
+  if (n * m > 2_000_000) {
+    // Hash-based approach: match identical lines by position.
+    const oldSet = new Map<string, number[]>();
+    oldLines.forEach((l, i) => { const arr = oldSet.get(l) || []; arr.push(i); oldSet.set(l, arr); });
+
+    let oi = 0, ni = 0;
+    while (oi < n && ni < m) {
+      if (oldLines[oi] === newLines[ni]) {
+        result.push({ tag: 'equal', line: oldLines[oi] });
+        oi++; ni++;
       } else {
-        x = v[k - 1 + max] + 1;
+        // Look ahead in new for a match with current old.
+        let foundNew = -1;
+        for (let j = ni + 1; j < Math.min(ni + 10, m); j++) {
+          if (newLines[j] === oldLines[oi]) { foundNew = j; break; }
+        }
+        let foundOld = -1;
+        for (let j = oi + 1; j < Math.min(oi + 10, n); j++) {
+          if (oldLines[j] === newLines[ni]) { foundOld = j; break; }
+        }
+
+        if (foundOld >= 0 && (foundNew < 0 || foundOld - oi <= foundNew - ni)) {
+          while (oi < foundOld) { result.push({ tag: 'del', line: oldLines[oi++] }); }
+        } else if (foundNew >= 0) {
+          while (ni < foundNew) { result.push({ tag: 'add', line: newLines[ni++] }); }
+        } else {
+          result.push({ tag: 'del', line: oldLines[oi++] });
+          result.push({ tag: 'add', line: newLines[ni++] });
+        }
       }
-      let y = x - k;
-      while (x < n && y < m && oldLines[x] === newLines[y]) { x++; y++; }
-      v[k + max] = x;
-      if (x >= n && y >= m) break outer;
+    }
+    while (oi < n) result.push({ tag: 'del', line: oldLines[oi++] });
+    while (ni < m) result.push({ tag: 'add', line: newLines[ni++] });
+    return result;
+  }
+
+  // Standard LCS DP.
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (oldLines[i - 1] === newLines[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
     }
   }
 
-  // Backtrack to build edit operations
-  type Edit = { tag: 'equal' | 'add' | 'del'; line: string };
-  const edits: Edit[] = [];
-  let x = n, y = m;
-  for (let d = trace.length - 1; d >= 0; d--) {
-    const vPrev = d > 0 ? trace[d - 1] : new Int32Array(2 * max + 1).fill(-1);
-    const k = x - y;
-    let prevK: number;
-    if (k === -d || (k !== d && vPrev[k - 1 + max] < vPrev[k + 1 + max])) {
-      prevK = k + 1;
+  // Backtrack.
+  let i = n, j = m;
+  const edits: { tag: 'equal' | 'add' | 'del'; line: string }[] = [];
+  while (i > 0 && j > 0) {
+    if (oldLines[i - 1] === newLines[j - 1]) {
+      edits.push({ tag: 'equal', line: oldLines[i - 1] });
+      i--; j--;
+    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+      edits.push({ tag: 'del', line: oldLines[i - 1] });
+      i--;
     } else {
-      prevK = k - 1;
-    }
-    let prevX = d > 0 ? vPrev[prevK + max] : 0;
-    let prevY = prevX - prevK;
-
-    // Diagonal (equal lines)
-    while (x > prevX && y > prevY && x > 0 && y > 0) {
-      x--; y--;
-      edits.push({ tag: 'equal', line: oldLines[x] });
-    }
-    if (d === 0) break;
-    if (k === prevK + 1) {
-      // Deletion
-      x--;
-      edits.push({ tag: 'del', line: oldLines[x] });
-    } else {
-      // Insertion
-      y--;
-      edits.push({ tag: 'add', line: newLines[y] });
+      edits.push({ tag: 'add', line: newLines[j - 1] });
+      j--;
     }
   }
+  while (i > 0) { edits.push({ tag: 'del', line: oldLines[--i] }); }
+  while (j > 0) { edits.push({ tag: 'add', line: newLines[--j] }); }
 
   edits.reverse();
   return edits;
