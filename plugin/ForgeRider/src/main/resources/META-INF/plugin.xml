@@ -1,0 +1,42 @@
+<idea-plugin>
+    <id>com.forge.rider</id>
+    <name>Forge VCS</name>
+    <vendor>Forge VCS</vendor>
+    <description><![CDATA[
+        Forge Version Control System integration for JetBrains IDEs.
+        Binary-first VCS with file locking, designed for Unreal Engine game development.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <vcs name="Forge" vcsClass="com.forge.rider.ForgeVcs" displayName="Forge"/>
+        <vcsRootChecker implementation="com.forge.rider.ForgeRootChecker"/>
+        <projectService serviceImplementation="com.forge.rider.ForgeSettings"/>
+        <projectConfigurable
+                parentId="project.propVCSSupport.Mappings"
+                instance="com.forge.rider.ForgeConfigurable"
+                id="forge.settings"
+                displayName="Forge"/>
+    </extensions>
+
+    <actions>
+        <group id="Forge.Menu" text="Forge" popup="true">
+            <add-to-group group-id="VcsGroups" anchor="last"/>
+            <action id="Forge.Lock" class="com.forge.rider.actions.ForgeLockAction"
+                    text="Lock File" description="Lock a file for exclusive editing"/>
+            <action id="Forge.Unlock" class="com.forge.rider.actions.ForgeUnlockAction"
+                    text="Unlock File" description="Release file lock"/>
+            <separator/>
+            <action id="Forge.Push" class="com.forge.rider.actions.ForgePushAction"
+                    text="Push" description="Push commits to remote"/>
+            <action id="Forge.Pull" class="com.forge.rider.actions.ForgePullAction"
+                    text="Pull" description="Pull changes from remote"/>
+            <separator/>
+            <action id="Forge.Stash" class="com.forge.rider.actions.ForgeStashAction"
+                    text="Stash Changes" description="Stash current changes"/>
+            <action id="Forge.StashPop" class="com.forge.rider.actions.ForgeStashPopAction"
+                    text="Pop Stash" description="Apply and remove the latest stash"/>
+        </group>
+    </actions>
+</idea-plugin>
