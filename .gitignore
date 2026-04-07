@@ -1,2 +1,3 @@
 target/
 forge-web.toml
+!installers/config/forge-web.toml
