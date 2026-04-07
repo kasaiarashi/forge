@@ -38,6 +38,7 @@ export interface TreeEntry {
   kind: 'file' | 'directory' | 'symlink';
   size: number;
   hash: string;
+  asset_class?: string;
 }
 
 export interface TreeResponse {
@@ -46,11 +47,19 @@ export interface TreeResponse {
   entries: TreeEntry[];
 }
 
+export interface AssetMetadata {
+  asset_class: string;
+  engine_version: string;
+  package_flags: string[];
+  dependencies: string[];
+}
+
 export interface FileContent {
   content: string | null;
   size: number;
   is_binary: boolean;
   hash: string;
+  asset_metadata?: AssetMetadata | null;
 }
 
 export interface DiffFile {

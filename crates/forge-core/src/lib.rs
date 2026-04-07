@@ -7,3 +7,4 @@ pub mod store;
 pub mod workspace;
 pub mod index;
 pub mod diff;
+pub mod uasset;

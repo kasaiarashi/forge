@@ -78,6 +78,16 @@ struct TreeEntryJson {
     kind: String,
     hash: String,
     size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset_class: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AssetMetadataJson {
+    asset_class: String,
+    engine_version: String,
+    package_flags: Vec<String>,
+    dependencies: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +96,8 @@ struct FileContentJson {
     size: u64,
     is_binary: bool,
     hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset_metadata: Option<AssetMetadataJson>,
 }
 
 #[derive(Debug, Serialize)]
@@ -356,11 +368,15 @@ pub async fn get_tree(
             let entries: Vec<TreeEntryJson> = resp
                 .entries
                 .into_iter()
-                .map(|e| TreeEntryJson {
-                    name: e.name,
-                    kind: e.kind,
-                    hash: e.hash,
-                    size: e.size,
+                .map(|e| {
+                    let asset_class = if e.asset_class.is_empty() { None } else { Some(e.asset_class) };
+                    TreeEntryJson {
+                        name: e.name,
+                        kind: e.kind,
+                        hash: e.hash,
+                        size: e.size,
+                        asset_class,
+                    }
                 })
                 .collect();
             let body = serde_json::json!({
@@ -402,11 +418,18 @@ pub async fn get_blob(
             } else {
                 Some(String::from_utf8_lossy(&resp.content).to_string())
             };
+            let asset_metadata = resp.asset_metadata.map(|m| AssetMetadataJson {
+                asset_class: m.asset_class,
+                engine_version: m.engine_version,
+                package_flags: m.package_flags,
+                dependencies: m.dependencies,
+            });
             let body = FileContentJson {
                 content,
                 size: resp.size,
                 is_binary: resp.is_binary,
                 hash: resp.hash,
+                asset_metadata,
             };
             (StatusCode::OK, Json(body)).into_response()
         }

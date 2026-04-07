@@ -1,0 +1,10 @@
+[package]
+name = "test_utilities"
+version = "0.1.0"
+authors = ["Jørgen P. Tjernø <jorgen@tjer.no>"]
+edition = "2024"
+
+[dependencies]
+rstest = "0.25.0"
+rstest_reuse = "0.7.0"
+uasset = {path = ".."}

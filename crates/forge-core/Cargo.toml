@@ -18,6 +18,7 @@ hex.workspace = true
 walkdir.workspace = true
 tracing.workspace = true
 forge-ignore.workspace = true
+uasset.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

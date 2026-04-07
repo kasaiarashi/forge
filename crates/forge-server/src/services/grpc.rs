@@ -557,12 +557,12 @@ impl ForgeService for ForgeGrpcService {
                 skipped += 1;
             } else {
                 commits.push(CommitInfo {
-                    hash: current.short(),
+                    hash: current.to_hex(),
                     message: snap.message.clone(),
                     author_name: snap.author.name.clone(),
                     author_email: snap.author.email.clone(),
                     timestamp: snap.timestamp.timestamp(),
-                    parent_hashes: snap.parents.iter().map(|p| p.short()).collect(),
+                    parent_hashes: snap.parents.iter().map(|p| p.to_hex()).collect(),
                 });
             }
 
@@ -607,6 +607,19 @@ impl ForgeService for ForgeGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let mut entries: Vec<TreeEntryInfo> = tree.entries.iter().map(|e| {
+            // For .uasset/.umap files, try a quick header parse for the asset class.
+            let asset_class = if forge_core::uasset::is_uasset_path(&e.name)
+                && e.kind == forge_core::object::tree::EntryKind::File
+            {
+                os.get_blob_data(&e.hash)
+                    .ok()
+                    .and_then(|data| forge_core::uasset::parse_uasset(&data))
+                    .map(|m| m.asset_class)
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
             TreeEntryInfo {
                 name: e.name.clone(),
                 kind: match e.kind {
@@ -616,6 +629,7 @@ impl ForgeService for ForgeGrpcService {
                 },
                 hash: e.hash.short(),
                 size: e.size,
+                asset_class,
             }
         }).collect();
 
@@ -673,11 +687,24 @@ impl ForgeService for ForgeGrpcService {
         let is_binary = content.iter().take(8192).any(|&b| b == 0);
         let size = content.len() as u64;
 
+        // Parse UE asset metadata on-demand for .uasset/.umap files.
+        let asset_metadata = if forge_core::uasset::is_uasset_path(&req.path) {
+            forge_core::uasset::parse_uasset(&content).map(|m| AssetMetadata {
+                asset_class: m.asset_class,
+                engine_version: m.engine_version,
+                package_flags: m.package_flags,
+                dependencies: m.dependencies,
+            })
+        } else {
+            None
+        };
+
         Ok(Response::new(GetFileContentResponse {
             content,
             size,
             is_binary,
             hash: file_entry.hash.short(),
+            asset_metadata,
         }))
     }
 
@@ -695,12 +722,12 @@ impl ForgeService for ForgeGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let commit = CommitInfo {
-            hash: commit_hash.short(),
+            hash: commit_hash.to_hex(),
             message: snap.message.clone(),
             author_name: snap.author.name.clone(),
             author_email: snap.author.email.clone(),
             timestamp: snap.timestamp.timestamp(),
-            parent_hashes: snap.parents.iter().map(|p| p.short()).collect(),
+            parent_hashes: snap.parents.iter().map(|p| p.to_hex()).collect(),
         };
 
         // Diff against parent to find changed files.

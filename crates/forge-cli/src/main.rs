@@ -253,6 +253,12 @@ enum Commands {
         /// Commit to revert
         commit: String,
     },
+
+    /// Show UE asset metadata (.uasset/.umap)
+    AssetInfo {
+        /// Path to the asset file
+        path: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -297,6 +303,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Reset { commit, soft, hard } => commands::reset::run(commit, soft, hard)?,
         Commands::Stash { action, message } => commands::stash::run(action, message)?,
         Commands::Revert { commit } => commands::revert::run(commit)?,
+        Commands::AssetInfo { path } => commands::asset_info::run(path, cli.json)?,
     }
 
     Ok(())
