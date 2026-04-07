@@ -186,6 +186,14 @@ fn restore_working_tree(
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Clear read-only flag if needed (common in UE/Perforce workflows).
+        if let Ok(meta) = std::fs::metadata(&abs) {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(&abs, perms);
+            }
+        }
         std::fs::write(&abs, &content)?;
     }
 

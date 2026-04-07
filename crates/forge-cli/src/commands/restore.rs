@@ -204,6 +204,15 @@ fn write_and_update_index(
     if let Some(parent) = abs_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Clear read-only flag if needed (common in UE/Perforce workflows).
+    if abs_path.exists() {
+        let meta = std::fs::metadata(&abs_path)?;
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            std::fs::set_permissions(&abs_path, perms)?;
+        }
+    }
     std::fs::write(&abs_path, content)?;
 
     let mtime = std::fs::metadata(&abs_path)?

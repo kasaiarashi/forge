@@ -95,6 +95,7 @@ pub fn run(name: String) -> Result<()> {
                 if let Some(parent) = abs.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
+                clear_readonly(&abs);
                 std::fs::write(&abs, &content)?;
             }
             DiffEntry::Deleted { path, .. } => {
@@ -198,4 +199,14 @@ fn mtime_of(path: &std::path::Path) -> (i64, u32) {
         }
     }
     (0, 0)
+}
+
+fn clear_readonly(path: &std::path::Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
 }
