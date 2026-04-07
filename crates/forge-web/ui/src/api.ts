@@ -160,6 +160,7 @@ export interface IssueInfo {
   author: string;
   status: string;
   labels: string[];
+  assignee: string;
   created_at: number;
   updated_at: number;
   comment_count: number;
@@ -181,6 +182,7 @@ export interface PullRequestInfo {
   source_branch: string;
   target_branch: string;
   labels: string[];
+  assignee: string;
   created_at: number;
   updated_at: number;
   comment_count: number;
@@ -323,12 +325,15 @@ const api = {
   listIssues(repo: string, status = '', limit = 50, offset = 0) {
     return request<IssueListResponse>(`/api/repos/${enc(repo)}/issues?status=${status}&limit=${limit}&offset=${offset}`);
   },
+  getIssue(repo: string, id: number) {
+    return request<IssueInfo>(`/api/repos/${enc(repo)}/issues/${id}`);
+  },
   createIssue(repo: string, title: string, body = '', labels: string[] = []) {
     return request<{ success: boolean; id: number }>(`/api/repos/${enc(repo)}/issues`, {
       method: 'POST', body: JSON.stringify({ title, body, labels }),
     });
   },
-  updateIssue(repo: string, id: number, data: { title?: string; body?: string; status?: string; labels?: string[] }) {
+  updateIssue(repo: string, id: number, data: { title?: string; body?: string; status?: string; labels?: string[]; assignee?: string }) {
     return request<{ success: boolean }>(`/api/repos/${enc(repo)}/issues/${id}`, {
       method: 'PUT', body: JSON.stringify(data),
     });
@@ -338,12 +343,18 @@ const api = {
   listPullRequests(repo: string, status = '', limit = 50, offset = 0) {
     return request<PullRequestListResponse>(`/api/repos/${enc(repo)}/pulls?status=${status}&limit=${limit}&offset=${offset}`);
   },
+  getPullRequest(repo: string, id: number) {
+    return request<PullRequestInfo>(`/api/repos/${enc(repo)}/pulls/${id}`);
+  },
   createPullRequest(repo: string, title: string, sourceBranch: string, targetBranch = 'main', body = '', labels: string[] = []) {
     return request<{ success: boolean; id: number }>(`/api/repos/${enc(repo)}/pulls`, {
       method: 'POST', body: JSON.stringify({ title, body, source_branch: sourceBranch, target_branch: targetBranch, labels }),
     });
   },
-  updatePullRequest(repo: string, id: number, data: { title?: string; body?: string; status?: string; labels?: string[] }) {
+  mergePullRequest(repo: string, id: number) {
+    return request<{ success: boolean; error: string }>(`/api/repos/${enc(repo)}/pulls/${id}/merge`, { method: 'POST' });
+  },
+  updatePullRequest(repo: string, id: number, data: { title?: string; body?: string; status?: string; labels?: string[]; assignee?: string }) {
     return request<{ success: boolean }>(`/api/repos/${enc(repo)}/pulls/${id}`, {
       method: 'PUT', body: JSON.stringify(data),
     });

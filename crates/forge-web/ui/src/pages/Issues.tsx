@@ -11,6 +11,7 @@ import {
 import RepoHeader from '../components/RepoHeader';
 import api from '../api';
 import type { IssueInfo } from '../api';
+import { getLabelColor } from '../utils';
 
 function timeAgo(epoch: number): string {
   if (!epoch) return '';
@@ -85,7 +86,7 @@ export default function Issues() {
             />
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <Button size="medium" variant="primary">New issue</Button>
+            <Button size="medium" variant="primary" as={Link} to={`/${encodeURIComponent(repo)}/issues/new`}>New issue</Button>
           </div>
         </div>
 
@@ -126,11 +127,11 @@ export default function Issues() {
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                    <Link to="#" style={{ fontWeight: 600, fontSize: '16px', color: 'var(--fg-default)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.color = 'var(--fg-accent)'} onMouseOut={e => e.currentTarget.style.color = 'var(--fg-default)'}>
+                    <Link to={`/${encodeURIComponent(repo)}/issues/${issue.id}`} style={{ fontWeight: 600, fontSize: '16px', color: 'var(--fg-default)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.color = 'var(--fg-accent)'} onMouseOut={e => e.currentTarget.style.color = 'var(--fg-default)'}>
                       {issue.title}
                     </Link>
                     {issue.labels.map(l => (
-                      <Label key={l} size="small" style={{ borderColor: 'var(--border-default)', color: 'var(--fg-muted)' }}>{l}</Label>
+                      <Label key={l} size="small" style={{ backgroundColor: getLabelColor(l), color: '#fff', border: 'none' }}>{l}</Label>
                     ))}
                   </div>
                   <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>

@@ -6,6 +6,7 @@ Saved/
 .vs/
 *.sln
 *.suo
+.idea/
 
 # Keep plugin binaries
 !Plugins/ForgeSourceControl/Binaries/

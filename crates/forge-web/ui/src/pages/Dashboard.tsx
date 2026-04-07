@@ -80,6 +80,12 @@ export default function Dashboard() {
   const [newDesc, setNewDesc] = useState('');
   const [creating, setCreating] = useState(false);
   const [createdRepo, setCreatedRepo] = useState<string | null>(null);
+  const [flashMsg, setFlashMsg] = useState('');
+
+  const triggerMockAction = (msg: string) => {
+    setFlashMsg(msg);
+    setTimeout(() => setFlashMsg(''), 3000);
+  };
 
   useEffect(() => {
     api.listRepos()
@@ -131,7 +137,13 @@ export default function Dashboard() {
   }
 
   return (
-    <div style={{ display: 'flex', gap: '32px', maxWidth: '1280px', margin: '0 auto' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1280px', margin: '0 auto' }}>
+      {flashMsg && (
+        <div style={{ padding: '0' }}>
+          <Flash variant="success">{flashMsg}</Flash>
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: '32px' }}>
       
       {/* Left Sidebar: Repositories */}
       <div style={{ width: '320px', flexShrink: 0 }}>
@@ -192,7 +204,7 @@ export default function Dashboard() {
         </ul>
         
         <div style={{ marginTop: '16px', fontSize: '12px', color: 'var(--fg-muted)' }}>
-          <a href="#" style={{ color: 'var(--fg-muted)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.color = 'var(--fg-accent)')} onMouseOut={(e) => (e.currentTarget.style.color = 'var(--fg-muted)')}>Show more</a>
+          <span style={{ color: 'var(--fg-muted)', cursor: 'pointer' }} onMouseOver={(e) => (e.currentTarget.style.color = 'var(--fg-accent)')} onMouseOut={(e) => (e.currentTarget.style.color = 'var(--fg-muted)')} onClick={() => triggerMockAction('Showing more repositories...')}>Show more</span>
         </div>
       </div>
 
@@ -245,8 +257,8 @@ export default function Dashboard() {
             Home
           </h2>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <Button size="small" variant="invisible">Send feedback</Button>
-            <Button size="small" leadingVisual={SearchIcon}>Filter</Button>
+            <Button size="small" variant="invisible" onClick={() => triggerMockAction('Feedback recorded! Thank you.')}>Send feedback</Button>
+            <Button size="small" leadingVisual={SearchIcon} onClick={() => triggerMockAction('Filter options opened...')}>Filter</Button>
           </div>
         </div>
 
@@ -278,7 +290,7 @@ export default function Dashboard() {
             <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 16px 0' }}>
               Your news feed helps you keep up with recent activity on repositories you watch and people you follow.
             </p>
-            <Button>Explore Forge</Button>
+            <Button onClick={() => triggerMockAction('Navigating to Explore...')}>Explore Forge</Button>
           </div>
         )}
       </div>
@@ -335,6 +347,7 @@ export default function Dashboard() {
           </div>
         </Dialog>
       )}
+      </div>
     </div>
   );
 }

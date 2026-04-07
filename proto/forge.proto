@@ -56,6 +56,11 @@ service ForgeService {
     rpc ListPullRequests(ListPullRequestsRequest) returns (ListPullRequestsResponse);
     rpc CreatePullRequest(CreatePullRequestRequest) returns (CreatePullRequestResponse);
     rpc UpdatePullRequest(UpdatePullRequestRequest) returns (UpdatePullRequestResponse);
+    rpc MergePullRequest(MergePullRequestRequest) returns (MergePullRequestResponse);
+
+    // Single item getters
+    rpc GetIssue(GetIssueRequest) returns (GetIssueResponse);
+    rpc GetPullRequest(GetPullRequestRequest) returns (GetPullRequestResponse);
 }
 
 // ============================================================
@@ -458,7 +463,11 @@ message IssueInfo {
     int64 created_at = 8;
     int64 updated_at = 9;
     int32 comment_count = 10;
+    string assignee = 11;
 }
+
+message GetIssueRequest { int64 id = 1; }
+message GetIssueResponse { IssueInfo issue = 1; }
 
 message ListIssuesRequest {
     string repo = 1;
@@ -494,6 +503,7 @@ message UpdateIssueRequest {
     string body = 3;
     string status = 4;
     repeated string labels = 5;
+    string assignee = 6;
 }
 
 message UpdateIssueResponse {
@@ -518,7 +528,11 @@ message PullRequestInfo {
     int64 created_at = 10;
     int64 updated_at = 11;
     int32 comment_count = 12;
+    string assignee = 13;
 }
+
+message GetPullRequestRequest { int64 id = 1; }
+message GetPullRequestResponse { PullRequestInfo pull_request = 1; }
 
 message ListPullRequestsRequest {
     string repo = 1;
@@ -556,9 +570,19 @@ message UpdatePullRequestRequest {
     string body = 3;
     string status = 4;
     repeated string labels = 5;
+    string assignee = 6;
 }
 
 message UpdatePullRequestResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message MergePullRequestRequest {
+    int64 id = 1;
+}
+
+message MergePullRequestResponse {
     bool success = 1;
     string error = 2;
 }

@@ -54,6 +54,7 @@ impl MetadataDb {
                 author TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'open',
                 labels TEXT NOT NULL DEFAULT '',
+                assignee TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 comment_count INTEGER NOT NULL DEFAULT 0
@@ -68,12 +69,17 @@ impl MetadataDb {
                 source_branch TEXT NOT NULL,
                 target_branch TEXT NOT NULL DEFAULT 'main',
                 labels TEXT NOT NULL DEFAULT '',
+                assignee TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 comment_count INTEGER NOT NULL DEFAULT 0
             );
             ",
         )?;
+
+        // Migrate: add assignee column if missing
+        let _ = conn.execute("ALTER TABLE issues ADD COLUMN assignee TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN assignee TEXT NOT NULL DEFAULT ''", []);
 
         let db = Self {
             conn: Mutex::new(conn),
@@ -333,10 +339,10 @@ impl MetadataDb {
             .query_row([repo], |row| row.get(0))?;
 
         let (query, total) = if status.is_empty() {
-            ("SELECT id, repo, title, body, author, status, labels, created_at, updated_at, comment_count FROM issues WHERE repo = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3".to_string(),
+            ("SELECT id, repo, title, body, author, status, labels, created_at, updated_at, comment_count, assignee FROM issues WHERE repo = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3".to_string(),
              open_count + closed_count)
         } else {
-            ("SELECT id, repo, title, body, author, status, labels, created_at, updated_at, comment_count FROM issues WHERE repo = ?1 AND status = ?4 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3".to_string(),
+            ("SELECT id, repo, title, body, author, status, labels, created_at, updated_at, comment_count, assignee FROM issues WHERE repo = ?1 AND status = ?4 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3".to_string(),
              if status == "open" { open_count } else { closed_count })
         };
 
@@ -362,12 +368,35 @@ impl MetadataDb {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn update_issue(&self, id: i64, title: &str, body: &str, status: &str, labels: &str) -> Result<bool> {
+    /// Get a single issue by ID.
+    pub fn get_issue(&self, id: i64) -> Result<Option<IssueRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .prepare("SELECT id, repo, title, body, author, status, labels, created_at, updated_at, comment_count, assignee FROM issues WHERE id = ?1")?
+            .query_row([id], Self::map_issue)
+            .ok();
+        Ok(result)
+    }
+
+    /// Partial update: empty strings mean "keep current value".
+    pub fn update_issue(&self, id: i64, title: &str, body: &str, status: &str, labels: &str, assignee: &str) -> Result<bool> {
+        let current = self.get_issue(id)?;
+        let current = match current {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().timestamp();
+        let new_title = if title.is_empty() { &current.title } else { title };
+        let new_body = if body.is_empty() { &current.body } else { body };
+        let new_status = if status.is_empty() { &current.status } else { status };
+        let new_labels = if labels.is_empty() { &current.labels } else { labels };
+        let new_assignee = if assignee.is_empty() { &current.assignee } else { assignee };
+
         let affected = conn.execute(
-            "UPDATE issues SET title = ?1, body = ?2, status = ?3, labels = ?4, updated_at = ?5 WHERE id = ?6",
-            rusqlite::params![title, body, status, labels, now, id],
+            "UPDATE issues SET title = ?1, body = ?2, status = ?3, labels = ?4, assignee = ?5, updated_at = ?6 WHERE id = ?7",
+            rusqlite::params![new_title, new_body, new_status, new_labels, new_assignee, now, id],
         )?;
         Ok(affected > 0)
     }
@@ -384,6 +413,7 @@ impl MetadataDb {
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
             comment_count: row.get(9)?,
+            assignee: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
         })
     }
 
@@ -401,10 +431,10 @@ impl MetadataDb {
             .query_row([repo], |row| row.get(0))?;
 
         let (query, total) = if status.is_empty() {
-            ("SELECT id, repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at, comment_count FROM pull_requests WHERE repo = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3".to_string(),
+            ("SELECT id, repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at, comment_count, assignee FROM pull_requests WHERE repo = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3".to_string(),
              open_count + closed_count)
         } else {
-            ("SELECT id, repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at, comment_count FROM pull_requests WHERE repo = ?1 AND status = ?4 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3".to_string(),
+            ("SELECT id, repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at, comment_count, assignee FROM pull_requests WHERE repo = ?1 AND status = ?4 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3".to_string(),
              if status == "open" { open_count } else { closed_count })
         };
 
@@ -430,12 +460,35 @@ impl MetadataDb {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn update_pull_request(&self, id: i64, title: &str, body: &str, status: &str, labels: &str) -> Result<bool> {
+    /// Get a single pull request by ID.
+    pub fn get_pull_request(&self, id: i64) -> Result<Option<PullRequestRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .prepare("SELECT id, repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at, comment_count, assignee FROM pull_requests WHERE id = ?1")?
+            .query_row([id], Self::map_pr)
+            .ok();
+        Ok(result)
+    }
+
+    /// Partial update: empty strings mean "keep current value".
+    pub fn update_pull_request(&self, id: i64, title: &str, body: &str, status: &str, labels: &str, assignee: &str) -> Result<bool> {
+        let current = self.get_pull_request(id)?;
+        let current = match current {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().timestamp();
+        let new_title = if title.is_empty() { &current.title } else { title };
+        let new_body = if body.is_empty() { &current.body } else { body };
+        let new_status = if status.is_empty() { &current.status } else { status };
+        let new_labels = if labels.is_empty() { &current.labels } else { labels };
+        let new_assignee = if assignee.is_empty() { &current.assignee } else { assignee };
+
         let affected = conn.execute(
-            "UPDATE pull_requests SET title = ?1, body = ?2, status = ?3, labels = ?4, updated_at = ?5 WHERE id = ?6",
-            rusqlite::params![title, body, status, labels, now, id],
+            "UPDATE pull_requests SET title = ?1, body = ?2, status = ?3, labels = ?4, assignee = ?5, updated_at = ?6 WHERE id = ?7",
+            rusqlite::params![new_title, new_body, new_status, new_labels, new_assignee, now, id],
         )?;
         Ok(affected > 0)
     }
@@ -454,6 +507,7 @@ impl MetadataDb {
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
             comment_count: row.get(11)?,
+            assignee: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
         })
     }
 }
@@ -467,6 +521,7 @@ pub struct IssueRecord {
     pub author: String,
     pub status: String,
     pub labels: String,
+    pub assignee: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub comment_count: i32,
@@ -483,6 +538,7 @@ pub struct PullRequestRecord {
     pub source_branch: String,
     pub target_branch: String,
     pub labels: String,
+    pub assignee: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub comment_count: i32,

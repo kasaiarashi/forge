@@ -8,10 +8,12 @@ import {
   CommentIcon,
   GitMergeIcon,
   GitPullRequestClosedIcon,
+  LightBulbIcon,
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
 import api from '../api';
 import type { PullRequestInfo } from '../api';
+import { getLabelColor } from '../utils';
 
 function timeAgo(epoch: number): string {
   if (!epoch) return '';
@@ -102,7 +104,7 @@ export default function PullRequests() {
             />
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <Button size="medium" variant="primary" leadingVisual={GitPullRequestIcon}>New pull request</Button>
+            <Button size="medium" variant="primary" leadingVisual={GitPullRequestIcon} as={Link} to={`/${encodeURIComponent(repo)}/pulls/new`}>New pull request</Button>
           </div>
         </div>
 
@@ -131,10 +133,16 @@ export default function PullRequests() {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {filtered.length === 0 ? (
-              <div style={{ padding: 48, textAlign: 'center', color: 'var(--fg-muted)' }}>
-                {prs.length === 0
-                  ? 'No pull requests yet.'
-                  : 'No pull requests match the current filter.'}
+              <div style={{ padding: '80px 48px', textAlign: 'center' }}>
+                <div style={{ marginBottom: '16px', color: 'var(--fg-muted)' }}>
+                  <GitPullRequestIcon size={32} />
+                </div>
+                <h3 style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-default)', margin: '0 0 8px 0' }}>
+                  There aren't any {statusFilter} pull requests.
+                </h3>
+                <p style={{ color: 'var(--fg-muted)', margin: 0 }}>
+                  You could search all of Forge VCS or try an advanced search.
+                </p>
               </div>
             ) : filtered.map((pr, idx) => (
               <div key={pr.id} className="file-row" style={{ display: 'flex', padding: '12px 16px', borderBottom: idx < filtered.length - 1 ? '1px solid var(--border-muted)' : 'none' }}>
@@ -143,11 +151,11 @@ export default function PullRequests() {
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                    <Link to="#" style={{ fontWeight: 600, fontSize: '16px', color: 'var(--fg-default)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.color = 'var(--fg-accent)'} onMouseOut={e => e.currentTarget.style.color = 'var(--fg-default)'}>
+                    <Link to={`/${encodeURIComponent(repo)}/pulls/${pr.id}`} style={{ fontWeight: 600, fontSize: '16px', color: 'var(--fg-default)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.color = 'var(--fg-accent)'} onMouseOut={e => e.currentTarget.style.color = 'var(--fg-default)'}>
                       {pr.title}
                     </Link>
                     {pr.labels.map(l => (
-                      <Label key={l} size="small" style={{ borderColor: 'var(--border-default)', color: 'var(--fg-muted)' }}>{l}</Label>
+                      <Label key={l} size="small" style={{ backgroundColor: getLabelColor(l), color: '#fff', border: 'none' }}>{l}</Label>
                     ))}
                   </div>
                   <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
@@ -164,6 +172,11 @@ export default function PullRequests() {
               </div>
             ))}
           </div>
+        </div>
+
+        <div style={{ textAlign: 'center', marginTop: '32px', fontSize: '14px', color: 'var(--fg-muted)', paddingBottom: '32px' }}>
+          <span style={{ marginRight: '8px', position: 'relative', top: '2px' }}><LightBulbIcon size={16} /></span>
+          <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>ProTip!</span> Type <code style={{ padding: '2px 6px', fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: '12px', border: '1px solid var(--border-default)', borderRadius: '6px', backgroundColor: 'var(--bg-subtle)' }}>g</code> <code style={{ padding: '2px 6px', fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: '12px', border: '1px solid var(--border-default)', borderRadius: '6px', backgroundColor: 'var(--bg-subtle)' }}>p</code> on any issue or pull request to go back to the pull request listing page.
         </div>
       </div>
     </div>

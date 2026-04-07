@@ -81,11 +81,21 @@ impl ForgeService for ForgeGrpcService {
                 let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
                     .map_err(|e| Status::internal(e.to_string()))?;
 
-                store
-                    .as_ref()
-                    .unwrap()
-                    .put(&forge_hash, &current_buf)
-                    .map_err(|e| Status::internal(e.to_string()))?;
+                if chunk.object_type == 1 {
+                    // Pre-compressed data — store directly without re-compressing.
+                    store
+                        .as_ref()
+                        .unwrap()
+                        .put_raw(&forge_hash, &current_buf)
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                } else {
+                    // Uncompressed data — compress and store.
+                    store
+                        .as_ref()
+                        .unwrap()
+                        .put(&forge_hash, &current_buf)
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                }
 
                 received.push(chunk.hash.clone());
                 current_buf.clear();
@@ -1090,7 +1100,7 @@ impl ForgeService for ForgeGrpcService {
                 id: i.id, repo: i.repo, title: i.title, body: i.body,
                 author: i.author, status: i.status, labels,
                 created_at: i.created_at, updated_at: i.updated_at,
-                comment_count: i.comment_count,
+                comment_count: i.comment_count, assignee: i.assignee,
             }
         }).collect();
 
@@ -1115,7 +1125,7 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<UpdateIssueResponse>, Status> {
         let req = request.into_inner();
         let labels = req.labels.join(",");
-        let ok = self.db.update_issue(req.id, &req.title, &req.body, &req.status, &labels)
+        let ok = self.db.update_issue(req.id, &req.title, &req.body, &req.status, &labels, &req.assignee)
             .map_err(|e| Status::internal(e.to_string()))?;
         if !ok {
             return Ok(Response::new(UpdateIssueResponse { success: false, error: "Issue not found".into() }));
@@ -1144,7 +1154,7 @@ impl ForgeService for ForgeGrpcService {
                 author: p.author, status: p.status,
                 source_branch: p.source_branch, target_branch: p.target_branch,
                 labels, created_at: p.created_at, updated_at: p.updated_at,
-                comment_count: p.comment_count,
+                comment_count: p.comment_count, assignee: p.assignee,
             }
         }).collect();
 
@@ -1171,11 +1181,108 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<UpdatePullRequestResponse>, Status> {
         let req = request.into_inner();
         let labels = req.labels.join(",");
-        let ok = self.db.update_pull_request(req.id, &req.title, &req.body, &req.status, &labels)
+        let ok = self.db.update_pull_request(req.id, &req.title, &req.body, &req.status, &labels, &req.assignee)
             .map_err(|e| Status::internal(e.to_string()))?;
         if !ok {
             return Ok(Response::new(UpdatePullRequestResponse { success: false, error: "Pull request not found".into() }));
         }
         Ok(Response::new(UpdatePullRequestResponse { success: true, error: String::new() }))
+    }
+
+    // ── Merge Pull Request ──
+
+    async fn merge_pull_request(
+        &self,
+        request: Request<MergePullRequestRequest>,
+    ) -> Result<Response<MergePullRequestResponse>, Status> {
+        let req = request.into_inner();
+
+        // Get the PR to find source/target branches
+        let pr = self.db.get_pull_request(req.id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Pull request not found"))?;
+
+        if pr.status != "open" {
+            return Ok(Response::new(MergePullRequestResponse {
+                success: false,
+                error: format!("Pull request is already {}", pr.status),
+            }));
+        }
+
+        // Get the source branch HEAD hash
+        let source_ref = format!("refs/heads/{}", pr.source_branch);
+        let source_hash = self.db.get_ref(&pr.repo, &source_ref)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found(format!("Source branch '{}' not found", pr.source_branch)))?;
+
+        // Get the target branch HEAD hash
+        let target_ref = format!("refs/heads/{}", pr.target_branch);
+        let target_hash = self.db.get_ref(&pr.repo, &target_ref)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found(format!("Target branch '{}' not found", pr.target_branch)))?;
+
+        // Fast-forward merge: update target branch to point to source branch's HEAD
+        let updated = self.db.update_ref(&pr.repo, &target_ref, &target_hash, &source_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !updated {
+            return Ok(Response::new(MergePullRequestResponse {
+                success: false,
+                error: "Failed to update target branch ref (concurrent modification?)".into(),
+            }));
+        }
+
+        // Mark PR as merged
+        self.db.update_pull_request(req.id, "", "", "merged", "", "")
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(MergePullRequestResponse { success: true, error: String::new() }))
+    }
+
+    // ── Single item getters ──
+
+    async fn get_issue(
+        &self,
+        request: Request<GetIssueRequest>,
+    ) -> Result<Response<GetIssueResponse>, Status> {
+        let req = request.into_inner();
+        let issue = self.db.get_issue(req.id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Issue not found"))?;
+
+        let labels = if issue.labels.is_empty() { vec![] } else {
+            issue.labels.split(',').map(|s| s.trim().to_string()).collect()
+        };
+        Ok(Response::new(GetIssueResponse {
+            issue: Some(IssueInfo {
+                id: issue.id, repo: issue.repo, title: issue.title, body: issue.body,
+                author: issue.author, status: issue.status, labels,
+                created_at: issue.created_at, updated_at: issue.updated_at,
+                comment_count: issue.comment_count, assignee: issue.assignee,
+            }),
+        }))
+    }
+
+    async fn get_pull_request(
+        &self,
+        request: Request<GetPullRequestRequest>,
+    ) -> Result<Response<GetPullRequestResponse>, Status> {
+        let req = request.into_inner();
+        let pr = self.db.get_pull_request(req.id)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Pull request not found"))?;
+
+        let labels = if pr.labels.is_empty() { vec![] } else {
+            pr.labels.split(',').map(|s| s.trim().to_string()).collect()
+        };
+        Ok(Response::new(GetPullRequestResponse {
+            pull_request: Some(PullRequestInfo {
+                id: pr.id, repo: pr.repo, title: pr.title, body: pr.body,
+                author: pr.author, status: pr.status,
+                source_branch: pr.source_branch, target_branch: pr.target_branch,
+                labels, created_at: pr.created_at, updated_at: pr.updated_at,
+                comment_count: pr.comment_count, assignee: pr.assignee,
+            }),
+        }))
     }
 }

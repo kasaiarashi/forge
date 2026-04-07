@@ -317,12 +317,18 @@ impl ForgeGrpcClient {
         Ok(resp.into_inner())
     }
 
-    pub async fn update_issue(&self, id: i64, title: &str, body: &str, status: &str, labels: Vec<String>) -> anyhow::Result<UpdateIssueResponse> {
+    pub async fn update_issue(&self, id: i64, title: &str, body: &str, status: &str, labels: Vec<String>, assignee: &str) -> anyhow::Result<UpdateIssueResponse> {
         let mut client = self.client.clone();
         let resp = client.update_issue(UpdateIssueRequest {
             id, title: title.to_string(), body: body.to_string(),
-            status: status.to_string(), labels,
+            status: status.to_string(), labels, assignee: assignee.to_string(),
         }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn get_issue(&self, id: i64) -> anyhow::Result<GetIssueResponse> {
+        let mut client = self.client.clone();
+        let resp = client.get_issue(GetIssueRequest { id }).await?;
         Ok(resp.into_inner())
     }
 
@@ -346,12 +352,24 @@ impl ForgeGrpcClient {
         Ok(resp.into_inner())
     }
 
-    pub async fn update_pull_request(&self, id: i64, title: &str, body: &str, status: &str, labels: Vec<String>) -> anyhow::Result<UpdatePullRequestResponse> {
+    pub async fn update_pull_request(&self, id: i64, title: &str, body: &str, status: &str, labels: Vec<String>, assignee: &str) -> anyhow::Result<UpdatePullRequestResponse> {
         let mut client = self.client.clone();
         let resp = client.update_pull_request(UpdatePullRequestRequest {
             id, title: title.to_string(), body: body.to_string(),
-            status: status.to_string(), labels,
+            status: status.to_string(), labels, assignee: assignee.to_string(),
         }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn get_pull_request(&self, id: i64) -> anyhow::Result<GetPullRequestResponse> {
+        let mut client = self.client.clone();
+        let resp = client.get_pull_request(GetPullRequestRequest { id }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn merge_pull_request(&self, id: i64) -> anyhow::Result<MergePullRequestResponse> {
+        let mut client = self.client.clone();
+        let resp = client.merge_pull_request(MergePullRequestRequest { id }).await?;
         Ok(resp.into_inner())
     }
 }

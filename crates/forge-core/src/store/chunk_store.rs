@@ -52,6 +52,30 @@ impl ChunkStore {
         Ok(data)
     }
 
+    /// Read compressed bytes directly from disk (no decompression).
+    pub fn get_raw(&self, hash: &ForgeHash) -> Result<Vec<u8>, ForgeError> {
+        let path = self.object_path(hash);
+        if !path.exists() {
+            return Err(ForgeError::ObjectNotFound(hash.to_hex()));
+        }
+        Ok(std::fs::read(&path)?)
+    }
+
+    /// Store pre-compressed data directly (no compression).
+    pub fn put_raw(&self, hash: &ForgeHash, compressed: &[u8]) -> Result<bool, ForgeError> {
+        let path = self.object_path(hash);
+        if path.exists() {
+            return Ok(false);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, compressed)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(true)
+    }
+
     /// Check if an object exists in the store.
     pub fn has(&self, hash: &ForgeHash) -> bool {
         self.object_path(hash).exists()

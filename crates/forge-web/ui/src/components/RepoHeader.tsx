@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { UnderlineNav, Label, Button } from '@primer/react';
+import { useState } from 'react';
 import {
   RepoIcon,
   CodeIcon,
@@ -16,6 +17,7 @@ import {
   StarIcon,
   ShieldIcon,
   GraphIcon,
+  StarFillIcon,
 } from '@primer/octicons-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -27,12 +29,38 @@ interface RepoHeaderProps {
   activeBranch?: string;
 }
 
-export default function RepoHeader({ repo, currentTab, activeBranch = 'main' }: RepoHeaderProps) {
+export default function RepoHeader({ repo, currentTab, activeBranch }: RepoHeaderProps) {
   const encRepo = encodeURIComponent(repo);
-  const encBranch = encodeURIComponent(activeBranch);
+
+  // Persist branch per repo so navigating between tabs preserves it
+  const storageKey = `forge-branch-${repo}`;
+  if (activeBranch && activeBranch !== 'main') {
+    localStorage.setItem(storageKey, activeBranch);
+  }
+  const resolvedBranch = activeBranch || localStorage.getItem(storageKey) || 'main';
+  const encBranch = encodeURIComponent(resolvedBranch);
   const { user } = useAuth();
   
   const owner = user?.username || 'user';
+  
+  // Interactive mock states
+  const [isWatching, setIsWatching] = useState(false);
+  const [isStarred, setIsStarred] = useState(false);
+  const [starCount, setStarCount] = useState(Math.floor(Math.random() * 100));
+  const [forkCount, setForkCount] = useState(Math.floor(Math.random() * 50));
+  const watchCount = isWatching ? 1 : 0;
+
+  const toggleWatch = () => setIsWatching(!isWatching);
+  const toggleStar = () => {
+    if (isStarred) {
+      setIsStarred(false);
+      setStarCount(s => s - 1);
+    } else {
+      setIsStarred(true);
+      setStarCount(s => s + 1);
+    }
+  };
+  const handleFork = () => setForkCount(f => f + 1);
 
   return (
     <div style={{ background: 'var(--bg-default)', borderBottom: '1px solid var(--border-default)', paddingTop: '16px', marginBottom: '24px', margin: '-24px -16px 24px -16px', paddingLeft: '16px', paddingRight: '16px' }}>
@@ -61,22 +89,22 @@ export default function RepoHeader({ repo, currentTab, activeBranch = 'main' }: 
           {/* Action Buttons */}
           <div style={{ display: 'flex', gap: '8px' }}>
             <div style={{ display: 'flex' }}>
-              <Button size="small" leadingVisual={EyeIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0, paddingRight: '8px' }}>
-                Watch <span style={{ marginLeft: '4px', fontSize: '10px' }}>▾</span>
+              <Button size="small" leadingVisual={EyeIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0, paddingRight: '8px' }} onClick={toggleWatch}>
+                {isWatching ? 'Unwatch' : 'Watch'} <span style={{ marginLeft: '4px', fontSize: '10px' }}>▾</span>
               </Button>
-              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>0</Button>
+              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>{watchCount}</Button>
             </div>
             <div style={{ display: 'flex' }}>
-              <Button size="small" leadingVisual={RepoForkedIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
+              <Button size="small" leadingVisual={RepoForkedIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }} onClick={handleFork}>
                 Fork <span style={{ marginLeft: '4px', fontSize: '10px' }}>▾</span>
               </Button>
-              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>0</Button>
+              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>{forkCount}</Button>
             </div>
             <div style={{ display: 'flex' }}>
-              <Button size="small" leadingVisual={StarIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
-                Star
+              <Button size="small" leadingVisual={isStarred ? StarFillIcon : StarIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }} onClick={toggleStar}>
+                {isStarred ? 'Unstar' : 'Star'}
               </Button>
-              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>0</Button>
+              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>{starCount}</Button>
             </div>
           </div>
         </div>

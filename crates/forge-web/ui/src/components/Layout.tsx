@@ -11,7 +11,7 @@ import {
   SunIcon,
   MoonIcon,
   SearchIcon,
-  MarkGithubIcon,
+  RepoIcon,
   PlusIcon,
   BellIcon,
 } from '@primer/octicons-react';
@@ -44,7 +44,7 @@ export default function Layout({ children }: LayoutProps) {
       <Header style={{ background: 'var(--header-bg)', padding: '16px', borderBottom: 'none' }}>
         <Header.Item>
           <Header.Link as={Link} to="/" style={{ color: 'var(--header-logo)' }}>
-            <MarkGithubIcon size={32} />
+            <RepoIcon size={32} />
           </Header.Link>
         </Header.Item>
 
@@ -61,19 +61,19 @@ export default function Layout({ children }: LayoutProps) {
         </Header.Item>
 
         <Header.Item>
-          <Header.Link href="#" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Pull requests</Header.Link>
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Pull requests</Header.Link>
         </Header.Item>
         <Header.Item>
-          <Header.Link href="#" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Issues</Header.Link>
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Issues</Header.Link>
         </Header.Item>
         <Header.Item>
-          <Header.Link href="#" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Codespaces</Header.Link>
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Codespaces</Header.Link>
         </Header.Item>
         <Header.Item>
-          <Header.Link href="#" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Marketplace</Header.Link>
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Marketplace</Header.Link>
         </Header.Item>
         <Header.Item>
-          <Header.Link href="#" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Explore</Header.Link>
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Explore</Header.Link>
         </Header.Item>
 
         <Header.Item full />
@@ -153,8 +153,8 @@ export default function Layout({ children }: LayoutProps) {
 
       <footer className="forge-footer" style={{ borderTop: 'none', marginTop: '40px', paddingTop: '40px', paddingBottom: '40px', maxWidth: '1012px', margin: '40px auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ color: 'var(--fg-muted)', display: 'flex' }}><MarkGithubIcon size={24} /></span>
-          <span>© 2026 GitHub, Inc. (Forge VCS)</span>
+          <span style={{ color: 'var(--fg-muted)', display: 'flex' }}><RepoIcon size={24} /></span>
+          <span>© 2026 Forge VCS</span>
         </div>
         <div style={{ display: 'flex', gap: '16px' }}>
           <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Terms</a>

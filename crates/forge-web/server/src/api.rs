@@ -724,6 +724,7 @@ pub struct UpdateIssueBody {
     pub body: Option<String>,
     pub status: Option<String>,
     pub labels: Option<Vec<String>>,
+    pub assignee: Option<String>,
 }
 
 pub async fn update_issue(
@@ -738,6 +739,7 @@ pub async fn update_issue(
     let resp = match grpc.update_issue(
         id, body.title.as_deref().unwrap_or(""), body.body.as_deref().unwrap_or(""),
         body.status.as_deref().unwrap_or(""), body.labels.unwrap_or_default(),
+        body.assignee.as_deref().unwrap_or(""),
     ).await {
         Ok(r) => r,
         Err(e) => return internal_error(e),
@@ -834,11 +836,74 @@ pub async fn update_pull_request(
     let resp = match grpc.update_pull_request(
         id, body.title.as_deref().unwrap_or(""), body.body.as_deref().unwrap_or(""),
         body.status.as_deref().unwrap_or(""), body.labels.unwrap_or_default(),
+        body.assignee.as_deref().unwrap_or(""),
     ).await {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
     Json(serde_json::json!({ "success": resp.success })).into_response()
+}
+
+pub async fn merge_pull_request(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, id)): Path<(String, i64)>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.merge_pull_request(id).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(serde_json::json!({ "success": resp.success, "error": resp.error })).into_response()
+}
+
+pub async fn get_issue(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, id)): Path<(String, i64)>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.get_issue(id).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    match resp.issue {
+        Some(i) => Json(serde_json::json!({
+            "id": i.id, "title": i.title, "body": i.body, "author": i.author,
+            "status": i.status, "labels": i.labels, "assignee": i.assignee,
+            "created_at": i.created_at, "updated_at": i.updated_at,
+            "comment_count": i.comment_count,
+        })).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response(),
+    }
+}
+
+pub async fn get_pull_request(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, id)): Path<(String, i64)>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.get_pull_request(id).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    match resp.pull_request {
+        Some(p) => Json(serde_json::json!({
+            "id": p.id, "title": p.title, "body": p.body, "author": p.author,
+            "status": p.status, "source_branch": p.source_branch, "target_branch": p.target_branch,
+            "labels": p.labels, "assignee": p.assignee,
+            "created_at": p.created_at, "updated_at": p.updated_at,
+            "comment_count": p.comment_count,
+        })).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
