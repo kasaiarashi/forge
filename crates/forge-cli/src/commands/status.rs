@@ -3,6 +3,7 @@ use forge_core::hash::ForgeHash;
 use forge_core::index::Index;
 use forge_core::object::tree::EntryKind;
 use forge_core::workspace::Workspace;
+use rayon::prelude::*;
 use std::time::SystemTime;
 
 /// Recursively collect all file paths from a tree into a set.
@@ -97,8 +98,11 @@ pub fn run(json: bool) -> Result<()> {
     let mut deleted = Vec::new();
     let mut untracked = Vec::new();
 
-    // Build set of paths from previous commit to distinguish new vs modified.
-    let prev_paths = {
+    // Check if there are any staged entries first (optimization: skip tree walk if none).
+    let has_any_staged = index.entries.values().any(|e| e.staged);
+
+    // Only build prev_paths if we have staged entries (avoids expensive tree traversal).
+    let prev_paths = if has_any_staged {
         let mut set = std::collections::HashSet::new();
         let head = ws.head_snapshot()?;
         if !head.is_zero() {
@@ -107,65 +111,95 @@ pub fn run(json: bool) -> Result<()> {
             }
         }
         set
+    } else {
+        std::collections::HashSet::new()
     };
 
-    // Check all index entries against working tree.
-    let mut seen = std::collections::HashSet::new();
+    // Process staged entries first (small set, sequential is fine).
+    let seen: std::collections::HashSet<String> = index.entries.keys().cloned().collect();
     for (path, entry) in &index.entries {
-        seen.insert(path.clone());
-        let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let exists = abs_path.exists();
-
-        if entry.staged {
-            if !exists && entry.hash == ForgeHash::ZERO {
-                // Intentionally staged deletion (via forge add after delete).
-                staged_deleted.push(path.clone());
-                continue;
-            } else if !exists {
-                // File was staged (e.g., modified) but then deleted without re-staging.
-                // Staging is stale — show as unstaged deletion.
-                deleted.push(path.clone());
-                continue;
-            } else {
-                // File exists and is staged.
-                if prev_paths.contains(path.as_str()) {
-                    staged_modified.push(path.clone());
-                } else {
-                    staged_new.push(path.clone());
-                }
-                continue;
-            }
-        }
-
-        if !exists {
-            deleted.push(path.clone());
+        if !entry.staged {
             continue;
         }
-
-        // Fast path: check mtime + size.
-        let metadata = std::fs::metadata(&abs_path)?;
-        let mtime = metadata
-            .modified()?
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
-
-        if mtime.as_secs() as i64 != entry.mtime_secs
-            || mtime.subsec_nanos() != entry.mtime_nanos
-            || metadata.len() != entry.size
-        {
-            // Re-hash to confirm.
-            let data = std::fs::read(&abs_path)?;
-            let hash = ForgeHash::from_bytes(&data);
-            if hash != entry.hash {
-                modified.push(path.clone());
-            }
-            // else: mtime changed but content same — could update index mtime
+        let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let exists = abs_path.exists();
+        if !exists && entry.hash == ForgeHash::ZERO {
+            staged_deleted.push(path.clone());
+        } else if !exists {
+            deleted.push(path.clone());
+        } else if prev_paths.contains(path.as_str()) {
+            staged_modified.push(path.clone());
+        } else {
+            staged_new.push(path.clone());
         }
     }
 
-    // Find untracked files.
+    // Check unstaged index entries against working tree — parallel metadata + hash checks.
+    let ws_root = &ws.root;
+    let unstaged_results: Vec<(String, &str)> = index
+        .entries
+        .par_iter()
+        .filter(|(_, entry)| !entry.staged)
+        .filter_map(|(path, entry)| {
+            let abs_path = ws_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if !abs_path.exists() {
+                return Some((path.clone(), "deleted"));
+            }
+            let metadata = std::fs::metadata(&abs_path).ok()?;
+            let mtime = metadata
+                .modified()
+                .ok()?
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default();
+            if mtime.as_secs() as i64 == entry.mtime_secs
+                && mtime.subsec_nanos() == entry.mtime_nanos
+                && metadata.len() == entry.size
+            {
+                return None; // unchanged
+            }
+            // Re-hash to confirm.
+            let data = std::fs::read(&abs_path).ok()?;
+            let hash = ForgeHash::from_bytes(&data);
+            if hash != entry.hash {
+                Some((path.clone(), "modified"))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (path, status) in unstaged_results {
+        match status {
+            "deleted" => deleted.push(path),
+            "modified" => modified.push(path),
+            _ => {}
+        }
+    }
+
+    // Find untracked files. Use filter_entry to skip .forge/ and ignored directories entirely.
+    let forge_dir_name = std::ffi::OsStr::new(".forge");
     for entry in walkdir::WalkDir::new(&ws.root)
         .into_iter()
+        .filter_entry(|e| {
+            // Skip .forge directory and common ignored directories at the entry level
+            // so walkdir doesn't descend into them at all.
+            let name = e.file_name();
+            if name == forge_dir_name {
+                return false;
+            }
+            if e.file_type().is_dir() {
+                let rel = e
+                    .path()
+                    .strip_prefix(&ws.root)
+                    .unwrap_or(e.path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !rel.is_empty() && ignore.is_ignored(&rel) {
+                    return false; // Skip entire ignored directory tree
+                }
+            }
+            true
+        })
         .filter_map(|e| e.ok())
     {
         if entry.file_type().is_file() {
@@ -175,11 +209,6 @@ pub fn run(json: bool) -> Result<()> {
                 .unwrap_or(entry.path())
                 .to_string_lossy()
                 .replace('\\', "/");
-
-            // Skip .forge directory.
-            if rel.starts_with(".forge/") || rel.starts_with(".forge\\") {
-                continue;
-            }
 
             if ignore.is_ignored(&rel) {
                 continue;

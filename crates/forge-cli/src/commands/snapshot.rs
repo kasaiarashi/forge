@@ -28,6 +28,16 @@ pub fn run(message: String, all: bool, json: bool) -> Result<()> {
         bail!("Nothing staged. Use `forge add` or `forge commit --all`.");
     }
 
+    // Get parent snapshot.
+    let head_hash = ws.head_snapshot()?;
+
+    // Load previous snapshot's tree hash for incremental tree building.
+    let prev_tree_hash = if !head_hash.is_zero() {
+        ws.object_store.get_snapshot(&head_hash).ok().map(|s| s.tree)
+    } else {
+        None
+    };
+
     // Build tree hierarchy from all entries, excluding staged deletions (ZERO hash).
     let all_entries: BTreeMap<String, &IndexEntry> = index
         .entries
@@ -35,11 +45,9 @@ pub fn run(message: String, all: bool, json: bool) -> Result<()> {
         .filter(|(_, v)| !v.hash.is_zero())
         .map(|(k, v)| (k.clone(), v))
         .collect();
-    let root_tree = build_tree(&ws, &all_entries)?;
+    let root_tree = build_tree(&ws, &all_entries, prev_tree_hash.as_ref())?;
     let tree_hash = ws.object_store.put_tree(&root_tree)?;
 
-    // Get parent snapshot.
-    let head_hash = ws.head_snapshot()?;
     let parents = if head_hash.is_zero() {
         vec![]
     } else {
@@ -141,14 +149,15 @@ fn auto_stage(ws: &Workspace, index: &mut Index) -> Result<()> {
     Ok(())
 }
 
-/// Build a Tree hierarchy from all index entries.
+/// Build a Tree hierarchy from all index entries, reusing unchanged subtrees
+/// from the previous commit to avoid redundant serialization and storage.
 fn build_tree(
     ws: &Workspace,
     entries: &BTreeMap<String, &IndexEntry>,
+    prev_tree_hash: Option<&ForgeHash>,
 ) -> Result<Tree> {
     // Group entries by top-level directory component.
-    let mut dirs: BTreeMap<String, BTreeMap<String, &IndexEntry>> =
-        BTreeMap::new();
+    let mut dirs: BTreeMap<String, BTreeMap<String, &IndexEntry>> = BTreeMap::new();
     let mut files: Vec<TreeEntry> = Vec::new();
 
     for (path, entry) in entries {
@@ -168,9 +177,39 @@ fn build_tree(
         }
     }
 
-    // Recursively build subtrees for directories.
+    // Load previous tree for comparison (if available).
+    let prev_tree = prev_tree_hash.and_then(|h| ws.object_store.get_tree(h).ok());
+    let prev_map: std::collections::HashMap<String, &TreeEntry> = prev_tree
+        .as_ref()
+        .map(|t| t.entries.iter().map(|e| (e.name.clone(), e)).collect())
+        .unwrap_or_default();
+
+    // Build subtrees, reusing unchanged ones.
     for (dir_name, sub_entries) in &dirs {
-        let subtree = build_tree(ws, sub_entries)?;
+        if let Some(prev_entry) = prev_map.get(dir_name) {
+            if prev_entry.kind == EntryKind::Directory {
+                // Check if this subtree is unchanged by comparing all file hashes.
+                let prev_sub = ws.object_store.get_tree(&prev_entry.hash).ok();
+                if let Some(ref prev_sub_tree) = prev_sub {
+                    if subtree_matches(prev_sub_tree, sub_entries) {
+                        // Reuse the existing tree object — skip put_tree entirely!
+                        files.push(TreeEntry {
+                            name: dir_name.clone(),
+                            kind: EntryKind::Directory,
+                            hash: prev_entry.hash,
+                            size: 0,
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+        // Changed or new directory — recurse.
+        let prev_dir_hash = prev_map
+            .get(dir_name)
+            .filter(|e| e.kind == EntryKind::Directory)
+            .map(|e| &e.hash);
+        let subtree = build_tree(ws, sub_entries, prev_dir_hash)?;
         let subtree_hash = ws.object_store.put_tree(&subtree)?;
         files.push(TreeEntry {
             name: dir_name.clone(),
@@ -182,4 +221,62 @@ fn build_tree(
 
     files.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Tree { entries: files })
+}
+
+/// Check if a previous tree exactly matches the current entries (all files have
+/// the same object_hash and size, and directory names are identical).
+fn subtree_matches(prev_tree: &Tree, current_entries: &BTreeMap<String, &IndexEntry>) -> bool {
+    // Quick count check.
+    let prev_file_count = prev_tree
+        .entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::File)
+        .count();
+    let prev_dir_count = prev_tree
+        .entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::Directory)
+        .count();
+
+    let current_file_count = current_entries
+        .iter()
+        .filter(|(p, _)| !p.contains('/'))
+        .count();
+    let current_dir_count = current_entries
+        .iter()
+        .filter(|(p, _)| p.contains('/'))
+        .map(|(p, _)| &p[..p.find('/').unwrap()])
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    if prev_file_count != current_file_count || prev_dir_count != current_dir_count {
+        return false;
+    }
+
+    // Check each file entry matches.
+    for entry in &prev_tree.entries {
+        if entry.kind == EntryKind::File {
+            match current_entries.get(&entry.name) {
+                Some(idx_entry)
+                    if idx_entry.object_hash == entry.hash && idx_entry.size == entry.size => {}
+                _ => return false,
+            }
+        }
+    }
+
+    // Check directory names match. Same file entries + same directory names at
+    // this level is a strong signal the subtree is unchanged.
+    let prev_dir_names: std::collections::HashSet<&str> = prev_tree
+        .entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::Directory)
+        .map(|e| e.name.as_str())
+        .collect();
+    let current_dir_names: std::collections::HashSet<&str> = current_entries
+        .iter()
+        .filter(|(p, _)| p.contains('/'))
+        .map(|(p, _)| &p[..p.find('/').unwrap()])
+        .collect();
+
+    prev_dir_names == current_dir_names
 }

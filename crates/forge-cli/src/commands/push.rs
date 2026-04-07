@@ -76,8 +76,12 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
     }
 
     // Check which objects the server already has.
+    // For small pushes (<100 objects), skip the has_objects round-trip — server deduplicates via put_raw.
     let missing = if objects_to_push.is_empty() {
         vec![]
+    } else if objects_to_push.len() < 100 {
+        // Small push: skip has_objects check, just push everything (server deduplicates).
+        objects_to_push.clone()
     } else {
         let hashes: Vec<Vec<u8>> = objects_to_push.iter().map(|h| h.as_bytes().to_vec()).collect();
         let has_resp = client
@@ -99,18 +103,15 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
     if !missing.is_empty() {
         let store = forge_core::store::chunk_store::ChunkStore::new(ws.forge_dir().join("objects"));
 
-        // Single pass: read compressed sizes for progress bar without decompressing.
-        let mut raw_objects: Vec<(ForgeHash, Vec<u8>)> = Vec::with_capacity(missing.len());
-        let mut total_bytes: u64 = 0;
-        for hash in &missing {
-            match store.get_raw(hash) {
-                Ok(compressed) => {
-                    total_bytes += compressed.len() as u64;
-                    raw_objects.push((*hash, compressed));
-                }
-                Err(_) => continue,
-            }
-        }
+        // Read objects in parallel from disk.
+        let raw_objects: Vec<(ForgeHash, Vec<u8>)> = {
+            use rayon::prelude::*;
+            missing
+                .par_iter()
+                .filter_map(|hash| store.get_raw(hash).ok().map(|data| (*hash, data)))
+                .collect()
+        };
+        let total_bytes: u64 = raw_objects.iter().map(|(_, d)| d.len() as u64).sum();
 
         let obj_count = raw_objects.len();
         let show_progress = total_bytes > 1024 * 1024; // progress bar for >1 MiB
