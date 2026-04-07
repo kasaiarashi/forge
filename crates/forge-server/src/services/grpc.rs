@@ -61,7 +61,8 @@ impl ForgeService for ForgeGrpcService {
             if store.is_none() {
                 let repo = repo_name(&chunk.repo)?;
                 // Auto-register repo if it doesn't exist.
-                let _ = self.db.create_repo(repo, "");
+                self.db.create_repo(repo, "")
+                    .map_err(|e| Status::internal(format!("failed to register repo: {}", e)))?;
                 store = Some(self.fs.repo_store(repo));
             }
 
@@ -123,6 +124,14 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<Self::PullObjectsStream>, Status> {
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?.to_string();
+
+        const MAX_PULL_HASHES: usize = 10_000;
+        if req.want_hashes.len() > MAX_PULL_HASHES {
+            return Err(Status::invalid_argument(format!(
+                "too many hashes requested ({}, max {})", req.want_hashes.len(), MAX_PULL_HASHES
+            )));
+        }
+
         let store = self.fs.repo_store(&repo);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -222,7 +231,8 @@ impl ForgeService for ForgeGrpcService {
         super::validate::ref_name(&req.ref_name)?;
 
         // Auto-register repo if it doesn't exist (first push creates it).
-        let _ = self.db.create_repo(repo, "");
+        self.db.create_repo(repo, "")
+            .map_err(|e| Status::internal(format!("failed to register repo: {}", e)))?;
 
         let success = self
             .db

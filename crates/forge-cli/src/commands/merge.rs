@@ -216,7 +216,9 @@ pub fn run(branch: String) -> Result<()> {
             index.remove(path);
             let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if abs_path.exists() {
-                let _ = std::fs::remove_file(&abs_path);
+                if let Err(e) = std::fs::remove_file(&abs_path) {
+                    eprintln!("warning: could not remove '{}': {}", path, e);
+                }
             }
         }
     }
@@ -311,7 +313,9 @@ fn checkout_tree(ws: &Workspace, snap_hash: &ForgeHash) -> Result<()> {
         if !file_map.contains_key(path) {
             let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if abs_path.exists() {
-                let _ = std::fs::remove_file(&abs_path);
+                if let Err(e) = std::fs::remove_file(&abs_path) {
+                    eprintln!("warning: could not remove '{}': {}", path, e);
+                }
             }
             index.remove(path);
         }

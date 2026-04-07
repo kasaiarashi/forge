@@ -173,7 +173,9 @@ fn restore_working_tree(
         if !flat.contains_key(path) {
             let abs = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if abs.exists() {
-                let _ = std::fs::remove_file(&abs);
+                if let Err(e) = std::fs::remove_file(&abs) {
+                    eprintln!("warning: could not remove '{}': {}", path, e);
+                }
             }
         }
     }

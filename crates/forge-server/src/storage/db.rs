@@ -301,7 +301,7 @@ impl MetadataDb {
         };
 
         let mut stmt = conn.prepare(
-            "SELECT path, owner, workspace_id, created_at, reason FROM locks WHERE repo = ?1 AND path LIKE ?2 AND owner LIKE ?3"
+            "SELECT path, owner, workspace_id, created_at, reason FROM locks WHERE repo = ?1 AND path LIKE ?2 AND owner LIKE ?3 LIMIT 10000"
         )?;
 
         let rows = stmt.query_map(rusqlite::params![repo, prefix_pattern, owner_pattern], |row| {

@@ -199,13 +199,13 @@ impl Workspace {
         std::fs::create_dir_all(forge_dir.join("refs").join("remotes"))?;
         std::fs::create_dir_all(forge_dir.join("locks"))?;
 
-        // Write HEAD pointing to main branch.
-        std::fs::write(forge_dir.join("HEAD"), "ref: refs/heads/main\n")?;
+        // Write HEAD pointing to main branch (atomic).
+        atomic_write(&forge_dir.join("HEAD"), b"ref: refs/heads/main\n")?;
 
-        // Write initial branch ref (zero hash = no snapshots yet).
-        std::fs::write(
-            forge_dir.join("refs").join("heads").join("main"),
-            ForgeHash::ZERO.to_hex(),
+        // Write initial branch ref (zero hash = no snapshots yet, atomic).
+        atomic_write(
+            &forge_dir.join("refs").join("heads").join("main"),
+            ForgeHash::ZERO.to_hex().as_bytes(),
         )?;
 
         // Write config.
@@ -225,7 +225,7 @@ impl Workspace {
         };
         let config_json = serde_json::to_string_pretty(&config)
             .map_err(|e| ForgeError::Serialization(e.to_string()))?;
-        std::fs::write(forge_dir.join("config.json"), config_json)?;
+        atomic_write(&forge_dir.join("config.json"), config_json.as_bytes())?;
 
         // Write empty index.
         let index = crate::index::Index::default();
@@ -343,9 +343,14 @@ impl Workspace {
 
 /// Write data atomically: write to a temp file, then rename over the target.
 /// This prevents partial/corrupt writes on crash or power loss.
-fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), ForgeError> {
+pub fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), ForgeError> {
     let tmp = path.with_extension("tmp");
+    // Remove stale temp from a prior crash, if any.
+    let _ = std::fs::remove_file(&tmp);
     std::fs::write(&tmp, data)?;
+    // On Windows, rename fails if target exists — remove it first.
+    #[cfg(target_os = "windows")]
+    let _ = std::fs::remove_file(path);
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
