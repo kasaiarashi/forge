@@ -1059,6 +1059,22 @@ async fn resolve_branch(
     repo: &str,
     branch: &str,
 ) -> anyhow::Result<String> {
+    // If it looks like a commit hash (hex string >= 12 chars), use it directly.
+    if branch.len() >= 12 && branch.chars().all(|c| c.is_ascii_hexdigit()) {
+        // For short hashes, try to find the full hash by prefix match in refs.
+        if branch.len() < 64 {
+            let refs_resp = grpc.get_refs(repo).await?;
+            for hash_bytes in refs_resp.refs.values() {
+                let full = hex::encode(hash_bytes);
+                if full.starts_with(branch) {
+                    return Ok(full);
+                }
+            }
+        }
+        // Use as-is (the gRPC layer will handle short hash resolution).
+        return Ok(branch.to_string());
+    }
+
     let refs_resp = grpc.get_refs(repo).await?;
     let ref_name_candidates = [
         branch.to_string(),
