@@ -12,8 +12,8 @@ import {
   DiffModifiedIcon,
   FileIcon,
   CopyIcon,
-  RepoIcon,
 } from '@primer/octicons-react';
+import RepoHeader from '../components/RepoHeader';
 import type { CommitDetail as CommitDetailType, DiffFile } from '../api';
 import api, { copyToClipboard } from '../api';
 
@@ -103,18 +103,7 @@ export default function CommitDetail() {
 
   return (
     <div>
-      {/* Repo name header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
-          <RepoIcon size={20} />
-        </span>
-        <Link
-          to={`/${encRepo}`}
-          style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}
-        >
-          {repo}
-        </Link>
-      </div>
+      <RepoHeader repo={repo} currentTab="commits" />
 
       {/* Commit header */}
       <div className="forge-card" style={{ marginBottom: '16px' }}>

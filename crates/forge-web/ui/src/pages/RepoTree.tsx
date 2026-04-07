@@ -6,25 +6,21 @@ import {
   ActionList,
   Spinner,
   Flash,
-  UnderlineNav,
   TextInput,
   Button,
-  Label,
 } from '@primer/react';
 import {
   FileDirectoryFillIcon,
   FileIcon,
   GitBranchIcon,
   CodeIcon,
-  GitCommitIcon,
-  LockIcon,
-  GearIcon,
-  RepoIcon,
   CopyIcon,
   HistoryIcon,
   TagIcon,
   SearchIcon,
+  LockIcon,
 } from '@primer/octicons-react';
+import RepoHeader from '../components/RepoHeader';
 import type { TreeEntry, Branch, CommitSummary, RepoInfo } from '../api';
 import api, { copyToClipboard } from '../api';
 
@@ -145,34 +141,7 @@ export default function RepoTree() {
 
   return (
     <div>
-      {/* Repo name header — like GitHub: owner / repo-name */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '16px' }}>
-        <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}>
-          <RepoIcon size={16} />
-        </span>
-        <Link to={`/${encRepo}`} style={{ fontSize: '20px', fontWeight: 600, color: 'var(--fg-accent)', textDecoration: 'none' }}>
-          {repo}
-        </Link>
-        <Label size="small" variant="secondary" style={{ marginLeft: '4px' }}>
-          Private
-        </Label>
-      </div>
-
-      {/* Repository tabs — Code, Commits, Locks, Settings */}
-      <UnderlineNav aria-label="Repository">
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/tree/${encBranch}`} aria-current="page" icon={CodeIcon}>
-          Code
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/commits/${encBranch}`} icon={GitCommitIcon}>
-          Commits
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/locks`} icon={LockIcon}>
-          Locks
-        </UnderlineNav.Item>
-        <UnderlineNav.Item as={Link} to={`/${encRepo}/settings`} icon={GearIcon}>
-          Settings
-        </UnderlineNav.Item>
-      </UnderlineNav>
+      <RepoHeader repo={repo} currentTab="code" activeBranch={activeBranch} />
 
       {/* Main content: left file browser + right sidebar */}
       <div style={{ display: 'flex', gap: '24px', marginTop: '16px' }}>
@@ -448,7 +417,23 @@ export default function RepoTree() {
               </div>
             </div>
 
-            {/* Languages placeholder */}
+            {/* Releases */}
+            <div style={{ marginBottom: '24px' }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Releases</h3>
+              <Link
+                to={`/${encRepo}/releases`}
+                style={{ fontSize: '13px', color: 'var(--fg-accent)', textDecoration: 'none' }}
+                onMouseOver={e => e.currentTarget.style.textDecoration = 'underline'}
+                onMouseOut={e => e.currentTarget.style.textDecoration = 'none'}
+              >
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <TagIcon size={14} />
+                  View releases
+                </span>
+              </Link>
+            </div>
+
+            {/* Activity */}
             <div>
               <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Activity</h3>
               <div style={{ fontSize: '13px', color: 'var(--fg-muted)' }}>
