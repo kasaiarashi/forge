@@ -13,6 +13,11 @@
   --bg-overlay: #ffffff;
   --border-default: #d0d7de;
   --border-muted: #d8dee4;
+  --header-bg: #24292f;
+  --header-fg: rgba(255, 255, 255, 0.7);
+  --header-logo: #ffffff;
+  --header-search-bg: rgba(255, 255, 255, 0.125);
+  --header-search-border: rgba(255, 255, 255, 0);
 }
 
 [data-color-mode="night"] {
@@ -28,6 +33,11 @@
   --bg-overlay: #1c2128;
   --border-default: #30363d;
   --border-muted: #21262d;
+  --header-bg: #010409;
+  --header-fg: rgba(255, 255, 255, 0.7);
+  --header-logo: #ffffff;
+  --header-search-bg: #0d1117;
+  --header-search-border: #30363d;
 }
 
 body {

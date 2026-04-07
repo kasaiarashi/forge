@@ -221,4 +221,80 @@ impl ForgeGrpcClient {
             .await?;
         Ok(resp.into_inner())
     }
+
+    // ── Actions ──
+
+    pub async fn list_workflows(&self, repo: &str) -> anyhow::Result<ListWorkflowsResponse> {
+        let mut client = self.client.clone();
+        let resp = client.list_workflows(ListWorkflowsRequest { repo: repo.to_string() }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn create_workflow(&self, repo: &str, name: &str, yaml: &str) -> anyhow::Result<CreateWorkflowResponse> {
+        let mut client = self.client.clone();
+        let resp = client.create_workflow(CreateWorkflowRequest {
+            repo: repo.to_string(), name: name.to_string(), yaml: yaml.to_string(),
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn update_workflow(&self, id: i64, name: &str, yaml: &str, enabled: bool) -> anyhow::Result<UpdateWorkflowResponse> {
+        let mut client = self.client.clone();
+        let resp = client.update_workflow(UpdateWorkflowRequest {
+            id, name: name.to_string(), yaml: yaml.to_string(), enabled,
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn delete_workflow(&self, id: i64) -> anyhow::Result<DeleteWorkflowResponse> {
+        let mut client = self.client.clone();
+        let resp = client.delete_workflow(DeleteWorkflowRequest { id }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn trigger_workflow(&self, workflow_id: i64, ref_name: &str, triggered_by: &str) -> anyhow::Result<TriggerWorkflowResponse> {
+        let mut client = self.client.clone();
+        let resp = client.trigger_workflow(TriggerWorkflowRequest {
+            workflow_id, ref_name: ref_name.to_string(), triggered_by: triggered_by.to_string(),
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn list_workflow_runs(&self, repo: &str, workflow_id: i64, limit: i32, offset: i32) -> anyhow::Result<ListWorkflowRunsResponse> {
+        let mut client = self.client.clone();
+        let resp = client.list_workflow_runs(ListWorkflowRunsRequest {
+            repo: repo.to_string(), workflow_id, limit, offset,
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn get_workflow_run(&self, run_id: i64) -> anyhow::Result<GetWorkflowRunResponse> {
+        let mut client = self.client.clone();
+        let resp = client.get_workflow_run(GetWorkflowRunRequest { run_id }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn cancel_workflow_run(&self, run_id: i64) -> anyhow::Result<CancelWorkflowRunResponse> {
+        let mut client = self.client.clone();
+        let resp = client.cancel_workflow_run(CancelWorkflowRunRequest { run_id }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn list_artifacts(&self, run_id: i64) -> anyhow::Result<ListArtifactsResponse> {
+        let mut client = self.client.clone();
+        let resp = client.list_artifacts(ListArtifactsRequest { run_id }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn list_releases(&self, repo: &str) -> anyhow::Result<ListReleasesResponse> {
+        let mut client = self.client.clone();
+        let resp = client.list_releases(ListReleasesRequest { repo: repo.to_string() }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn get_release(&self, release_id: i64) -> anyhow::Result<GetReleaseResponse> {
+        let mut client = self.client.clone();
+        let resp = client.get_release(GetReleaseRequest { release_id }).await?;
+        Ok(resp.into_inner())
+    }
 }
