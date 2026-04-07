@@ -28,9 +28,13 @@ pub fn run(message: String, all: bool) -> Result<()> {
         bail!("Nothing staged. Use `forge add` or `forge commit --all`.");
     }
 
-    // Build tree hierarchy from staged + existing entries.
-    let all_entries: BTreeMap<String, &IndexEntry> =
-        index.entries.iter().map(|(k, v)| (k.clone(), v)).collect();
+    // Build tree hierarchy from all entries, excluding staged deletions (ZERO hash).
+    let all_entries: BTreeMap<String, &IndexEntry> = index
+        .entries
+        .iter()
+        .filter(|(_, v)| !v.hash.is_zero())
+        .map(|(k, v)| (k.clone(), v))
+        .collect();
     let root_tree = build_tree(&ws, &all_entries)?;
     let tree_hash = ws.object_store.put_tree(&root_tree)?;
 
@@ -59,7 +63,8 @@ pub fn run(message: String, all: bool) -> Result<()> {
         ws.set_branch_tip(&branch, &snap_hash)?;
     }
 
-    // Clear staged flags.
+    // Remove deleted entries (ZERO hash) and clear staged flags.
+    index.entries.retain(|_, e| !e.hash.is_zero());
     index.clear_staged();
     index.save(&ws.forge_dir().join("index"))?;
 

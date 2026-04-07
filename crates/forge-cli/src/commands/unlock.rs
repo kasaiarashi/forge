@@ -33,9 +33,14 @@ pub fn run(path: String, force: bool) -> Result<()> {
             .into_inner();
 
         if resp.success {
-            println!("Unlocked: {}", rel_path);
+            println!("\x1b[32mUnlocked:\x1b[0m {}", rel_path);
         } else {
-            bail!("Failed to unlock '{}': {}", rel_path, resp.error);
+            let msg = if resp.error.is_empty() {
+                "lock not found or owned by another user".to_string()
+            } else {
+                resp.error
+            };
+            bail!("Failed to unlock '{}': {}", rel_path, msg);
         }
 
         Ok(())

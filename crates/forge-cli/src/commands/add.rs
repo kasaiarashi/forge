@@ -54,9 +54,66 @@ pub fn run(paths: Vec<String>) -> Result<()> {
         }
     }
 
+    // Load the index to detect unchanged files and deletions.
+    let index = Index::load(&ws.forge_dir().join("index"))?;
+
+    // Collect the set of disk files (relative paths) for deletion detection.
+    // Find deleted files: in index but no longer on disk (within requested paths).
+    // For "forge add .", we check all index entries. For specific paths, only those under the path.
+    let is_add_all = paths.iter().any(|p| p == ".");
+    let mut deleted_paths: Vec<String> = Vec::new();
+    for (idx_path, _entry) in &index.entries {
+        let dominated = if is_add_all {
+            true
+        } else {
+            paths.iter().any(|p| {
+                let norm = p.replace('\\', "/");
+                idx_path.starts_with(&norm) || idx_path == &norm
+            })
+        };
+        if dominated {
+            let abs = ws.root.join(idx_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if !abs.exists() {
+                deleted_paths.push(idx_path.clone());
+            }
+        }
+    }
+
+    // Filter out files that are already tracked and unchanged.
+    file_paths.retain(|abs_path| {
+        let rel_path = abs_path
+            .strip_prefix(&ws.root)
+            .unwrap_or(abs_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if let Some(entry) = index.get(&rel_path) {
+            // Check if content changed using mtime + size fast path.
+            if let Ok(metadata) = std::fs::metadata(abs_path) {
+                if let Ok(mtime) = metadata.modified().and_then(|m| {
+                    Ok(m.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
+                }) {
+                    if mtime.as_secs() as i64 == entry.mtime_secs
+                        && mtime.subsec_nanos() == entry.mtime_nanos
+                        && metadata.len() == entry.size
+                    {
+                        return false; // Unchanged — skip
+                    }
+                    // mtime/size changed — re-hash to confirm
+                    if let Ok(data) = std::fs::read(abs_path) {
+                        let hash = ForgeHash::from_bytes(&data);
+                        if hash == entry.hash {
+                            return false; // Content identical — skip
+                        }
+                    }
+                }
+            }
+        }
+        true // New or modified — include
+    });
+
     let total = file_paths.len();
-    if total == 0 {
-        println!("No files to add.");
+    if total == 0 && deleted_paths.is_empty() {
         return Ok(());
     }
 
@@ -130,8 +187,6 @@ pub fn run(paths: Vec<String>) -> Result<()> {
 
     // 3. Sequential phase: write pre-compressed data to disk + update index.
     let mut index = Index::load(&ws.forge_dir().join("index"))?;
-    let mut added = 0usize;
-    let mut skipped = 0usize;
 
     for result in results {
         let (rel_path, entry, compressed_chunks) = result?;
@@ -140,7 +195,6 @@ pub fn run(paths: Vec<String>) -> Result<()> {
             let hex = cc.hash.to_hex();
             let path = objects_dir.join(&hex[..2]).join(&hex[2..]);
             if path.exists() {
-                skipped += 1;
                 continue; // dedup
             }
             if let Some(parent) = path.parent() {
@@ -152,16 +206,19 @@ pub fn run(paths: Vec<String>) -> Result<()> {
         }
 
         index.set(rel_path, entry);
-        added += 1;
+    }
+
+    // Stage deleted files: mark with ZERO hash to indicate intentional deletion.
+    for del_path in &deleted_paths {
+        if let Some(entry) = index.entries.get_mut(del_path) {
+            entry.staged = true;
+            entry.hash = ForgeHash::ZERO;
+            entry.object_hash = ForgeHash::ZERO;
+            entry.size = 0;
+        }
     }
 
     index.save(&ws.forge_dir().join("index"))?;
-
-    if skipped > 0 {
-        println!("Added {} file(s) ({} objects deduplicated)", added, skipped);
-    } else {
-        println!("Added {} file(s)", added);
-    }
 
     Ok(())
 }

@@ -15,3 +15,4 @@ pub mod switch;
 pub mod ignore;
 pub mod remote;
 pub mod config_cmd;
+pub mod unstage;

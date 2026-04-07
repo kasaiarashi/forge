@@ -95,6 +95,22 @@ enum Commands {
     /// List active locks
     Locks,
 
+    /// Unstage files (undo forge add)
+    Unstage {
+        /// Files or directories to unstage (use . for all)
+        paths: Vec<String>,
+    },
+
+    /// Restore files (git-compatible alias)
+    Restore {
+        /// Unstage files (like git restore --staged)
+        #[arg(long)]
+        staged: bool,
+
+        /// Files or directories to restore
+        paths: Vec<String>,
+    },
+
     /// Create or list branches
     Branch {
         /// Branch name (omit to list)
@@ -154,6 +170,14 @@ fn main() -> anyhow::Result<()> {
         Commands::Lock { path, reason } => commands::lock::run(path, reason)?,
         Commands::Unlock { path, force } => commands::unlock::run(path, force)?,
         Commands::Locks => commands::locks::run()?,
+        Commands::Unstage { paths } => commands::unstage::run(paths)?,
+        Commands::Restore { staged, paths } => {
+            if staged {
+                commands::unstage::run(paths)?;
+            } else {
+                anyhow::bail!("forge restore currently only supports --staged. Use: forge restore --staged <path>");
+            }
+        }
         Commands::Branch { name, delete } => commands::branch::run(name, delete)?,
         Commands::Switch { name } => commands::switch::run(name)?,
         Commands::Ignore { patterns } => commands::ignore::run(patterns)?,
