@@ -112,11 +112,15 @@ enum Commands {
         paths: Vec<String>,
     },
 
-    /// Restore files (git-compatible alias)
+    /// Restore working tree files
     Restore {
         /// Unstage files (like git restore --staged)
         #[arg(long)]
         staged: bool,
+
+        /// Restore from a specific commit or branch
+        #[arg(long)]
+        source: Option<String>,
 
         /// Files or directories to restore
         paths: Vec<String>,
@@ -287,13 +291,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Unlock { path, force } => commands::unlock::run(path, force)?,
         Commands::Locks => commands::locks::run()?,
         Commands::Unstage { paths } => commands::unstage::run(paths)?,
-        Commands::Restore { staged, paths } => {
-            if staged {
-                commands::unstage::run(paths)?;
-            } else {
-                anyhow::bail!("forge restore currently only supports --staged. Use: forge restore --staged <path>");
-            }
-        }
+        Commands::Restore { staged, source, paths } => commands::restore::run(staged, source, paths)?,
         Commands::Branch { name, delete } => commands::branch::run(name, delete)?,
         Commands::Switch { name } => commands::switch::run(name)?,
         Commands::Ignore { patterns } => commands::ignore::run(patterns)?,

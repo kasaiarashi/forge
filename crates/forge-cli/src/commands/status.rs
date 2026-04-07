@@ -227,33 +227,40 @@ pub fn run(json: bool) -> Result<()> {
 
         if has_staged {
             println!("Changes to be committed:");
+            println!("  (use \"forge unstage <file>...\" to unstage)");
+            println!();
             for f in &staged_new {
-                println!("  \x1b[32mnew file:   {}\x1b[0m", f);
+                println!("        \x1b[32mnew file:   {}\x1b[0m", f);
             }
             for f in &staged_modified {
-                println!("  \x1b[32mmodified:   {}\x1b[0m", f);
+                println!("        \x1b[32mmodified:   {}\x1b[0m", f);
             }
             for f in &staged_deleted {
-                println!("  \x1b[32mdeleted:    {}\x1b[0m", f);
+                println!("        \x1b[32mdeleted:    {}\x1b[0m", f);
             }
             println!();
         }
 
         if !modified.is_empty() || !deleted.is_empty() {
             println!("Changes not staged for commit:");
+            println!("  (use \"forge add <file>...\" to update what will be committed)");
+            println!("  (use \"forge restore <file>...\" to discard changes in working directory)");
+            println!();
             for f in &modified {
-                println!("  \x1b[31mmodified:   {}\x1b[0m", f);
+                println!("        \x1b[31mmodified:   {}\x1b[0m", f);
             }
             for f in &deleted {
-                println!("  \x1b[31mdeleted:    {}\x1b[0m", f);
+                println!("        \x1b[31mdeleted:    {}\x1b[0m", f);
             }
             println!();
         }
 
         if !untracked.is_empty() {
             println!("Untracked files:");
+            println!("  (use \"forge add <file>...\" to include in what will be committed)");
+            println!();
             for f in &untracked {
-                println!("  \x1b[90m{}\x1b[0m", f);
+                println!("        \x1b[31m{}\x1b[0m", f);
             }
             println!();
         }
