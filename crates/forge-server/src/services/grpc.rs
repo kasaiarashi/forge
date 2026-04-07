@@ -71,6 +71,10 @@ impl ForgeService for ForgeGrpcService {
                 current_hash = Some(chunk.hash.clone());
             }
 
+            const MAX_OBJECT_SIZE: usize = 512 * 1024 * 1024; // 512 MiB per object
+            if current_buf.len() + chunk.data.len() > MAX_OBJECT_SIZE {
+                return Err(Status::resource_exhausted("object exceeds maximum size"));
+            }
             current_buf.extend_from_slice(&chunk.data);
 
             if chunk.is_last {
@@ -83,19 +87,21 @@ impl ForgeService for ForgeGrpcService {
                 let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
                     .map_err(|e| Status::internal(e.to_string()))?;
 
+                let s = store.as_ref().ok_or_else(|| Status::internal("no repo specified in stream"))?;
+
                 if chunk.object_type == 1 {
-                    // Pre-compressed data — store directly without re-compressing.
-                    store
-                        .as_ref()
-                        .unwrap()
-                        .put_raw(&forge_hash, &current_buf)
+                    // Pre-compressed data — verify it's valid zstd before storing.
+                    if forge_core::compress::decompress(&current_buf).is_err() {
+                        return Err(Status::data_loss(format!(
+                            "corrupt compressed data for {}",
+                            hex::encode(&hash_bytes)
+                        )));
+                    }
+                    s.put_raw(&forge_hash, &current_buf)
                         .map_err(|e| Status::internal(e.to_string()))?;
                 } else {
                     // Uncompressed data — compress and store.
-                    store
-                        .as_ref()
-                        .unwrap()
-                        .put(&forge_hash, &current_buf)
+                    s.put(&forge_hash, &current_buf)
                         .map_err(|e| Status::internal(e.to_string()))?;
                 }
 

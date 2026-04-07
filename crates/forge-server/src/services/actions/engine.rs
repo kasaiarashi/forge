@@ -196,7 +196,11 @@ async fn execute_command(
         command.env(k, v);
     }
 
-    let output = command.output().await?;
+    let timeout = std::time::Duration::from_secs(30 * 60); // 30 minute step timeout
+    let output = match tokio::time::timeout(timeout, command.output()).await {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!("step timed out after 30 minutes"),
+    };
     let exit_code = output.status.code().unwrap_or(-1);
 
     let stdout = String::from_utf8_lossy(&output.stdout);

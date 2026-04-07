@@ -45,11 +45,13 @@ impl Index {
         Ok(index)
     }
 
-    /// Save the index to disk.
+    /// Save the index to disk atomically (write to temp, then rename).
     pub fn save(&self, path: &Path) -> Result<(), ForgeError> {
         let data = bincode::serialize(self)
             .map_err(|e| ForgeError::Serialization(e.to_string()))?;
-        std::fs::write(path, data)?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &data)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
     }
 

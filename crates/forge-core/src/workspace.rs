@@ -257,14 +257,14 @@ impl Workspace {
         }
     }
 
-    /// Set the HEAD reference.
+    /// Set the HEAD reference (atomic write).
     pub fn set_head(&self, head: &HeadRef) -> Result<(), ForgeError> {
         let head_path = self.forge_dir().join("HEAD");
         let content = match head {
             HeadRef::Branch(name) => format!("ref: refs/heads/{}\n", name),
             HeadRef::Detached(hash) => format!("{}\n", hash.to_hex()),
         };
-        std::fs::write(&head_path, content)?;
+        atomic_write(&head_path, content.as_bytes())?;
         Ok(())
     }
 
@@ -286,10 +286,13 @@ impl Workspace {
         ForgeHash::from_hex(content.trim())
     }
 
-    /// Update the tip of a branch.
+    /// Update the tip of a branch (atomic write).
     pub fn set_branch_tip(&self, branch: &str, hash: &ForgeHash) -> Result<(), ForgeError> {
         let ref_path = self.forge_dir().join("refs").join("heads").join(branch);
-        std::fs::write(&ref_path, hash.to_hex())?;
+        if let Some(parent) = ref_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        atomic_write(&ref_path, hash.to_hex().as_bytes())?;
         Ok(())
     }
 
@@ -328,12 +331,21 @@ impl Workspace {
         Ok(config)
     }
 
-    /// Save workspace config back to disk.
+    /// Save workspace config back to disk (atomic write).
     pub fn save_config(&self, config: &WorkspaceConfig) -> Result<(), ForgeError> {
         let config_path = self.forge_dir().join("config.json");
         let json = serde_json::to_string_pretty(config)
             .map_err(|e| ForgeError::Serialization(e.to_string()))?;
-        std::fs::write(&config_path, json)?;
+        atomic_write(&config_path, json.as_bytes())?;
         Ok(())
     }
+}
+
+/// Write data atomically: write to a temp file, then rename over the target.
+/// This prevents partial/corrupt writes on crash or power loss.
+fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), ForgeError> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }

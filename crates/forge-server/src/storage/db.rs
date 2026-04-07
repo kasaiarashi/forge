@@ -26,6 +26,9 @@ impl MetadataDb {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database at {}", path.display()))?;
 
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .with_context(|| "Failed to enable WAL mode")?;
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS repos (
@@ -125,7 +128,7 @@ impl MetadataDb {
     }
 
     pub fn update_repo(&self, name: &str, new_name: &str, description: &str) -> Result<bool> {
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
 
         // Check that the repo exists.
         let exists: bool = conn
@@ -149,31 +152,36 @@ impl MetadataDb {
             }
         }
 
-        conn.execute(
+        let tx = conn.transaction()?;
+
+        tx.execute(
             "UPDATE repos SET name = ?1, description = ?2 WHERE name = ?3",
             rusqlite::params![effective_name, description, name],
         )?;
 
         // Update refs and locks tables if renamed.
         if !new_name.is_empty() && new_name != name {
-            conn.execute(
+            tx.execute(
                 "UPDATE refs SET repo = ?1 WHERE repo = ?2",
                 rusqlite::params![new_name, name],
             )?;
-            conn.execute(
+            tx.execute(
                 "UPDATE locks SET repo = ?1 WHERE repo = ?2",
                 rusqlite::params![new_name, name],
             )?;
         }
 
+        tx.commit()?;
         Ok(true)
     }
 
     pub fn delete_repo(&self, name: &str) -> Result<bool> {
-        let conn = self.conn()?;
-        let affected = conn.execute("DELETE FROM repos WHERE name = ?1", [name])?;
-        conn.execute("DELETE FROM refs WHERE repo = ?1", [name])?;
-        conn.execute("DELETE FROM locks WHERE repo = ?1", [name])?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let affected = tx.execute("DELETE FROM repos WHERE name = ?1", [name])?;
+        tx.execute("DELETE FROM refs WHERE repo = ?1", [name])?;
+        tx.execute("DELETE FROM locks WHERE repo = ?1", [name])?;
+        tx.commit()?;
         Ok(affected > 0)
     }
 
@@ -205,27 +213,23 @@ impl MetadataDb {
     pub fn update_ref(&self, repo: &str, name: &str, old_hash: &[u8], new_hash: &[u8]) -> Result<bool> {
         let conn = self.conn()?;
 
-        // Check current value.
-        let current: Option<Vec<u8>> = conn
-            .prepare("SELECT hash FROM refs WHERE repo = ?1 AND name = ?2")?
-            .query_row(rusqlite::params![repo, name], |row| row.get::<_, Vec<u8>>(0))
-            .ok();
+        let is_create = old_hash.iter().all(|&b| b == 0);
 
-        let matches = match &current {
-            Some(h) => h.as_slice() == old_hash,
-            None => old_hash.iter().all(|&b| b == 0), // Zero hash means "expect not to exist"
+        let affected = if is_create {
+            // Expect ref to not exist — INSERT only if absent
+            conn.execute(
+                "INSERT OR IGNORE INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)",
+                rusqlite::params![repo, name, new_hash],
+            )?
+        } else {
+            // Atomic CAS: update only if current hash matches old_hash
+            conn.execute(
+                "UPDATE refs SET hash = ?1 WHERE repo = ?2 AND name = ?3 AND hash = ?4",
+                rusqlite::params![new_hash, repo, name, old_hash],
+            )?
         };
 
-        if !matches {
-            return Ok(false);
-        }
-
-        conn.execute(
-            "INSERT OR REPLACE INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)",
-            rusqlite::params![repo, name, new_hash],
-        )?;
-
-        Ok(true)
+        Ok(affected > 0)
     }
 
     // -- Locks --
