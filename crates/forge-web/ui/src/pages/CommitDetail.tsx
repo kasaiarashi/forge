@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   Spinner,
@@ -12,6 +12,8 @@ import {
   DiffModifiedIcon,
   FileIcon,
   CopyIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
 import type { CommitDetail as CommitDetailType, DiffFile } from '../api';
@@ -58,18 +60,212 @@ function StatusIcon({ status }: { status: DiffFile['change_type'] }) {
   );
 }
 
+/** Simple unified diff: compare old and new line arrays, render with +/- coloring. */
+function computeDiff(oldText: string, newText: string): { tag: 'equal' | 'add' | 'del'; line: string }[] {
+  const oldLines = oldText.split('\n');
+  const newLines = newText.split('\n');
+  const result: { tag: 'equal' | 'add' | 'del'; line: string }[] = [];
+
+  // Simple LCS-based diff (Myers-like for small files, fallback for large)
+  const maxLines = 5000;
+  if (oldLines.length > maxLines || newLines.length > maxLines) {
+    // Too large — just show as full replacement
+    for (const l of oldLines) result.push({ tag: 'del', line: l });
+    for (const l of newLines) result.push({ tag: 'add', line: l });
+    return result;
+  }
+
+  // Build edit script using simple O(ND) approach
+  const n = oldLines.length, m = newLines.length;
+  const max = n + m;
+  const v = new Int32Array(2 * max + 1).fill(-1);
+  const trace: Int32Array[] = [];
+
+  outer:
+  for (let d = 0; d <= max; d++) {
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let x: number;
+      if (k === -d || (k !== d && v[k - 1 + max] < v[k + 1 + max])) {
+        x = v[k + 1 + max];
+      } else {
+        x = v[k - 1 + max] + 1;
+      }
+      let y = x - k;
+      while (x < n && y < m && oldLines[x] === newLines[y]) { x++; y++; }
+      v[k + max] = x;
+      if (x >= n && y >= m) break outer;
+    }
+  }
+
+  // Backtrack to build edit operations
+  type Edit = { tag: 'equal' | 'add' | 'del'; line: string };
+  const edits: Edit[] = [];
+  let x = n, y = m;
+  for (let d = trace.length - 1; d >= 0; d--) {
+    const vPrev = d > 0 ? trace[d - 1] : new Int32Array(2 * max + 1).fill(-1);
+    const k = x - y;
+    let prevK: number;
+    if (k === -d || (k !== d && vPrev[k - 1 + max] < vPrev[k + 1 + max])) {
+      prevK = k + 1;
+    } else {
+      prevK = k - 1;
+    }
+    let prevX = d > 0 ? vPrev[prevK + max] : 0;
+    let prevY = prevX - prevK;
+
+    // Diagonal (equal lines)
+    while (x > prevX && y > prevY && x > 0 && y > 0) {
+      x--; y--;
+      edits.push({ tag: 'equal', line: oldLines[x] });
+    }
+    if (d === 0) break;
+    if (k === prevK + 1) {
+      // Deletion
+      x--;
+      edits.push({ tag: 'del', line: oldLines[x] });
+    } else {
+      // Insertion
+      y--;
+      edits.push({ tag: 'add', line: newLines[y] });
+    }
+  }
+
+  edits.reverse();
+  return edits;
+}
+
+interface FileDiffViewProps {
+  repo: string;
+  commitHash: string;
+  parentHash: string | null;
+  file: DiffFile;
+}
+
+function FileDiffView({ repo, commitHash, parentHash, file }: FileDiffViewProps) {
+  const [diffLines, setDiffLines] = useState<{ tag: string; line: string }[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        setLoading(true);
+        let oldContent = '';
+        let newContent = '';
+
+        if (file.change_type === 'added') {
+          const resp = await api.getFile(repo, commitHash, file.path);
+          if (resp.is_binary) { setDiffLines([{ tag: 'equal', line: 'Binary file' }]); return; }
+          newContent = resp.content || '';
+        } else if (file.change_type === 'deleted') {
+          if (parentHash) {
+            const resp = await api.getFile(repo, parentHash, file.path);
+            if (resp.is_binary) { setDiffLines([{ tag: 'equal', line: 'Binary file' }]); return; }
+            oldContent = resp.content || '';
+          }
+        } else {
+          // Modified
+          const [newResp, oldResp] = await Promise.all([
+            api.getFile(repo, commitHash, file.path),
+            parentHash ? api.getFile(repo, parentHash, file.path).catch(() => ({ content: '', is_binary: false })) : Promise.resolve({ content: '', is_binary: false }),
+          ]);
+          if (newResp.is_binary || oldResp.is_binary) {
+            setDiffLines([{ tag: 'equal', line: `Binary file (${formatBytes(file.old_size)} → ${formatBytes(file.new_size)})` }]);
+            return;
+          }
+          oldContent = oldResp.content || '';
+          newContent = newResp.content || '';
+        }
+
+        const lines = computeDiff(oldContent, newContent);
+        setDiffLines(lines);
+      } catch (e: any) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, [repo, commitHash, parentHash, file]);
+
+  if (loading) return <div style={{ padding: '16px', textAlign: 'center' }}><Spinner size="small" /></div>;
+  if (error) return <div style={{ padding: '8px 16px', color: 'var(--fg-danger)', fontSize: '13px' }}>{error}</div>;
+  if (!diffLines) return null;
+
+  // Show with context: collapse long runs of equal lines
+  const contextLines = 3;
+  const chunks: { start: number; end: number }[] = [];
+  let i = 0;
+  while (i < diffLines.length) {
+    if (diffLines[i].tag !== 'equal') {
+      const start = Math.max(0, i - contextLines);
+      let end = i;
+      while (end < diffLines.length && diffLines[end].tag !== 'equal') end++;
+      end = Math.min(diffLines.length, end + contextLines);
+      // Merge with previous chunk if overlapping
+      if (chunks.length > 0 && start <= chunks[chunks.length - 1].end) {
+        chunks[chunks.length - 1].end = end;
+      } else {
+        chunks.push({ start, end });
+      }
+      i = end;
+    } else {
+      i++;
+    }
+  }
+
+  // If no changes visible (all equal), show a message
+  if (chunks.length === 0) {
+    return <div style={{ padding: '8px 16px', color: 'var(--fg-muted)', fontSize: '13px', fontStyle: 'italic' }}>No visible text changes</div>;
+  }
+
+  return (
+    <div style={{
+      fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
+      fontSize: '12px',
+      lineHeight: '20px',
+      overflow: 'auto',
+      maxHeight: '600px',
+    }}>
+      {chunks.map((chunk, ci) => (
+        <div key={ci}>
+          {ci > 0 && (
+            <div style={{ padding: '4px 16px', backgroundColor: 'var(--bg-inset)', color: 'var(--fg-muted)', textAlign: 'center', fontSize: '11px', borderTop: '1px solid var(--border-muted)', borderBottom: '1px solid var(--border-muted)' }}>
+              ···
+            </div>
+          )}
+          {diffLines.slice(chunk.start, chunk.end).map((line, li) => {
+            const bg = line.tag === 'add' ? 'rgba(46,160,67,0.15)' : line.tag === 'del' ? 'rgba(248,81,73,0.15)' : 'transparent';
+            const color = line.tag === 'add' ? 'var(--fg-success)' : line.tag === 'del' ? 'var(--fg-danger)' : 'var(--fg-default)';
+            const prefix = line.tag === 'add' ? '+' : line.tag === 'del' ? '-' : ' ';
+            return (
+              <div key={`${ci}-${li}`} style={{ display: 'flex', backgroundColor: bg, minWidth: 'fit-content' }}>
+                <span style={{ width: '20px', textAlign: 'center', color: 'var(--fg-muted)', userSelect: 'none', flexShrink: 0 }}>{prefix}</span>
+                <pre style={{ margin: 0, padding: '0 8px', whiteSpace: 'pre', color }}>{line.line || ' '}</pre>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function CommitDetail() {
   const { repo = '', hash = '' } = useParams();
   const [commit, setCommit] = useState<CommitDetailType | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
 
   const encRepo = encodeURIComponent(repo);
 
   useEffect(() => {
     setLoading(true);
     setError('');
+    setExpandedFiles(new Set());
     api
       .getCommit(repo, hash)
       .then(setCommit)
@@ -84,6 +280,15 @@ export default function CommitDetail() {
       setTimeout(() => setCopied(false), 2000);
     }
   };
+
+  const toggleFile = useCallback((path: string) => {
+    setExpandedFiles(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
 
   if (loading) {
     return (
@@ -113,21 +318,14 @@ export default function CommitDetail() {
 
       {/* Commit header */}
       <div className="forge-card" style={{ marginBottom: '16px' }}>
-        {/* Message */}
         <div style={{
           background: 'var(--bg-subtle)',
           padding: '16px',
           borderBottom: '1px solid var(--border-default)',
         }}>
-          <h2 style={{
-            fontSize: '20px',
-            fontWeight: 600,
-            margin: '0 0 8px 0',
-            wordBreak: 'break-word',
-          }}>
+          <h2 style={{ fontSize: '20px', fontWeight: 600, margin: '0 0 8px 0', wordBreak: 'break-word' }}>
             {info.message}
           </h2>
-
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             <div className="avatar-circle avatar-circle-sm">
               {info.author_name.charAt(0).toUpperCase()}
@@ -139,44 +337,20 @@ export default function CommitDetail() {
           </div>
         </div>
 
-        {/* Commit metadata */}
         <div style={{ padding: '8px 16px' }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: '8px',
-          }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><GitCommitIcon size={16} /></span>
               <span style={{ fontSize: '14px', color: 'var(--fg-muted)' }}>Commit</span>
-              <span className="text-mono" style={{ fontSize: '14px', fontWeight: 600 }}>
-                {info.hash.slice(0, 7)}
-              </span>
-              <button
-                onClick={handleCopy}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  padding: '2px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  color: copied ? 'var(--fg-success)' : 'var(--fg-muted)',
-                }}
-              >
+              <span className="text-mono" style={{ fontSize: '14px', fontWeight: 600 }}>{info.hash.slice(0, 7)}</span>
+              <button onClick={handleCopy} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center', color: copied ? 'var(--fg-success)' : 'var(--fg-muted)' }}>
                 <CopyIcon size={14} />
               </button>
             </div>
             {parentHash && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <span style={{ fontSize: '14px', color: 'var(--fg-muted)' }}>Parent:</span>
-                <Link
-                  to={`/${encRepo}/commit/${parentHash}`}
-                  className="text-mono"
-                  style={{ fontSize: '14px', color: 'var(--fg-accent)', textDecoration: 'none' }}
-                >
+                <Link to={`/${encRepo}/commit/${parentHash}`} className="text-mono" style={{ fontSize: '14px', color: 'var(--fg-accent)', textDecoration: 'none' }}>
                   {parentHash.slice(0, 7)}
                 </Link>
               </div>
@@ -185,83 +359,60 @@ export default function CommitDetail() {
         </div>
       </div>
 
-      {/* Diff stats summary */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+      {/* Diff stats */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
         <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><FileIcon size={16} /></span>
         <span style={{ fontWeight: 600, fontSize: '14px' }}>
           {files.length} file{files.length !== 1 ? 's' : ''} changed
         </span>
+        <span style={{ color: 'var(--fg-muted)', fontSize: '13px' }}>
+          (click a file to view diff)
+        </span>
       </div>
 
-      {/* File changes list */}
+      {/* File changes with expandable diffs */}
       <div className="forge-card">
-        {files.map((file, i) => (
-          <div
-            key={file.path}
-            className="file-row"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '8px 16px',
-              borderBottom: i < files.length - 1 ? '1px solid var(--border-muted)' : 'none',
-            }}
-          >
-            <StatusIcon status={file.change_type} />
-
-            {file.change_type !== 'deleted' ? (
-              <Link
-                to={`/${encRepo}/blob/${info.hash}/${file.path}`}
-                className="text-mono"
+        {files.map((file, i) => {
+          const isExpanded = expandedFiles.has(file.path);
+          return (
+            <div key={file.path}>
+              <div
+                className="file-row"
+                onClick={() => toggleFile(file.path)}
                 style={{
-                  flex: 1,
-                  fontSize: '14px',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  color: 'var(--fg-accent)',
-                  textDecoration: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '8px 16px',
+                  borderBottom: (isExpanded || i < files.length - 1) ? '1px solid var(--border-muted)' : 'none',
+                  cursor: 'pointer',
+                  userSelect: 'none',
                 }}
               >
-                {file.path}
-              </Link>
-            ) : (
-              <span
-                className="text-mono"
-                style={{
-                  flex: 1,
-                  fontSize: '14px',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  color: 'var(--fg-muted)',
-                  textDecoration: 'line-through',
-                }}
-              >
-                {file.path}
-              </span>
-            )}
-
-            {file.old_size > 0 && file.new_size > 0 && (
-              <span className="text-mono" style={{ fontSize: '12px', color: 'var(--fg-muted)', flexShrink: 0 }}>
-                {formatBytes(file.old_size)} → {formatBytes(file.new_size)}
-              </span>
-            )}
-
-            <Label
-              size="small"
-              variant={
-                file.change_type === 'added'
-                  ? 'success'
-                  : file.change_type === 'deleted'
-                    ? 'danger'
-                    : 'attention'
-              }
-            >
-              {file.change_type}
-            </Label>
-          </div>
-        ))}
+                <span style={{ color: 'var(--fg-muted)', display: 'inline-flex', flexShrink: 0 }}>
+                  {isExpanded ? <ChevronDownIcon size={16} /> : <ChevronRightIcon size={16} />}
+                </span>
+                <StatusIcon status={file.change_type} />
+                <span className="text-mono" style={{ flex: 1, fontSize: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {file.path}
+                </span>
+                {file.old_size > 0 && file.new_size > 0 && (
+                  <span className="text-mono" style={{ fontSize: '12px', color: 'var(--fg-muted)', flexShrink: 0 }}>
+                    {formatBytes(file.old_size)} → {formatBytes(file.new_size)}
+                  </span>
+                )}
+                <Label size="small" variant={file.change_type === 'added' ? 'success' : file.change_type === 'deleted' ? 'danger' : 'attention'}>
+                  {file.change_type}
+                </Label>
+              </div>
+              {isExpanded && (
+                <div style={{ borderBottom: i < files.length - 1 ? '1px solid var(--border-muted)' : 'none', backgroundColor: 'var(--bg-inset)' }}>
+                  <FileDiffView repo={repo} commitHash={info.hash} parentHash={parentHash} file={file} />
+                </div>
+              )}
+            </div>
+          );
+        })}
 
         {files.length === 0 && (
           <div style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)' }}>
