@@ -124,21 +124,6 @@ impl MetadataDb {
         Ok(affected > 0)
     }
 
-    pub fn get_repo(&self, name: &str) -> Result<Option<RepoRecord>> {
-        let conn = self.conn()?;
-        let result = conn
-            .prepare("SELECT name, description, created_at FROM repos WHERE name = ?1")?
-            .query_row([name], |row| {
-                Ok(RepoRecord {
-                    name: row.get(0)?,
-                    description: row.get(1)?,
-                    created_at: row.get(2)?,
-                })
-            })
-            .ok();
-        Ok(result)
-    }
-
     pub fn update_repo(&self, name: &str, new_name: &str, description: &str) -> Result<bool> {
         let conn = self.conn()?;
 

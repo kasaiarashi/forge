@@ -91,7 +91,12 @@ async fn main() -> Result<()> {
     let db_path = config.resolved_db_path();
     let db = Arc::new(MetadataDb::open(&db_path)?);
 
-    let fs = Arc::new(FsStorage::new(base.join("repos")));
+    let repo_overrides: std::collections::HashMap<String, std::path::PathBuf> = config
+        .repos
+        .iter()
+        .filter_map(|(name, rc)| rc.path.as_ref().map(|p| (name.clone(), p.clone())))
+        .collect();
+    let fs = Arc::new(FsStorage::new(base.join("repos"), repo_overrides));
 
     // Start workflow engine if actions are enabled.
     let workflow_engine = if config.actions.enabled {

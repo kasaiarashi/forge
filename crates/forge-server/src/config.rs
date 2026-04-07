@@ -234,19 +234,6 @@ enabled = false
         .to_string()
     }
 
-    /// Resolve the objects directory for a given repo.
-    pub fn repo_objects_path(&self, repo_name: &str) -> PathBuf {
-        if let Some(repo) = self.repos.get(repo_name) {
-            if let Some(ref path) = repo.path {
-                if path.is_absolute() {
-                    return path.join("objects");
-                }
-                return self.storage.base_path.join(path).join("objects");
-            }
-        }
-        self.storage.base_path.join("repos").join(repo_name).join("objects")
-    }
-
     /// Resolve the full database path.
     pub fn resolved_db_path(&self) -> PathBuf {
         if self.storage.db_path.is_absolute() {

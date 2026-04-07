@@ -38,7 +38,6 @@ pub struct RunRecord {
 #[derive(Debug, Clone)]
 pub struct StepRecord {
     pub id: i64,
-    pub run_id: i64,
     pub job_name: String,
     pub step_index: i32,
     pub name: String,
@@ -54,7 +53,6 @@ pub struct ArtifactRecord {
     pub id: i64,
     pub run_id: i64,
     pub name: String,
-    pub path: String,
     pub size_bytes: i64,
     pub created_at: i64,
 }
@@ -374,20 +372,19 @@ impl MetadataDb {
     pub fn list_steps(&self, run_id: i64) -> Result<Vec<StepRecord>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, job_name, step_index, name, status, exit_code, log, started_at, finished_at FROM workflow_steps WHERE run_id = ?1 ORDER BY step_index",
+            "SELECT id, job_name, step_index, name, status, exit_code, log, started_at, finished_at FROM workflow_steps WHERE run_id = ?1 ORDER BY step_index",
         )?;
         let rows = stmt.query_map([run_id], |row: &rusqlite::Row| {
             Ok(StepRecord {
                 id: row.get(0)?,
-                run_id: row.get(1)?,
-                job_name: row.get(2)?,
-                step_index: row.get(3)?,
-                name: row.get(4)?,
-                status: row.get(5)?,
-                exit_code: row.get(6)?,
-                log: row.get(7)?,
-                started_at: row.get(8)?,
-                finished_at: row.get(9)?,
+                job_name: row.get(1)?,
+                step_index: row.get(2)?,
+                name: row.get(3)?,
+                status: row.get(4)?,
+                exit_code: row.get(5)?,
+                log: row.get(6)?,
+                started_at: row.get(7)?,
+                finished_at: row.get(8)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
@@ -408,16 +405,15 @@ impl MetadataDb {
     pub fn list_artifacts(&self, run_id: i64) -> Result<Vec<ArtifactRecord>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, name, path, size_bytes, created_at FROM artifacts WHERE run_id = ?1 ORDER BY name",
+            "SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE run_id = ?1 ORDER BY name",
         )?;
         let rows = stmt.query_map([run_id], |row: &rusqlite::Row| {
             Ok(ArtifactRecord {
                 id: row.get(0)?,
                 run_id: row.get(1)?,
                 name: row.get(2)?,
-                path: row.get(3)?,
-                size_bytes: row.get(4)?,
-                created_at: row.get(5)?,
+                size_bytes: row.get(3)?,
+                created_at: row.get(4)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
@@ -426,15 +422,14 @@ impl MetadataDb {
     pub fn get_artifact(&self, artifact_id: i64) -> Result<Option<ArtifactRecord>> {
         let conn = self.conn()?;
         let result = conn
-            .prepare("SELECT id, run_id, name, path, size_bytes, created_at FROM artifacts WHERE id = ?1")?
+            .prepare("SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE id = ?1")?
             .query_row([artifact_id], |row: &rusqlite::Row| {
                 Ok(ArtifactRecord {
                     id: row.get(0)?,
                     run_id: row.get(1)?,
                     name: row.get(2)?,
-                    path: row.get(3)?,
-                    size_bytes: row.get(4)?,
-                    created_at: row.get(5)?,
+                    size_bytes: row.get(3)?,
+                    created_at: row.get(4)?,
                 })
             })
             .ok();

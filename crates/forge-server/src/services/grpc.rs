@@ -918,6 +918,14 @@ impl ForgeService for ForgeGrpcService {
                 success: false, error: "Workflow is disabled".into(), run_id: 0,
             }));
         }
+        // Check if manual trigger is allowed by the workflow definition.
+        if let Ok(def) = crate::services::actions::yaml::WorkflowDef::parse(&workflow.yaml) {
+            if !def.allows_manual() {
+                return Ok(Response::new(TriggerWorkflowResponse {
+                    success: false, error: "Manual trigger is not enabled for this workflow".into(), run_id: 0,
+                }));
+            }
+        }
         // Resolve commit hash from the ref.
         let ref_name = if req.ref_name.is_empty() { "refs/heads/main".to_string() } else { req.ref_name };
         let commit_hash = self.db.get_ref(&workflow.repo, &ref_name)
