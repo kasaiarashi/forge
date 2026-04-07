@@ -43,6 +43,13 @@ enum Commands {
         /// Compare against a specific commit
         #[arg(long)]
         commit: Option<String>,
+
+        /// Show staged changes (index vs HEAD)
+        #[arg(long)]
+        staged: bool,
+
+        /// File paths to restrict diff to
+        paths: Vec<String>,
     },
 
     /// Show commit history
@@ -271,7 +278,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Add { paths } => commands::add::run(paths)?,
         Commands::Commit { message, all } => commands::snapshot::run(message, all)?,
         Commands::Status => commands::status::run(cli.json)?,
-        Commands::Diff { commit } => commands::diff::run(commit)?,
+        Commands::Diff { commit, staged, paths } => commands::diff::run(commit, staged, paths, cli.json)?,
         Commands::Log { count, file } => commands::log::run(count, file)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
