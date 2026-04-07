@@ -57,7 +57,11 @@ enum Commands {
     },
 
     /// Push commits to the server
-    Push,
+    Push {
+        /// Force push (overwrite remote ref even if diverged)
+        #[arg(short, long)]
+        force: bool,
+    },
 
     /// Pull commits from the server
     Pull,
@@ -263,7 +267,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Status => commands::status::run(cli.json)?,
         Commands::Diff { commit } => commands::diff::run(commit)?,
         Commands::Log { count, file } => commands::log::run(count, file)?,
-        Commands::Push => commands::push::run()?,
+        Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
         Commands::Clone { url, path } => commands::clone::run(url, path)?,
         Commands::Lock { path, reason } => commands::lock::run(path, reason)?,
