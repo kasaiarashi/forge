@@ -229,7 +229,7 @@ fn diff_staged(ws: &Workspace, index: &Index, filter: &[String]) -> Result<Vec<F
 
 /// Diff between HEAD and a specific commit.
 fn diff_commit(ws: &Workspace, commit_str: &str, filter: &[String]) -> Result<Vec<FileDiff>> {
-    let target_hash = ForgeHash::from_hex(commit_str)?;
+    let target_hash = ws.resolve_ref(commit_str)?;
     let head_hash = ws.head_snapshot()?;
 
     if head_hash.is_zero() {

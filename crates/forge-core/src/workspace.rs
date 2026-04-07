@@ -276,6 +276,47 @@ impl Workspace {
         }
     }
 
+    /// Resolve a string to a ForgeHash. Accepts: full hex hash, short hex prefix (>=6 chars), or branch name.
+    pub fn resolve_ref(&self, s: &str) -> Result<ForgeHash, ForgeError> {
+        // Try as branch name first.
+        if let Ok(hash) = self.get_branch_tip(s) {
+            return Ok(hash);
+        }
+        // Try as full hex hash.
+        if s.len() == 64 {
+            return ForgeHash::from_hex(s);
+        }
+        // Try as short hash prefix (scan object store).
+        if s.len() >= 6 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+            let shard = &s[..2];
+            let rest_prefix = &s[2..];
+            let shard_dir = self.forge_dir().join("objects").join(shard);
+            if shard_dir.exists() {
+                let mut matches = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&shard_dir) {
+                    for entry in entries.flatten() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.starts_with(rest_prefix) {
+                                let full_hex = format!("{}{}", shard, name);
+                                if let Ok(hash) = ForgeHash::from_hex(&full_hex) {
+                                    matches.push(hash);
+                                }
+                            }
+                        }
+                    }
+                }
+                return match matches.len() {
+                    0 => Err(ForgeError::ObjectNotFound(s.to_string())),
+                    1 => Ok(matches[0]),
+                    _ => Err(ForgeError::Other(format!(
+                        "ambiguous short hash '{}' matches {} objects", s, matches.len()
+                    ))),
+                };
+            }
+        }
+        Err(ForgeError::InvalidHash(format!("cannot resolve '{}'", s)))
+    }
+
     /// Get the snapshot hash at the tip of a branch.
     pub fn get_branch_tip(&self, branch: &str) -> Result<ForgeHash, ForgeError> {
         let ref_path = self.forge_dir().join("refs").join("heads").join(branch);

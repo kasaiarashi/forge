@@ -9,7 +9,7 @@ pub fn run(commit: Option<String>, json: bool) -> Result<()> {
     let ws = Workspace::discover(&cwd)?;
 
     let hash = match commit {
-        Some(ref c) => ForgeHash::from_hex(c)?,
+        Some(ref c) => ws.resolve_ref(c)?,
         None => ws.head_snapshot()?,
     };
 
@@ -18,20 +18,6 @@ pub fn run(commit: Option<String>, json: bool) -> Result<()> {
     }
 
     let snapshot = ws.object_store.get_snapshot(&hash)?;
-
-    // Print commit header (like log).
-    println!("\x1b[33mcommit {}\x1b[0m", hash.to_hex());
-    println!(
-        "Author: {} <{}>",
-        snapshot.author.name, snapshot.author.email
-    );
-    println!(
-        "Date:   {}",
-        snapshot.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
-    );
-    println!();
-    println!("    {}", snapshot.message);
-    println!();
 
     // Compute diff against parent.
     let get_tree = |h: &ForgeHash| ws.object_store.get_tree(h).ok();
@@ -96,6 +82,19 @@ pub fn run(commit: Option<String>, json: bool) -> Result<()> {
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
+        println!("\x1b[33mcommit {}\x1b[0m", hash.to_hex());
+        println!(
+            "Author: {} <{}>",
+            snapshot.author.name, snapshot.author.email
+        );
+        println!(
+            "Date:   {}",
+            snapshot.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        println!();
+        println!("    {}", snapshot.message);
+        println!();
+
         if changes.is_empty() {
             println!("(no changes)");
         } else {

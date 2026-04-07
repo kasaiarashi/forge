@@ -14,8 +14,7 @@ pub fn run(commit: String) -> Result<()> {
     let ws = Workspace::discover(&cwd)?;
     let index_path = ws.forge_dir().join("index");
 
-    let target_hash = ForgeHash::from_hex(&commit)
-        .map_err(|_| anyhow::anyhow!("Invalid commit hash: {}", commit))?;
+    let target_hash = ws.resolve_ref(&commit)?;
 
     let target_snap = ws.object_store.get_snapshot(&target_hash)
         .map_err(|_| anyhow::anyhow!("Not a valid commit: {}", commit))?;
@@ -173,7 +172,7 @@ fn read_blob_content(ws: &Workspace, object_hash: &ForgeHash) -> Result<Vec<u8>>
         .map_err(|e| anyhow::anyhow!("Failed to read object {}: {}", object_hash.short(), e))?;
 
     if data.is_empty() {
-        anyhow::bail!("Empty object: {}", object_hash.short());
+        return Ok(data); // Empty file — valid
     }
 
     if data[0] == 2 {

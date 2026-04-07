@@ -170,7 +170,7 @@ fn read_blob_content(ws: &Workspace, object_hash: &ForgeHash) -> Result<Vec<u8>>
         .map_err(|e| anyhow::anyhow!("Failed to read object {}: {}", object_hash.short(), e))?;
 
     if data.is_empty() {
-        bail!("Empty object: {}", object_hash.short());
+        return Ok(data); // Empty file — valid
     }
 
     if data[0] == 2 {

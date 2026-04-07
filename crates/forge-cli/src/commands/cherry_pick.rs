@@ -13,7 +13,7 @@ pub fn run(commit: String) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
 
-    let target_hash = ForgeHash::from_hex(&commit)?;
+    let target_hash = ws.resolve_ref(&commit)?;
     let target_snap = ws.object_store.get_snapshot(&target_hash)?;
 
     let parent_hash = target_snap

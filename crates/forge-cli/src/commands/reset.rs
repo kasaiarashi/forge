@@ -25,8 +25,7 @@ pub fn run(commit: Option<String>, soft: bool, hard: bool) -> Result<()> {
         bail!("A commit hash is required for --soft or --hard reset.");
     }
 
-    let target_hash = ForgeHash::from_hex(&target_hex)
-        .map_err(|_| anyhow::anyhow!("Invalid commit hash: {}", target_hex))?;
+    let target_hash = ws.resolve_ref(&target_hex)?;
 
     // Verify the target is a valid snapshot.
     let _target_snap = ws.object_store.get_snapshot(&target_hash)
@@ -122,7 +121,7 @@ fn read_blob_content(ws: &Workspace, object_hash: &ForgeHash) -> Result<Vec<u8>>
         .map_err(|e| anyhow::anyhow!("Failed to read object {}: {}", object_hash.short(), e))?;
 
     if data.is_empty() {
-        bail!("Empty object: {}", object_hash.short());
+        return Ok(data); // Empty file — valid
     }
 
     if data[0] == 2 {

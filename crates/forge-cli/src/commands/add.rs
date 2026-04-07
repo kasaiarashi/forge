@@ -49,9 +49,10 @@ pub fn run(paths: Vec<String>) -> Result<()> {
                     }
                 }
             }
-        } else {
+        } else if abs_path.exists() {
             file_paths.push(abs_path);
         }
+        // Non-existent files are handled by the deletion detection below.
     }
 
     // Load the index to detect unchanged files and deletions.
