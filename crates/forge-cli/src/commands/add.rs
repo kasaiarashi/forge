@@ -22,7 +22,7 @@ pub fn run(paths: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
     let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
-        .unwrap_or_else(|_| forge_ignore::ForgeIgnore::from_str("").unwrap());
+        .unwrap_or_default();
 
     // 1. Collect all file paths first (fast walk).
     let mut file_paths: Vec<PathBuf> = Vec::new();

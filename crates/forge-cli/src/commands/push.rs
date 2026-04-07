@@ -25,11 +25,16 @@ pub fn run(force: bool) -> Result<()> {
         config.repo.clone()
     };
 
+    let remote_name = config
+        .default_remote()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "origin".to_string());
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async { push_async(&ws, &server_url, &repo_name, force).await })
+    rt.block_on(async { push_async(&ws, &server_url, &repo_name, &remote_name, force).await })
 }
 
-async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bool) -> Result<()> {
+async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_name: &str, force: bool) -> Result<()> {
     let mut client = ForgeServiceClient::connect(server_url.to_string()).await?;
 
     // Get current branch and its tip.
@@ -178,17 +183,26 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
         .update_ref(UpdateRefRequest {
             repo: repo_name.to_string(),
             ref_name: ref_name.clone(),
-            old_hash: old_hash_for_cas,
+            old_hash: old_hash_for_cas.clone(),
             new_hash: local_tip.as_bytes().to_vec(),
         })
         .await?
         .into_inner();
 
     if update_resp.success {
+        let remote_short = ForgeHash::from_hex(&hex::encode(&old_hash_for_cas))
+            .map(|h| h.short())
+            .unwrap_or_else(|_| "(new)".to_string());
         if force {
-            println!("Pushed to {} -> {} (forced)", ref_name, local_tip.short());
+            println!(
+                " + {}...{} {} -> {}/{} (forced)",
+                remote_short, local_tip.short(), branch, remote_name, branch
+            );
         } else {
-            println!("Pushed to {} -> {}", ref_name, local_tip.short());
+            println!(
+                "   {}..{} {} -> {}/{}",
+                remote_short, local_tip.short(), branch, remote_name, branch
+            );
         }
     } else {
         bail!(

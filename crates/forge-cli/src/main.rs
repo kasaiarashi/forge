@@ -48,6 +48,10 @@ enum Commands {
         #[arg(long)]
         staged: bool,
 
+        /// Show only file change summary (insertions/deletions)
+        #[arg(long)]
+        stat: bool,
+
         /// File paths to restrict diff to
         paths: Vec<String>,
     },
@@ -61,6 +65,10 @@ enum Commands {
         /// Show history for a specific file
         #[arg(long)]
         file: Option<String>,
+
+        /// One commit per line (hash + message)
+        #[arg(long)]
+        oneline: bool,
     },
 
     /// Push commits to the server
@@ -282,8 +290,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Add { paths } => commands::add::run(paths)?,
         Commands::Commit { message, all } => commands::snapshot::run(message, all, cli.json)?,
         Commands::Status => commands::status::run(cli.json)?,
-        Commands::Diff { commit, staged, paths } => commands::diff::run(commit, staged, paths, cli.json)?,
-        Commands::Log { count, file } => commands::log::run(count, file, cli.json)?,
+        Commands::Diff { commit, staged, stat, paths } => commands::diff::run(commit, staged, stat, paths, cli.json)?,
+        Commands::Log { count, file, oneline } => commands::log::run(count, file, oneline, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
         Commands::Clone { url, path } => commands::clone::run(url, path)?,

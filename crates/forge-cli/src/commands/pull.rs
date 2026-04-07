@@ -150,8 +150,10 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
     }
 
     // Fast-forward local branch.
+    let old_tip = local_tip.short();
     ws.set_branch_tip(&branch, &remote_tip)?;
-    println!("Pulled {} object(s). {} -> {}", received, branch, remote_tip.short());
+    println!("Receiving objects: {} done.", received);
+    println!("   {}..{} {} -> {}", old_tip, remote_tip.short(), branch, branch);
 
     Ok(())
 }

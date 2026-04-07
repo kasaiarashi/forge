@@ -86,7 +86,7 @@ pub fn run(json: bool) -> Result<()> {
     let ws = Workspace::discover(&cwd)?;
     let index = Index::load(&ws.forge_dir().join("index"))?;
     let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
-        .unwrap_or_else(|_| forge_ignore::ForgeIgnore::from_str("").unwrap());
+        .unwrap_or_default();
 
     // Staged entries, sub-categorized like git status.
     let mut staged_new = Vec::new();

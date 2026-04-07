@@ -37,6 +37,15 @@ pub struct ForgeIgnore {
     patterns: Vec<String>,
 }
 
+impl Default for ForgeIgnore {
+    fn default() -> Self {
+        Self {
+            glob_set: GlobSet::empty(),
+            patterns: Vec::new(),
+        }
+    }
+}
+
 impl ForgeIgnore {
     /// Load ignore patterns from a .forgeignore file.
     pub fn from_file(path: &Path) -> Result<Self, ForgeIgnoreError> {

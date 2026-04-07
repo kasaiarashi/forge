@@ -4,7 +4,7 @@ use forge_core::hash::ForgeHash;
 use forge_core::workspace::Workspace;
 use std::collections::HashMap;
 
-pub fn run(count: u32, file: Option<String>, json: bool) -> Result<()> {
+pub fn run(count: u32, file: Option<String>, oneline: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
 
@@ -76,6 +76,19 @@ pub fn run(count: u32, file: Option<String>, json: bool) -> Result<()> {
                 "date": snapshot.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
                 "message": snapshot.message,
             }));
+        } else if oneline {
+            let decorations = if let Some(refs) = ref_map.get(&current) {
+                let parts: Vec<&str> = refs.iter().map(|s| s.as_str()).collect();
+                format!(" \x1b[33m({})\x1b[0m", parts.join(", "))
+            } else {
+                String::new()
+            };
+            println!(
+                "\x1b[33m{}\x1b[0m{} {}",
+                current.short(),
+                decorations,
+                snapshot.message
+            );
         } else {
             // Build decoration string like git: (HEAD -> dev, master)
             let decorations = if let Some(refs) = ref_map.get(&current) {

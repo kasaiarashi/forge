@@ -7,7 +7,7 @@ use similar::ChangeTag;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-pub fn run(commit: Option<String>, staged: bool, paths: Vec<String>, json: bool) -> Result<()> {
+pub fn run(commit: Option<String>, staged: bool, stat: bool, paths: Vec<String>, json: bool) -> Result<()> {
     if staged && commit.is_some() {
         bail!("Cannot use --staged with --commit");
     }
@@ -31,6 +31,8 @@ pub fn run(commit: Option<String>, staged: bool, paths: Vec<String>, json: bool)
 
     if json {
         print_json(&file_diffs)?;
+    } else if stat {
+        print_stat(&file_diffs);
     } else {
         print_colored(&file_diffs);
     }
@@ -56,6 +58,9 @@ fn matches_filter(path: &str, filter: &[String]) -> bool {
 fn is_binary(data: &[u8]) -> bool {
     data.iter().take(8192).any(|&b| b == 0)
 }
+
+/// Max file size for text diff (10 MiB). Files larger than this are treated as binary.
+const MAX_DIFF_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Read blob content, handling both small and chunked blobs.
 fn read_blob_content(ws: &Workspace, object_hash: &ForgeHash) -> Result<Vec<u8>> {
@@ -123,6 +128,23 @@ fn diff_unstaged(ws: &Workspace, index: &Index, filter: &[String]) -> Result<Vec
             && mtime.subsec_nanos() == entry.mtime_nanos
             && metadata.len() == entry.size
         {
+            continue;
+        }
+
+        // Skip large files early — treat as binary without loading full content.
+        if metadata.len() > MAX_DIFF_SIZE || entry.size > MAX_DIFF_SIZE {
+            // Still need to verify it actually changed.
+            let new_data = std::fs::read(&abs_path)?;
+            let hash = ForgeHash::from_bytes(&new_data);
+            if hash != entry.hash {
+                diffs.push(FileDiff {
+                    path: path.clone(),
+                    status: "modified",
+                    binary: true,
+                    old_content: vec![],
+                    new_content: vec![],
+                });
+            }
             continue;
         }
 
@@ -420,4 +442,69 @@ fn print_json(diffs: &[FileDiff]) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&entries)?);
     Ok(())
+}
+
+fn print_stat(diffs: &[FileDiff]) {
+    let mut total_insertions = 0usize;
+    let mut total_deletions = 0usize;
+    let mut max_path_len = 0usize;
+
+    // First pass: compute stats.
+    let mut stats: Vec<(&str, &str, usize, usize)> = Vec::new();
+    for diff in diffs {
+        if diff.binary {
+            stats.push((&diff.path, "Bin", 0, 0));
+            if diff.path.len() > max_path_len {
+                max_path_len = diff.path.len();
+            }
+            continue;
+        }
+
+        let old_str = String::from_utf8_lossy(&diff.old_content);
+        let new_str = String::from_utf8_lossy(&diff.new_content);
+        let text_diff = similar::TextDiff::from_lines(old_str.as_ref(), new_str.as_ref());
+
+        let mut insertions = 0usize;
+        let mut deletions = 0usize;
+        for op in text_diff.ops() {
+            for change in text_diff.iter_changes(op) {
+                match change.tag() {
+                    ChangeTag::Insert => insertions += 1,
+                    ChangeTag::Delete => deletions += 1,
+                    ChangeTag::Equal => {}
+                }
+            }
+        }
+        total_insertions += insertions;
+        total_deletions += deletions;
+        stats.push((&diff.path, diff.status, insertions, deletions));
+        if diff.path.len() > max_path_len {
+            max_path_len = diff.path.len();
+        }
+    }
+
+    // Second pass: print.
+    for (path, status, ins, del) in &stats {
+        if *status == "Bin" {
+            println!(" {:<width$} | Bin", path, width = max_path_len);
+        } else {
+            let total = ins + del;
+            println!(
+                " {:<width$} | {:>4} {}",
+                path,
+                total,
+                format!("\x1b[32m{}\x1b[31m{}\x1b[0m", "+".repeat(*ins), "-".repeat(*del)),
+                width = max_path_len
+            );
+        }
+    }
+
+    if !stats.is_empty() {
+        println!(
+            " {} file(s) changed, {} insertion(s)(+), {} deletion(s)(-)",
+            stats.len(),
+            total_insertions,
+            total_deletions
+        );
+    }
 }

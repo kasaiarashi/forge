@@ -88,7 +88,7 @@ pub fn run(message: String, all: bool, json: bool) -> Result<()> {
 
 fn auto_stage(ws: &Workspace, index: &mut Index) -> Result<()> {
     let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
-        .unwrap_or_else(|_| forge_ignore::ForgeIgnore::from_str("").unwrap());
+        .unwrap_or_default();
 
     // Check existing entries for modifications.
     let paths: Vec<String> = index.entries.keys().cloned().collect();

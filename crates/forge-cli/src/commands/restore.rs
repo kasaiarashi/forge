@@ -140,7 +140,7 @@ pub fn run(staged: bool, source: Option<String>, paths: Vec<String>) -> Result<(
 
     // Remove untracked files.
     let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
-        .unwrap_or_else(|_| forge_ignore::ForgeIgnore::from_str("").unwrap());
+        .unwrap_or_default();
     let mut removed = 0usize;
 
     for entry in walkdir::WalkDir::new(&ws.root)

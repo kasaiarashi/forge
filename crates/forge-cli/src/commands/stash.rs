@@ -34,7 +34,8 @@ pub fn run(action: Option<String>, message: Option<String>) -> Result<()> {
         "apply" => stash_pop(false),
         "list" => stash_list(),
         "drop" => stash_drop(),
-        other => bail!("Unknown stash action: '{}'. Use push, pop, apply, list, or drop.", other),
+        "show" => stash_show(),
+        other => bail!("Unknown stash action: '{}'. Use push, pop, apply, list, show, or drop.", other),
     }
 }
 
@@ -183,7 +184,7 @@ fn stash_pop(remove: bool) -> Result<()> {
         bail!("No stashes found.");
     }
 
-    let latest_id = *ids.last().unwrap();
+    let latest_id = *ids.last().expect("checked non-empty above");
     let stash_path = stash_dir(&ws).join(format!("{}.json", latest_id));
     let json = std::fs::read_to_string(&stash_path)?;
     let stash: Stash = serde_json::from_str(&json)?;
@@ -251,10 +252,35 @@ fn stash_drop() -> Result<()> {
         bail!("No stashes to drop.");
     }
 
-    let latest_id = *ids.last().unwrap();
+    let latest_id = *ids.last().expect("checked non-empty above");
     let stash_path = stash_dir(&ws).join(format!("{}.json", latest_id));
     std::fs::remove_file(&stash_path)?;
     println!("Dropped stash@{{{}}}.", latest_id);
+
+    Ok(())
+}
+
+fn stash_show() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let ws = Workspace::discover(&cwd)?;
+
+    let ids = list_stash_ids(&ws)?;
+    if ids.is_empty() {
+        bail!("No stashes found.");
+    }
+
+    let latest_id = *ids.last().expect("checked non-empty above");
+    let stash_path = stash_dir(&ws).join(format!("{}.json", latest_id));
+    let data = std::fs::read_to_string(&stash_path)?;
+    let stash: Stash = serde_json::from_str(&data)?;
+
+    println!("stash@{{{}}}: {}", latest_id, stash.message);
+    println!();
+    for entry in &stash.entries {
+        println!("  {:<12}{}", "modified:", entry.path);
+    }
+    println!();
+    println!(" {} file(s) stashed", stash.entries.len());
 
     Ok(())
 }
