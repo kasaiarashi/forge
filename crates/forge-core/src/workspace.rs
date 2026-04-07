@@ -199,13 +199,13 @@ impl Workspace {
         std::fs::create_dir_all(forge_dir.join("refs").join("remotes"))?;
         std::fs::create_dir_all(forge_dir.join("locks"))?;
 
-        // Write HEAD pointing to main branch.
-        std::fs::write(forge_dir.join("HEAD"), "ref: refs/heads/main\n")?;
+        // Write HEAD pointing to main branch (atomic).
+        atomic_write(&forge_dir.join("HEAD"), b"ref: refs/heads/main\n")?;
 
-        // Write initial branch ref (zero hash = no snapshots yet).
-        std::fs::write(
-            forge_dir.join("refs").join("heads").join("main"),
-            ForgeHash::ZERO.to_hex(),
+        // Write initial branch ref (zero hash = no snapshots yet, atomic).
+        atomic_write(
+            &forge_dir.join("refs").join("heads").join("main"),
+            ForgeHash::ZERO.to_hex().as_bytes(),
         )?;
 
         // Write config.
@@ -225,7 +225,7 @@ impl Workspace {
         };
         let config_json = serde_json::to_string_pretty(&config)
             .map_err(|e| ForgeError::Serialization(e.to_string()))?;
-        std::fs::write(forge_dir.join("config.json"), config_json)?;
+        atomic_write(&forge_dir.join("config.json"), config_json.as_bytes())?;
 
         // Write empty index.
         let index = crate::index::Index::default();
@@ -257,14 +257,14 @@ impl Workspace {
         }
     }
 
-    /// Set the HEAD reference.
+    /// Set the HEAD reference (atomic write).
     pub fn set_head(&self, head: &HeadRef) -> Result<(), ForgeError> {
         let head_path = self.forge_dir().join("HEAD");
         let content = match head {
             HeadRef::Branch(name) => format!("ref: refs/heads/{}\n", name),
             HeadRef::Detached(hash) => format!("{}\n", hash.to_hex()),
         };
-        std::fs::write(&head_path, content)?;
+        atomic_write(&head_path, content.as_bytes())?;
         Ok(())
     }
 
@@ -274,6 +274,47 @@ impl Workspace {
             HeadRef::Branch(name) => self.get_branch_tip(&name),
             HeadRef::Detached(hash) => Ok(hash),
         }
+    }
+
+    /// Resolve a string to a ForgeHash. Accepts: full hex hash, short hex prefix (>=6 chars), or branch name.
+    pub fn resolve_ref(&self, s: &str) -> Result<ForgeHash, ForgeError> {
+        // Try as branch name first.
+        if let Ok(hash) = self.get_branch_tip(s) {
+            return Ok(hash);
+        }
+        // Try as full hex hash.
+        if s.len() == 64 {
+            return ForgeHash::from_hex(s);
+        }
+        // Try as short hash prefix (scan object store).
+        if s.len() >= 6 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+            let shard = &s[..2];
+            let rest_prefix = &s[2..];
+            let shard_dir = self.forge_dir().join("objects").join(shard);
+            if shard_dir.exists() {
+                let mut matches = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&shard_dir) {
+                    for entry in entries.flatten() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.starts_with(rest_prefix) {
+                                let full_hex = format!("{}{}", shard, name);
+                                if let Ok(hash) = ForgeHash::from_hex(&full_hex) {
+                                    matches.push(hash);
+                                }
+                            }
+                        }
+                    }
+                }
+                return match matches.len() {
+                    0 => Err(ForgeError::ObjectNotFound(s.to_string())),
+                    1 => Ok(matches[0]),
+                    _ => Err(ForgeError::Other(format!(
+                        "ambiguous short hash '{}' matches {} objects", s, matches.len()
+                    ))),
+                };
+            }
+        }
+        Err(ForgeError::InvalidHash(format!("cannot resolve '{}'", s)))
     }
 
     /// Get the snapshot hash at the tip of a branch.
@@ -286,29 +327,50 @@ impl Workspace {
         ForgeHash::from_hex(content.trim())
     }
 
-    /// Update the tip of a branch.
+    /// Update the tip of a branch (atomic write).
     pub fn set_branch_tip(&self, branch: &str, hash: &ForgeHash) -> Result<(), ForgeError> {
         let ref_path = self.forge_dir().join("refs").join("heads").join(branch);
-        std::fs::write(&ref_path, hash.to_hex())?;
+        if let Some(parent) = ref_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        atomic_write(&ref_path, hash.to_hex().as_bytes())?;
         Ok(())
     }
 
-    /// List all branches.
+    /// List all branches (supports nested names like `feature/foo`).
     pub fn list_branches(&self) -> Result<Vec<String>, ForgeError> {
         let heads_dir = self.forge_dir().join("refs").join("heads");
         let mut branches = Vec::new();
         if heads_dir.exists() {
-            for entry in std::fs::read_dir(&heads_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        branches.push(name.to_string());
-                    }
-                }
-            }
+            Self::collect_branches(&heads_dir, "", &mut branches)?;
         }
         branches.sort();
         Ok(branches)
+    }
+
+    fn collect_branches(
+        dir: &std::path::Path,
+        prefix: &str,
+        out: &mut Vec<String>,
+    ) -> Result<(), ForgeError> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = match entry.file_name().to_str() {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let full = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            if entry.file_type()?.is_file() {
+                out.push(full);
+            } else if entry.file_type()?.is_dir() {
+                Self::collect_branches(&entry.path(), &full, out)?;
+            }
+        }
+        Ok(())
     }
 
     /// Get the current branch name (if HEAD points to a branch).
@@ -328,12 +390,26 @@ impl Workspace {
         Ok(config)
     }
 
-    /// Save workspace config back to disk.
+    /// Save workspace config back to disk (atomic write).
     pub fn save_config(&self, config: &WorkspaceConfig) -> Result<(), ForgeError> {
         let config_path = self.forge_dir().join("config.json");
         let json = serde_json::to_string_pretty(config)
             .map_err(|e| ForgeError::Serialization(e.to_string()))?;
-        std::fs::write(&config_path, json)?;
+        atomic_write(&config_path, json.as_bytes())?;
         Ok(())
     }
+}
+
+/// Write data atomically: write to a temp file, then rename over the target.
+/// This prevents partial/corrupt writes on crash or power loss.
+pub fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), ForgeError> {
+    let tmp = path.with_extension("tmp");
+    // Remove stale temp from a prior crash, if any.
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::write(&tmp, data)?;
+    // On Windows, rename fails if target exists — remove it first.
+    #[cfg(target_os = "windows")]
+    let _ = std::fs::remove_file(path);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }

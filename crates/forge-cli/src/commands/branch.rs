@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use forge_core::workspace::Workspace;
 
-pub fn run(name: Option<String>, delete: bool) -> Result<()> {
+pub fn run(name: Option<String>, delete: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
 
@@ -10,11 +10,19 @@ pub fn run(name: Option<String>, delete: bool) -> Result<()> {
             // List branches.
             let current = ws.current_branch()?;
             let branches = ws.list_branches()?;
-            for branch in &branches {
-                if current.as_deref() == Some(branch.as_str()) {
-                    println!("* \x1b[32m{}\x1b[0m", branch);
-                } else {
-                    println!("  {}", branch);
+            if json {
+                let out = serde_json::json!({
+                    "current": current.as_deref().unwrap_or(""),
+                    "branches": branches,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                for branch in &branches {
+                    if current.as_deref() == Some(branch.as_str()) {
+                        println!("* \x1b[32m{}\x1b[0m", branch);
+                    } else {
+                        println!("  {}", branch);
+                    }
                 }
             }
         }

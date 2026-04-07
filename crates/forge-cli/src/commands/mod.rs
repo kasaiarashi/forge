@@ -27,4 +27,5 @@ pub mod revert;
 pub mod merge;
 pub mod cherry_pick;
 pub mod checkout;
+pub mod restore;
 pub mod asset_info;

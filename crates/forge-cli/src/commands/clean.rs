@@ -7,7 +7,7 @@ pub fn run(force: bool, directories: bool) -> Result<()> {
     let ws = Workspace::discover(&cwd)?;
     let index = Index::load(&ws.forge_dir().join("index"))?;
     let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
-        .unwrap_or_else(|_| forge_ignore::ForgeIgnore::from_str("").unwrap());
+        .unwrap_or_default();
 
     let mut untracked_files: Vec<String> = Vec::new();
     let mut untracked_dirs: Vec<String> = Vec::new();

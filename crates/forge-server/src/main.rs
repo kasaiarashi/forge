@@ -91,7 +91,12 @@ async fn main() -> Result<()> {
     let db_path = config.resolved_db_path();
     let db = Arc::new(MetadataDb::open(&db_path)?);
 
-    let fs = Arc::new(FsStorage::new(base.join("repos")));
+    let repo_overrides: std::collections::HashMap<String, std::path::PathBuf> = config
+        .repos
+        .iter()
+        .filter_map(|(name, rc)| rc.path.as_ref().map(|p| (name.clone(), p.clone())))
+        .collect();
+    let fs = Arc::new(FsStorage::new(base.join("repos"), repo_overrides));
 
     // Start workflow engine if actions are enabled.
     let workflow_engine = if config.actions.enabled {
@@ -116,12 +121,17 @@ async fn main() -> Result<()> {
 
     let max_msg = config.server.max_message_size as usize;
 
+    let auth_interceptor = services::auth::make_auth_interceptor(
+        config.auth.enabled,
+        config.auth.tokens.clone(),
+    );
+
+    let svc = ForgeServiceServer::new(service)
+        .max_decoding_message_size(max_msg)
+        .max_encoding_message_size(max_msg);
+
     Server::builder()
-        .add_service(
-            ForgeServiceServer::new(service)
-                .max_decoding_message_size(max_msg)
-                .max_encoding_message_size(max_msg),
-        )
+        .add_service(tonic::service::interceptor::InterceptedService::new(svc, auth_interceptor))
         .serve(addr)
         .await?;
 

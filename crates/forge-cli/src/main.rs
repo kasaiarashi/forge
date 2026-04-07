@@ -43,6 +43,17 @@ enum Commands {
         /// Compare against a specific commit
         #[arg(long)]
         commit: Option<String>,
+
+        /// Show staged changes (index vs HEAD)
+        #[arg(long)]
+        staged: bool,
+
+        /// Show only file change summary (insertions/deletions)
+        #[arg(long)]
+        stat: bool,
+
+        /// File paths to restrict diff to
+        paths: Vec<String>,
     },
 
     /// Show commit history
@@ -54,6 +65,10 @@ enum Commands {
         /// Show history for a specific file
         #[arg(long)]
         file: Option<String>,
+
+        /// One commit per line (hash + message)
+        #[arg(long)]
+        oneline: bool,
     },
 
     /// Push commits to the server
@@ -105,11 +120,15 @@ enum Commands {
         paths: Vec<String>,
     },
 
-    /// Restore files (git-compatible alias)
+    /// Restore working tree files
     Restore {
         /// Unstage files (like git restore --staged)
         #[arg(long)]
         staged: bool,
+
+        /// Restore from a specific commit or branch
+        #[arg(long)]
+        source: Option<String>,
 
         /// Files or directories to restore
         paths: Vec<String>,
@@ -269,25 +288,19 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init => commands::init::run()?,
         Commands::Add { paths } => commands::add::run(paths)?,
-        Commands::Commit { message, all } => commands::snapshot::run(message, all)?,
+        Commands::Commit { message, all } => commands::snapshot::run(message, all, cli.json)?,
         Commands::Status => commands::status::run(cli.json)?,
-        Commands::Diff { commit } => commands::diff::run(commit)?,
-        Commands::Log { count, file } => commands::log::run(count, file)?,
+        Commands::Diff { commit, staged, stat, paths } => commands::diff::run(commit, staged, stat, paths, cli.json)?,
+        Commands::Log { count, file, oneline } => commands::log::run(count, file, oneline, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
         Commands::Clone { url, path } => commands::clone::run(url, path)?,
-        Commands::Lock { path, reason } => commands::lock::run(path, reason)?,
-        Commands::Unlock { path, force } => commands::unlock::run(path, force)?,
-        Commands::Locks => commands::locks::run()?,
+        Commands::Lock { path, reason } => commands::lock::run(path, reason, cli.json)?,
+        Commands::Unlock { path, force } => commands::unlock::run(path, force, cli.json)?,
+        Commands::Locks => commands::locks::run(cli.json)?,
         Commands::Unstage { paths } => commands::unstage::run(paths)?,
-        Commands::Restore { staged, paths } => {
-            if staged {
-                commands::unstage::run(paths)?;
-            } else {
-                anyhow::bail!("forge restore currently only supports --staged. Use: forge restore --staged <path>");
-            }
-        }
-        Commands::Branch { name, delete } => commands::branch::run(name, delete)?,
+        Commands::Restore { staged, source, paths } => commands::restore::run(staged, source, paths)?,
+        Commands::Branch { name, delete } => commands::branch::run(name, delete, cli.json)?,
         Commands::Switch { name } => commands::switch::run(name)?,
         Commands::Ignore { patterns } => commands::ignore::run(patterns)?,
         Commands::Remote { action, args } => commands::remote::run(action, args)?,
@@ -295,7 +308,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Tag { name, commit, delete } => commands::tag::run(name, commit, delete)?,
         Commands::Rm { paths, cached } => commands::rm::run(paths, cached)?,
         Commands::Mv { source, dest } => commands::mv::run(source, dest)?,
-        Commands::Show { commit } => commands::show::run(commit)?,
+        Commands::Show { commit } => commands::show::run(commit, cli.json)?,
         Commands::Merge { branch } => commands::merge::run(branch)?,
         Commands::CherryPick { commit } => commands::cherry_pick::run(commit)?,
         Commands::Checkout { target, paths } => commands::checkout::run(target, paths)?,

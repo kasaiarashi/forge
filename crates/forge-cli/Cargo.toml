@@ -28,4 +28,5 @@ walkdir.workspace = true
 rayon.workspace = true
 hex.workspace = true
 tokio-stream = "0.1"
+similar.workspace = true
 indicatif.workspace = true

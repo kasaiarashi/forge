@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 /// SQLite database for repos, refs, and locks metadata.
 pub struct MetadataDb {
@@ -12,12 +12,22 @@ pub struct MetadataDb {
 }
 
 impl MetadataDb {
+    /// Acquire the database connection lock, converting poison errors to anyhow errors.
+    pub(crate) fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("database lock poisoned: {e}"))
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database at {}", path.display()))?;
+
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .with_context(|| "Failed to enable WAL mode")?;
 
         conn.execute_batch(
             "
@@ -91,7 +101,7 @@ impl MetadataDb {
     // -- Repos --
 
     pub fn list_repos(&self) -> Result<Vec<RepoRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT name, description, created_at FROM repos")?;
         let rows = stmt.query_map([], |row| {
             Ok(RepoRecord {
@@ -108,7 +118,7 @@ impl MetadataDb {
     }
 
     pub fn create_repo(&self, name: &str, description: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let affected = conn.execute(
             "INSERT OR IGNORE INTO repos (name, description, created_at) VALUES (?1, ?2, ?3)",
@@ -117,23 +127,8 @@ impl MetadataDb {
         Ok(affected > 0)
     }
 
-    pub fn get_repo(&self, name: &str) -> Result<Option<RepoRecord>> {
-        let conn = self.conn.lock().unwrap();
-        let result = conn
-            .prepare("SELECT name, description, created_at FROM repos WHERE name = ?1")?
-            .query_row([name], |row| {
-                Ok(RepoRecord {
-                    name: row.get(0)?,
-                    description: row.get(1)?,
-                    created_at: row.get(2)?,
-                })
-            })
-            .ok();
-        Ok(result)
-    }
-
     pub fn update_repo(&self, name: &str, new_name: &str, description: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn()?;
 
         // Check that the repo exists.
         let exists: bool = conn
@@ -157,38 +152,43 @@ impl MetadataDb {
             }
         }
 
-        conn.execute(
+        let tx = conn.transaction()?;
+
+        tx.execute(
             "UPDATE repos SET name = ?1, description = ?2 WHERE name = ?3",
             rusqlite::params![effective_name, description, name],
         )?;
 
         // Update refs and locks tables if renamed.
         if !new_name.is_empty() && new_name != name {
-            conn.execute(
+            tx.execute(
                 "UPDATE refs SET repo = ?1 WHERE repo = ?2",
                 rusqlite::params![new_name, name],
             )?;
-            conn.execute(
+            tx.execute(
                 "UPDATE locks SET repo = ?1 WHERE repo = ?2",
                 rusqlite::params![new_name, name],
             )?;
         }
 
+        tx.commit()?;
         Ok(true)
     }
 
     pub fn delete_repo(&self, name: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let affected = conn.execute("DELETE FROM repos WHERE name = ?1", [name])?;
-        conn.execute("DELETE FROM refs WHERE repo = ?1", [name])?;
-        conn.execute("DELETE FROM locks WHERE repo = ?1", [name])?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let affected = tx.execute("DELETE FROM repos WHERE name = ?1", [name])?;
+        tx.execute("DELETE FROM refs WHERE repo = ?1", [name])?;
+        tx.execute("DELETE FROM locks WHERE repo = ?1", [name])?;
+        tx.commit()?;
         Ok(affected > 0)
     }
 
     // -- Refs --
 
     pub fn get_ref(&self, repo: &str, name: &str) -> Result<Option<Vec<u8>>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT hash FROM refs WHERE repo = ?1 AND name = ?2")?;
         let result = stmt
             .query_row(rusqlite::params![repo, name], |row| row.get::<_, Vec<u8>>(0))
@@ -197,7 +197,7 @@ impl MetadataDb {
     }
 
     pub fn get_all_refs(&self, repo: &str) -> Result<Vec<(String, Vec<u8>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT name, hash FROM refs WHERE repo = ?1")?;
         let rows = stmt.query_map([repo], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
@@ -211,29 +211,25 @@ impl MetadataDb {
 
     /// Compare-and-swap update. Returns true if the update succeeded.
     pub fn update_ref(&self, repo: &str, name: &str, old_hash: &[u8], new_hash: &[u8]) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
-        // Check current value.
-        let current: Option<Vec<u8>> = conn
-            .prepare("SELECT hash FROM refs WHERE repo = ?1 AND name = ?2")?
-            .query_row(rusqlite::params![repo, name], |row| row.get::<_, Vec<u8>>(0))
-            .ok();
+        let is_create = old_hash.iter().all(|&b| b == 0);
 
-        let matches = match &current {
-            Some(h) => h.as_slice() == old_hash,
-            None => old_hash.iter().all(|&b| b == 0), // Zero hash means "expect not to exist"
+        let affected = if is_create {
+            // Expect ref to not exist — INSERT only if absent
+            conn.execute(
+                "INSERT OR IGNORE INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)",
+                rusqlite::params![repo, name, new_hash],
+            )?
+        } else {
+            // Atomic CAS: update only if current hash matches old_hash
+            conn.execute(
+                "UPDATE refs SET hash = ?1 WHERE repo = ?2 AND name = ?3 AND hash = ?4",
+                rusqlite::params![new_hash, repo, name, old_hash],
+            )?
         };
 
-        if !matches {
-            return Ok(false);
-        }
-
-        conn.execute(
-            "INSERT OR REPLACE INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)",
-            rusqlite::params![repo, name, new_hash],
-        )?;
-
-        Ok(true)
+        Ok(affected > 0)
     }
 
     // -- Locks --
@@ -247,7 +243,7 @@ impl MetadataDb {
         workspace_id: &str,
         reason: &str,
     ) -> Result<std::result::Result<(), LockInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
         // Check if already locked.
         if let Ok(lock) = conn.prepare("SELECT owner, workspace_id, created_at, reason FROM locks WHERE repo = ?1 AND path = ?2")?
@@ -277,7 +273,7 @@ impl MetadataDb {
     }
 
     pub fn release_lock(&self, repo: &str, path: &str, owner: &str, force: bool) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let affected = if force {
             conn.execute("DELETE FROM locks WHERE repo = ?1 AND path = ?2", rusqlite::params![repo, path])?
         } else {
@@ -290,7 +286,7 @@ impl MetadataDb {
     }
 
     pub fn list_locks(&self, repo: &str, path_prefix: &str, owner_filter: &str) -> Result<Vec<LockInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut locks = Vec::new();
 
         let prefix_pattern = if path_prefix.is_empty() {
@@ -305,7 +301,7 @@ impl MetadataDb {
         };
 
         let mut stmt = conn.prepare(
-            "SELECT path, owner, workspace_id, created_at, reason FROM locks WHERE repo = ?1 AND path LIKE ?2 AND owner LIKE ?3"
+            "SELECT path, owner, workspace_id, created_at, reason FROM locks WHERE repo = ?1 AND path LIKE ?2 AND owner LIKE ?3 LIMIT 10000"
         )?;
 
         let rows = stmt.query_map(rusqlite::params![repo, prefix_pattern, owner_pattern], |row| {
@@ -328,7 +324,7 @@ impl MetadataDb {
     // -- Issues --
 
     pub fn list_issues(&self, repo: &str, status: &str, limit: i32, offset: i32) -> Result<(Vec<IssueRecord>, i32, i32, i32)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let lim = if limit <= 0 { 50 } else { limit };
 
         let open_count: i32 = conn
@@ -359,7 +355,7 @@ impl MetadataDb {
     }
 
     pub fn create_issue(&self, repo: &str, title: &str, body: &str, author: &str, labels: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO issues (repo, title, body, author, status, labels, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?7)",
@@ -370,7 +366,7 @@ impl MetadataDb {
 
     /// Get a single issue by ID.
     pub fn get_issue(&self, id: i64) -> Result<Option<IssueRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, title, body, author, status, labels, created_at, updated_at, comment_count, assignee FROM issues WHERE id = ?1")?
             .query_row([id], Self::map_issue)
@@ -386,7 +382,7 @@ impl MetadataDb {
             None => return Ok(false),
         };
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let new_title = if title.is_empty() { &current.title } else { title };
         let new_body = if body.is_empty() { &current.body } else { body };
@@ -420,7 +416,7 @@ impl MetadataDb {
     // -- Pull Requests --
 
     pub fn list_pull_requests(&self, repo: &str, status: &str, limit: i32, offset: i32) -> Result<(Vec<PullRequestRecord>, i32, i32, i32)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let lim = if limit <= 0 { 50 } else { limit };
 
         let open_count: i32 = conn
@@ -451,7 +447,7 @@ impl MetadataDb {
     }
 
     pub fn create_pull_request(&self, repo: &str, title: &str, body: &str, author: &str, source_branch: &str, target_branch: &str, labels: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO pull_requests (repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?7, ?8, ?9)",
@@ -462,7 +458,7 @@ impl MetadataDb {
 
     /// Get a single pull request by ID.
     pub fn get_pull_request(&self, id: i64) -> Result<Option<PullRequestRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at, comment_count, assignee FROM pull_requests WHERE id = ?1")?
             .query_row([id], Self::map_pr)
@@ -478,7 +474,7 @@ impl MetadataDb {
             None => return Ok(false),
         };
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let new_title = if title.is_empty() { &current.title } else { title };
         let new_body = if body.is_empty() { &current.body } else { body };

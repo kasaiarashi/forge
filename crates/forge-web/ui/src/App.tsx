@@ -20,7 +20,7 @@ import IssueDetail from './pages/IssueDetail';
 import PullRequests from './pages/PullRequests';
 import NewPullRequest from './pages/NewPullRequest';
 import PullRequestDetail from './pages/PullRequestDetail';
-import PlaceholderPage from './pages/PlaceholderPage';
+
 
 export default function App() {
   return (
@@ -54,9 +54,6 @@ export default function App() {
         <Route path="/:repo/pulls" element={<PullRequests />} />
         <Route path="/:repo/pulls/new" element={<NewPullRequest />} />
         <Route path="/:repo/pulls/:id" element={<PullRequestDetail />} />
-        <Route path="/:repo/projects" element={<PlaceholderPage tabName="projects" title="Welcome to Projects" description="Plan, track, and manage your work with projects." />} />
-        <Route path="/:repo/security" element={<PlaceholderPage tabName="security" title="Security & Analysis" description="Understand the security of your code and help keep it safe." />} />
-        <Route path="/:repo/insights" element={<PlaceholderPage tabName="insights" title="Repository Insights" description="Get data-driven insights into your community and development processes." />} />
       </Routes>
     </Layout>
   );

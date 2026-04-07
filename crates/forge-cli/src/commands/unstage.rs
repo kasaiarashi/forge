@@ -58,7 +58,7 @@ pub fn run(paths: Vec<String>) -> Result<()> {
             // We need to restore the original hash from the last commit tree.
             if let Some(ref snap) = prev_tree {
                 if let Some(original) = find_entry_in_tree(&ws, &snap.tree, key) {
-                    let e = index.entries.get_mut(key).unwrap();
+                    let e = index.entries.get_mut(key).expect("key exists in index");
                     e.staged = false;
                     e.hash = original.0;
                     e.object_hash = original.1;
@@ -71,7 +71,22 @@ pub fn run(paths: Vec<String>) -> Result<()> {
                 index.entries.remove(key);
             }
         } else {
-            index.entries.get_mut(key).unwrap().staged = false;
+            // Restore index entry to HEAD state (undo the add).
+            if let Some(ref snap) = prev_tree {
+                if let Some(original) = find_entry_in_tree(&ws, &snap.tree, key) {
+                    if let Some(e) = index.entries.get_mut(key) {
+                        e.staged = false;
+                        e.hash = original.0;
+                        e.object_hash = original.1;
+                        e.size = original.2;
+                    }
+                } else {
+                    // File didn't exist in previous commit — it was newly added. Remove from index.
+                    index.entries.remove(key);
+                }
+            } else if let Some(e) = index.entries.get_mut(key) {
+                e.staged = false;
+            }
         }
         count += 1;
     }

@@ -41,7 +41,7 @@ impl ChunkStore {
         Ok(true)
     }
 
-    /// Retrieve and decompress data by hash.
+    /// Retrieve, decompress, and verify data by hash.
     pub fn get(&self, hash: &ForgeHash) -> Result<Vec<u8>, ForgeError> {
         let path = self.object_path(hash);
         if !path.exists() {
@@ -49,6 +49,15 @@ impl ChunkStore {
         }
         let compressed = std::fs::read(&path)?;
         let data = compress::decompress(&compressed)?;
+        // Verify integrity: recompute hash and compare.
+        let actual = ForgeHash::from_bytes(&data);
+        if actual != *hash {
+            return Err(ForgeError::Other(format!(
+                "integrity error: object {} has hash {} on disk",
+                hash.to_hex(),
+                actual.to_hex()
+            )));
+        }
         Ok(data)
     }
 

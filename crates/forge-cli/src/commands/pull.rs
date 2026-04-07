@@ -113,6 +113,16 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
                 let hash_hex = hex::encode(&chunk.hash);
                 let forge_hash = ForgeHash::from_hex(&hash_hex)?;
 
+                // Verify received data matches claimed hash.
+                let computed = ForgeHash::from_bytes(&current_data);
+                if computed != forge_hash {
+                    anyhow::bail!(
+                        "integrity error: server sent corrupt object (claimed {}, got {})",
+                        forge_hash.short(),
+                        computed.short()
+                    );
+                }
+
                 ws.object_store
                     .chunks
                     .put(&forge_hash, &current_data)?;
@@ -150,8 +160,10 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
     }
 
     // Fast-forward local branch.
+    let old_tip = local_tip.short();
     ws.set_branch_tip(&branch, &remote_tip)?;
-    println!("Pulled {} object(s). {} -> {}", received, branch, remote_tip.short());
+    println!("Receiving objects: {} done.", received);
+    println!("   {}..{} {} -> {}", old_tip, remote_tip.short(), branch, branch);
 
     Ok(())
 }

@@ -19,11 +19,7 @@ pub fn run(target: Option<String>, paths: Vec<String>) -> Result<()> {
     let ws = Workspace::discover(&cwd)?;
 
     let commit_hash = match &target {
-        Some(ref_str) => {
-            // Try as branch name first, then as hex hash.
-            ws.get_branch_tip(ref_str)
-                .or_else(|_| ForgeHash::from_hex(ref_str))?
-        }
+        Some(ref_str) => ws.resolve_ref(ref_str)?,
         None => ws.head_snapshot()?,
     };
 

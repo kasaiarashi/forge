@@ -25,8 +25,7 @@ pub fn run(commit: Option<String>, soft: bool, hard: bool) -> Result<()> {
         bail!("A commit hash is required for --soft or --hard reset.");
     }
 
-    let target_hash = ForgeHash::from_hex(&target_hex)
-        .map_err(|_| anyhow::anyhow!("Invalid commit hash: {}", target_hex))?;
+    let target_hash = ws.resolve_ref(&target_hex)?;
 
     // Verify the target is a valid snapshot.
     let _target_snap = ws.object_store.get_snapshot(&target_hash)
@@ -122,7 +121,7 @@ fn read_blob_content(ws: &Workspace, object_hash: &ForgeHash) -> Result<Vec<u8>>
         .map_err(|e| anyhow::anyhow!("Failed to read object {}: {}", object_hash.short(), e))?;
 
     if data.is_empty() {
-        bail!("Empty object: {}", object_hash.short());
+        return Ok(data); // Empty file — valid
     }
 
     if data[0] == 2 {
@@ -173,7 +172,9 @@ fn restore_working_tree(
         if !flat.contains_key(path) {
             let abs = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if abs.exists() {
-                let _ = std::fs::remove_file(&abs);
+                if let Err(e) = std::fs::remove_file(&abs) {
+                    eprintln!("warning: could not remove '{}': {}", path, e);
+                }
             }
         }
     }
@@ -184,6 +185,14 @@ fn restore_working_tree(
         let abs = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+        // Clear read-only flag if needed (common in UE/Perforce workflows).
+        if let Ok(meta) = std::fs::metadata(&abs) {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(&abs, perms);
+            }
         }
         std::fs::write(&abs, &content)?;
     }

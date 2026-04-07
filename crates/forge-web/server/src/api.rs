@@ -907,6 +907,149 @@ pub async fn get_pull_request(
 }
 
 // ---------------------------------------------------------------------------
+// Language statistics
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct BranchQuery {
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LanguageStatJson {
+    name: String,
+    color: String,
+    percentage: f64,
+    bytes: u64,
+    count: u64,
+}
+
+/// GET /api/repos/:repo/stats/languages -- language breakdown by file extension.
+pub async fn language_stats(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Query(query): Query<BranchQuery>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    let branch = query.branch.as_deref().unwrap_or("main");
+    let commit_hash = match resolve_branch(&grpc, &repo, branch).await {
+        Ok(h) => h,
+        Err(e) => return internal_error(e),
+    };
+
+    // Recursively walk the tree to accumulate bytes per extension.
+    use std::collections::HashMap;
+
+    struct ExtStats {
+        bytes: u64,
+        count: u64,
+    }
+
+    let mut ext_map: HashMap<String, ExtStats> = HashMap::new();
+    let mut dirs_to_visit: Vec<String> = vec![String::new()];
+
+    while let Some(dir_path) = dirs_to_visit.pop() {
+        let resp = match grpc.get_tree_entries(&repo, &commit_hash, &dir_path).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in resp.entries {
+            if entry.kind == "directory" || entry.kind == "dir" || entry.kind == "tree" {
+                let child = if dir_path.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{}/{}", dir_path, entry.name)
+                };
+                dirs_to_visit.push(child);
+            } else {
+                // Extract extension.
+                let ext = entry
+                    .name
+                    .rsplit('.')
+                    .next()
+                    .map(|e| format!(".{}", e.to_lowercase()))
+                    .unwrap_or_default();
+                if !ext.is_empty() && ext != format!(".{}", entry.name.to_lowercase()) {
+                    let stats = ext_map.entry(ext).or_insert(ExtStats { bytes: 0, count: 0 });
+                    stats.bytes += entry.size;
+                    stats.count += 1;
+                }
+            }
+        }
+    }
+
+    // Map extensions to language names and colors.
+    fn ext_to_language(ext: &str) -> Option<(&'static str, &'static str)> {
+        match ext {
+            ".cpp" | ".h" | ".hpp" | ".c" => Some(("C++", "#f34b7d")),
+            ".cs" => Some(("C#", "#178600")),
+            ".py" => Some(("Python", "#3572A5")),
+            ".rs" => Some(("Rust", "#dea584")),
+            ".ts" | ".tsx" => Some(("TypeScript", "#3178c6")),
+            ".js" | ".jsx" => Some(("JavaScript", "#f1e05a")),
+            ".uasset" | ".uexp" | ".ubulk" => Some(("Unreal Assets", "#2f3640")),
+            ".umap" => Some(("Unreal Maps", "#6c3483")),
+            ".ini" | ".toml" | ".json" | ".yaml" | ".yml" => Some(("Config", "#8B8B8B")),
+            ".md" | ".txt" | ".rst" => Some(("Documentation", "#083fa1")),
+            ".glsl" | ".hlsl" | ".ush" | ".usf" => Some(("Shaders", "#5e97d0")),
+            _ => None,
+        }
+    }
+
+    // Aggregate by language.
+    let mut lang_map: HashMap<&str, (u64, u64, &str)> = HashMap::new(); // name -> (bytes, count, color)
+    let mut other_bytes: u64 = 0;
+    let mut other_count: u64 = 0;
+
+    for (ext, stats) in &ext_map {
+        if let Some((name, color)) = ext_to_language(ext) {
+            let entry = lang_map.entry(name).or_insert((0, 0, color));
+            entry.0 += stats.bytes;
+            entry.1 += stats.count;
+        } else {
+            other_bytes += stats.bytes;
+            other_count += stats.count;
+        }
+    }
+
+    if other_bytes > 0 {
+        let entry = lang_map.entry("Other").or_insert((0, 0, "#cccccc"));
+        entry.0 += other_bytes;
+        entry.1 += other_count;
+    }
+
+    let total_bytes: u64 = lang_map.values().map(|(b, _, _)| *b).sum();
+
+    let mut languages: Vec<LanguageStatJson> = lang_map
+        .into_iter()
+        .map(|(name, (bytes, count, color))| {
+            let percentage = if total_bytes > 0 {
+                (bytes as f64 / total_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+            // Round to one decimal.
+            let percentage = (percentage * 10.0).round() / 10.0;
+            LanguageStatJson {
+                name: name.to_string(),
+                color: color.to_string(),
+                percentage,
+                bytes,
+                count,
+            }
+        })
+        .collect();
+
+    languages.sort_by(|a, b| b.percentage.partial_cmp(&a.percentage).unwrap_or(std::cmp::Ordering::Equal));
+
+    (StatusCode::OK, Json(serde_json::json!({ "languages": languages }))).into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -916,6 +1059,35 @@ async fn resolve_branch(
     repo: &str,
     branch: &str,
 ) -> anyhow::Result<String> {
+    // If it's a full 64-char hex hash, use directly.
+    if branch.len() == 64 && branch.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(branch.to_string());
+    }
+
+    // If it looks like a short commit hash (hex >= 12 chars), resolve via refs and commit walk.
+    if branch.len() >= 12 && branch.chars().all(|c| c.is_ascii_hexdigit()) {
+        let refs_resp = grpc.get_refs(repo).await?;
+        // Check if any ref tip matches the prefix.
+        for hash_bytes in refs_resp.refs.values() {
+            let full = hex::encode(hash_bytes);
+            if full.starts_with(branch) {
+                return Ok(full);
+            }
+        }
+        // Walk recent commits from each branch to find the full hash.
+        for hash_bytes in refs_resp.refs.values() {
+            let tip = hex::encode(hash_bytes);
+            if let Ok(commits) = grpc.list_commits(repo, &tip, 1, 200).await {
+                for c in &commits.0 {
+                    if c.hash.starts_with(branch) {
+                        return Ok(c.hash.clone());
+                    }
+                }
+            }
+        }
+        anyhow::bail!("commit '{}' not found", branch);
+    }
+
     let refs_resp = grpc.get_refs(repo).await?;
     let ref_name_candidates = [
         branch.to_string(),

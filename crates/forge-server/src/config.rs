@@ -23,6 +23,10 @@ pub struct ServerConfig {
     /// Actions/workflow engine settings.
     #[serde(default)]
     pub actions: ActionsSection,
+
+    /// Authentication settings.
+    #[serde(default)]
+    pub auth: AuthSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +67,23 @@ pub struct RepoConfig {
 
     /// Optional description.
     pub description: Option<String>,
+}
+
+/// Authentication settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthSection {
+    /// Enable authentication (default: false for backward compatibility).
+    #[serde(default)]
+    pub enabled: bool,
+    /// List of valid bearer tokens.
+    #[serde(default)]
+    pub tokens: Vec<String>,
+}
+
+impl Default for AuthSection {
+    fn default() -> Self {
+        Self { enabled: false, tokens: vec![] }
+    }
 }
 
 /// Actions/workflow engine settings.
@@ -146,6 +167,7 @@ impl Default for ServerConfig {
             storage: StorageSection::default(),
             repos: std::collections::HashMap::new(),
             actions: ActionsSection::default(),
+            auth: AuthSection::default(),
         }
     }
 }
@@ -199,21 +221,17 @@ db_path = "forge.db"
 # [repos.art-assets]
 # path = "E:/large-hdd/art-assets"
 # description = "Art asset repository (large storage)"
+
+[auth]
+# Enable token-based authentication (default: false).
+# When disabled, all requests are accepted without authentication.
+enabled = false
+
+# List of valid bearer tokens. Clients send these via the
+# "Authorization: Bearer <token>" gRPC metadata header.
+# tokens = ["secret-token-1", "secret-token-2"]
 "#
         .to_string()
-    }
-
-    /// Resolve the objects directory for a given repo.
-    pub fn repo_objects_path(&self, repo_name: &str) -> PathBuf {
-        if let Some(repo) = self.repos.get(repo_name) {
-            if let Some(ref path) = repo.path {
-                if path.is_absolute() {
-                    return path.join("objects");
-                }
-                return self.storage.base_path.join(path).join("objects");
-            }
-        }
-        self.storage.base_path.join("repos").join(repo_name).join("objects")
     }
 
     /// Resolve the full database path.

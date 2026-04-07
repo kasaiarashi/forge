@@ -22,9 +22,11 @@ pub struct ForgeGrpcService {
     pub workflow_engine: Option<tokio::sync::mpsc::Sender<i64>>,
 }
 
-/// Normalize repo name: empty string defaults to "default".
-fn repo_name(repo: &str) -> &str {
-    if repo.is_empty() { "default" } else { repo }
+/// Normalize and validate repo name: empty string defaults to "default".
+fn repo_name(repo: &str) -> Result<&str, Status> {
+    let name = if repo.is_empty() { "default" } else { repo };
+    super::validate::repo_name(name)?;
+    Ok(name)
 }
 
 impl ForgeGrpcService {
@@ -57,9 +59,10 @@ impl ForgeService for ForgeGrpcService {
         {
             // Read repo from the first chunk.
             if store.is_none() {
-                let repo = repo_name(&chunk.repo);
+                let repo = repo_name(&chunk.repo)?;
                 // Auto-register repo if it doesn't exist.
-                let _ = self.db.create_repo(repo, "");
+                self.db.create_repo(repo, "")
+                    .map_err(|e| Status::internal(format!("failed to register repo: {}", e)))?;
                 store = Some(self.fs.repo_store(repo));
             }
 
@@ -69,6 +72,10 @@ impl ForgeService for ForgeGrpcService {
                 current_hash = Some(chunk.hash.clone());
             }
 
+            const MAX_OBJECT_SIZE: usize = 512 * 1024 * 1024; // 512 MiB per object
+            if current_buf.len() + chunk.data.len() > MAX_OBJECT_SIZE {
+                return Err(Status::resource_exhausted("object exceeds maximum size"));
+            }
             current_buf.extend_from_slice(&chunk.data);
 
             if chunk.is_last {
@@ -81,19 +88,26 @@ impl ForgeService for ForgeGrpcService {
                 let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
                     .map_err(|e| Status::internal(e.to_string()))?;
 
+                let s = store.as_ref().ok_or_else(|| Status::internal("no repo specified in stream"))?;
+
                 if chunk.object_type == 1 {
-                    // Pre-compressed data — store directly without re-compressing.
-                    store
-                        .as_ref()
-                        .unwrap()
-                        .put_raw(&forge_hash, &current_buf)
+                    // Pre-compressed data — verify zstd magic bytes (0xFD2FB528).
+                    if current_buf.len() < 4
+                        || current_buf[0] != 0x28
+                        || current_buf[1] != 0xB5
+                        || current_buf[2] != 0x2F
+                        || current_buf[3] != 0xFD
+                    {
+                        return Err(Status::data_loss(format!(
+                            "invalid compressed data for {} (bad magic bytes)",
+                            hex::encode(&hash_bytes)
+                        )));
+                    }
+                    s.put_raw(&forge_hash, &current_buf)
                         .map_err(|e| Status::internal(e.to_string()))?;
                 } else {
                     // Uncompressed data — compress and store.
-                    store
-                        .as_ref()
-                        .unwrap()
-                        .put(&forge_hash, &current_buf)
+                    s.put(&forge_hash, &current_buf)
                         .map_err(|e| Status::internal(e.to_string()))?;
                 }
 
@@ -114,7 +128,15 @@ impl ForgeService for ForgeGrpcService {
         request: Request<PullRequest>,
     ) -> Result<Response<Self::PullObjectsStream>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo).to_string();
+        let repo = repo_name(&req.repo)?.to_string();
+
+        const MAX_PULL_HASHES: usize = 10_000;
+        if req.want_hashes.len() > MAX_PULL_HASHES {
+            return Err(Status::invalid_argument(format!(
+                "too many hashes requested ({}, max {})", req.want_hashes.len(), MAX_PULL_HASHES
+            )));
+        }
+
         let store = self.fs.repo_store(&repo);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -169,7 +191,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<HasObjectsRequest>,
     ) -> Result<Response<HasObjectsResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let store = self.fs.repo_store(repo);
         let mut has = Vec::with_capacity(req.hashes.len());
 
@@ -190,7 +212,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<GetRefsRequest>,
     ) -> Result<Response<GetRefsResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
 
         let all_refs = self
             .db
@@ -210,10 +232,12 @@ impl ForgeService for ForgeGrpcService {
         request: Request<UpdateRefRequest>,
     ) -> Result<Response<UpdateRefResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
+        super::validate::ref_name(&req.ref_name)?;
 
         // Auto-register repo if it doesn't exist (first push creates it).
-        let _ = self.db.create_repo(repo, "");
+        self.db.create_repo(repo, "")
+            .map_err(|e| Status::internal(format!("failed to register repo: {}", e)))?;
 
         let success = self
             .db
@@ -244,7 +268,8 @@ impl ForgeService for ForgeGrpcService {
         request: Request<LockRequest>,
     ) -> Result<Response<LockResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
+        super::validate::path(&req.path)?;
 
         let result = self
             .db
@@ -274,7 +299,8 @@ impl ForgeService for ForgeGrpcService {
         request: Request<UnlockRequest>,
     ) -> Result<Response<UnlockResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
+        super::validate::path(&req.path)?;
 
         let success = self
             .db
@@ -296,7 +322,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<ListLocksRequest>,
     ) -> Result<Response<ListLocksResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
 
         let locks = self
             .db
@@ -322,7 +348,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<VerifyLocksRequest>,
     ) -> Result<Response<VerifyLocksResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
 
         // Get all locks for the requested paths.
         let all_locks = self
@@ -549,7 +575,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<ListCommitsRequest>,
     ) -> Result<Response<ListCommitsResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let os = self.object_store(repo);
 
         let ref_name = format!("refs/heads/{}", if req.branch.is_empty() { "main" } else { &req.branch });
@@ -599,7 +625,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<GetTreeEntriesRequest>,
     ) -> Result<Response<GetTreeEntriesResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
@@ -673,7 +699,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<GetFileContentRequest>,
     ) -> Result<Response<GetFileContentResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
@@ -734,7 +760,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<GetCommitDetailRequest>,
     ) -> Result<Response<GetCommitDetailResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
@@ -837,7 +863,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<ListWorkflowsRequest>,
     ) -> Result<Response<ListWorkflowsResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let workflows = self.db.list_workflows(repo)
             .map_err(|e| Status::internal(e.to_string()))?;
         let infos = workflows.into_iter().map(|w| WorkflowInfo {
@@ -852,7 +878,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<CreateWorkflowRequest>,
     ) -> Result<Response<CreateWorkflowResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         // Validate YAML before saving.
         if let Err(e) = crate::services::actions::yaml::WorkflowDef::parse(&req.yaml) {
             return Ok(Response::new(CreateWorkflowResponse {
@@ -913,6 +939,14 @@ impl ForgeService for ForgeGrpcService {
                 success: false, error: "Workflow is disabled".into(), run_id: 0,
             }));
         }
+        // Check if manual trigger is allowed by the workflow definition.
+        if let Ok(def) = crate::services::actions::yaml::WorkflowDef::parse(&workflow.yaml) {
+            if !def.allows_manual() {
+                return Ok(Response::new(TriggerWorkflowResponse {
+                    success: false, error: "Manual trigger is not enabled for this workflow".into(), run_id: 0,
+                }));
+            }
+        }
         // Resolve commit hash from the ref.
         let ref_name = if req.ref_name.is_empty() { "refs/heads/main".to_string() } else { req.ref_name };
         let commit_hash = self.db.get_ref(&workflow.repo, &ref_name)
@@ -937,7 +971,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<ListWorkflowRunsRequest>,
     ) -> Result<Response<ListWorkflowRunsResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let (runs, total) = self.db.list_runs(repo, req.workflow_id, req.limit, req.offset)
             .map_err(|e| Status::internal(e.to_string()))?;
         let infos = runs.into_iter().map(|r| WorkflowRunInfo {
@@ -1029,7 +1063,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<ListReleasesRequest>,
     ) -> Result<Response<ListReleasesResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let releases = self.db.list_releases(repo)
             .map_err(|e| Status::internal(e.to_string()))?;
         let mut infos = Vec::new();
@@ -1087,7 +1121,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<ListIssuesRequest>,
     ) -> Result<Response<ListIssuesResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let (issues, total, open_count, closed_count) = self.db
             .list_issues(repo, &req.status, req.limit, req.offset)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -1112,7 +1146,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<CreateIssueRequest>,
     ) -> Result<Response<CreateIssueResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let labels = req.labels.join(",");
         let id = self.db.create_issue(repo, &req.title, &req.body, &req.author, &labels)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -1140,7 +1174,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<ListPullRequestsRequest>,
     ) -> Result<Response<ListPullRequestsResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let (prs, total, open_count, closed_count) = self.db
             .list_pull_requests(repo, &req.status, req.limit, req.offset)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -1166,7 +1200,7 @@ impl ForgeService for ForgeGrpcService {
         request: Request<CreatePullRequestRequest>,
     ) -> Result<Response<CreatePullRequestResponse>, Status> {
         let req = request.into_inner();
-        let repo = repo_name(&req.repo);
+        let repo = repo_name(&req.repo)?;
         let labels = req.labels.join(",");
         let id = self.db.create_pull_request(
             repo, &req.title, &req.body, &req.author,

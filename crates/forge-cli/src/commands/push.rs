@@ -25,11 +25,16 @@ pub fn run(force: bool) -> Result<()> {
         config.repo.clone()
     };
 
+    let remote_name = config
+        .default_remote()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "origin".to_string());
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async { push_async(&ws, &server_url, &repo_name, force).await })
+    rt.block_on(async { push_async(&ws, &server_url, &repo_name, &remote_name, force).await })
 }
 
-async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bool) -> Result<()> {
+async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_name: &str, force: bool) -> Result<()> {
     let mut client = ForgeServiceClient::connect(server_url.to_string()).await?;
 
     // Get current branch and its tip.
@@ -71,8 +76,12 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
     }
 
     // Check which objects the server already has.
+    // For small pushes (<100 objects), skip the has_objects round-trip — server deduplicates via put_raw.
     let missing = if objects_to_push.is_empty() {
         vec![]
+    } else if objects_to_push.len() < 100 {
+        // Small push: skip has_objects check, just push everything (server deduplicates).
+        objects_to_push.clone()
     } else {
         let hashes: Vec<Vec<u8>> = objects_to_push.iter().map(|h| h.as_bytes().to_vec()).collect();
         let has_resp = client
@@ -94,39 +103,41 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
     if !missing.is_empty() {
         let store = forge_core::store::chunk_store::ChunkStore::new(ws.forge_dir().join("objects"));
 
-        // Single pass: read compressed sizes for progress bar without decompressing.
-        let mut raw_objects: Vec<(ForgeHash, Vec<u8>)> = Vec::with_capacity(missing.len());
-        let mut total_bytes: u64 = 0;
-        for hash in &missing {
-            match store.get_raw(hash) {
-                Ok(compressed) => {
-                    total_bytes += compressed.len() as u64;
-                    raw_objects.push((*hash, compressed));
-                }
-                Err(_) => continue,
-            }
-        }
+        // Read objects in parallel from disk.
+        let raw_objects: Vec<(ForgeHash, Vec<u8>)> = {
+            use rayon::prelude::*;
+            missing
+                .par_iter()
+                .filter_map(|hash| store.get_raw(hash).ok().map(|data| (*hash, data)))
+                .collect()
+        };
+        let total_bytes: u64 = raw_objects.iter().map(|(_, d)| d.len() as u64).sum();
 
         let obj_count = raw_objects.len();
-        println!(
-            "Pushing {} object(s), {:.2} MiB total",
-            obj_count,
-            total_bytes as f64 / (1024.0 * 1024.0)
-        );
+        let show_progress = total_bytes > 1024 * 1024; // progress bar for >1 MiB
 
-        // Set up progress bar.
-        let pb = ProgressBar::new(total_bytes);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{msg}\n{wide_bar:.cyan/blue} {percent}% ({bytes}/{total_bytes}) {bytes_per_sec} ETA {eta}")
-                .expect("valid template")
-                .progress_chars("=>-"),
-        );
-        pb.set_message(format!("Writing objects: 0/{obj_count} objects"));
+        if show_progress {
+            println!(
+                "Pushing {} object(s), {:.2} MiB total",
+                obj_count,
+                total_bytes as f64 / (1024.0 * 1024.0)
+            );
+        }
 
-        // Build chunks eagerly, then stream them.
-        // Progress updates happen as gRPC consumes each item from the stream,
-        // so the bar reflects actual network progress, not local buffering.
+        let pb = if show_progress {
+            let pb = ProgressBar::new(total_bytes);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{msg}\n{wide_bar:.cyan/blue} {percent}% ({bytes}/{total_bytes}) {bytes_per_sec} ETA {eta}")
+                    .expect("valid template")
+                    .progress_chars("=>-"),
+            );
+            pb.set_message(format!("Writing objects: 0/{obj_count} objects"));
+            pb
+        } else {
+            ProgressBar::hidden()
+        };
+
         let repo_name_owned = repo_name.to_string();
         let chunks: Vec<ObjectChunk> = raw_objects
             .into_iter()
@@ -143,7 +154,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
 
         let mut sent_bytes: u64 = 0;
         let mut sent_objs: usize = 0;
-        let (tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(2); // tiny buffer = backpressure
+        let (tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(64);
 
         let pb_clone = pb.clone();
         let send_handle = tokio::spawn(async move {
@@ -164,7 +175,9 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
         send_handle.abort();
 
         pb.set_position(total_bytes);
-        pb.finish_with_message(format!("Writing objects: {obj_count}/{obj_count} objects, done."));
+        if show_progress {
+            pb.finish_with_message(format!("Writing objects: {obj_count}/{obj_count} objects, done."));
+        }
     }
 
     // Update remote ref.
@@ -178,17 +191,26 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, force: bo
         .update_ref(UpdateRefRequest {
             repo: repo_name.to_string(),
             ref_name: ref_name.clone(),
-            old_hash: old_hash_for_cas,
+            old_hash: old_hash_for_cas.clone(),
             new_hash: local_tip.as_bytes().to_vec(),
         })
         .await?
         .into_inner();
 
     if update_resp.success {
+        let remote_short = ForgeHash::from_hex(&hex::encode(&old_hash_for_cas))
+            .map(|h| h.short())
+            .unwrap_or_else(|_| "(new)".to_string());
         if force {
-            println!("Pushed to {} -> {} (forced)", ref_name, local_tip.short());
+            println!(
+                " + {}...{} {} -> {}/{} (forced)",
+                remote_short, local_tip.short(), branch, remote_name, branch
+            );
         } else {
-            println!("Pushed to {} -> {}", ref_name, local_tip.short());
+            println!(
+                "   {}..{} {} -> {}/{}",
+                remote_short, local_tip.short(), branch, remote_name, branch
+            );
         }
     } else {
         bail!(

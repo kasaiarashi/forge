@@ -5,8 +5,9 @@ use anyhow::Result;
 use forge_core::workspace::Workspace;
 use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
+use serde_json::json;
 
-pub fn run() -> Result<()> {
+pub fn run(json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
     let config = ws.config()?;
@@ -29,7 +30,16 @@ pub fn run() -> Result<()> {
             .await?
             .into_inner();
 
-        if resp.locks.is_empty() {
+        if json {
+            let arr: Vec<_> = resp.locks.iter().map(|lock| {
+                json!({
+                    "path": lock.path,
+                    "owner": lock.owner,
+                    "created_at": lock.created_at,
+                })
+            }).collect();
+            println!("{}", serde_json::to_string_pretty(&arr)?);
+        } else if resp.locks.is_empty() {
             println!("No active locks.");
         } else {
             println!("{:<40} {:<20} {}", "PATH", "OWNER", "SINCE");

@@ -5,8 +5,9 @@ use anyhow::{bail, Result};
 use forge_core::workspace::Workspace;
 use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
+use serde_json::json;
 
-pub fn run(path: String, force: bool) -> Result<()> {
+pub fn run(path: String, force: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
     let config = ws.config()?;
@@ -33,14 +34,29 @@ pub fn run(path: String, force: bool) -> Result<()> {
             .into_inner();
 
         if resp.success {
-            println!("\x1b[32mUnlocked:\x1b[0m {}", rel_path);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "path": rel_path,
+                }))?);
+            } else {
+                println!("\x1b[32mUnlocked:\x1b[0m {}", rel_path);
+            }
         } else {
             let msg = if resp.error.is_empty() {
                 "lock not found or owned by another user".to_string()
             } else {
                 resp.error
             };
-            bail!("Failed to unlock '{}': {}", rel_path, msg);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&json!({
+                    "ok": false,
+                    "error": msg,
+                    "path": rel_path,
+                }))?);
+            } else {
+                bail!("Failed to unlock '{}': {}", rel_path, msg);
+            }
         }
 
         Ok(())

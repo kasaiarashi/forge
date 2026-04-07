@@ -136,7 +136,7 @@ pub async fn login(
 
     // Set cookie.
     let cookie_value = format!(
-        "forge_token={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl_secs}",
+        "forge_token={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={ttl_secs}",
     );
 
     (
@@ -153,7 +153,7 @@ pub async fn login(
 /// POST /api/auth/logout
 pub async fn logout() -> Response {
     let cookie_value =
-        "forge_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string();
+        "forge_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0".to_string();
 
     (
         StatusCode::OK,

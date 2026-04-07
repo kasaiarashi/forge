@@ -35,8 +35,6 @@ pub struct PushTrigger {
 #[derive(Debug, Clone, Deserialize)]
 pub struct JobDef {
     pub name: String,
-    #[serde(default)]
-    pub needs: Vec<String>,
     pub steps: Vec<StepDef>,
 }
 

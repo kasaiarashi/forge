@@ -2,17 +2,23 @@
 // Licensed under the MIT License.
 
 use forge_core::store::chunk_store::ChunkStore;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Server-side filesystem storage with per-repo object directories.
 pub struct FsStorage {
-    base_path: PathBuf, // base directory, repos are subdirs
+    base_path: PathBuf,
+    /// Per-repo path overrides from config.
+    repo_overrides: HashMap<String, PathBuf>,
 }
 
 impl FsStorage {
-    pub fn new(base_path: PathBuf) -> Self {
+    pub fn new(base_path: PathBuf, repo_overrides: HashMap<String, PathBuf>) -> Self {
         std::fs::create_dir_all(&base_path).ok();
-        Self { base_path }
+        Self {
+            base_path,
+            repo_overrides,
+        }
     }
 
     /// Rename a repo directory from old name to new name.
@@ -35,8 +41,17 @@ impl FsStorage {
     }
 
     /// Get a ChunkStore for a specific repo's objects directory.
+    /// Respects per-repo path overrides from configuration.
     pub fn repo_store(&self, repo: &str) -> ChunkStore {
-        let dir = self.base_path.join(repo).join("objects");
+        let dir = if let Some(override_path) = self.repo_overrides.get(repo) {
+            if override_path.is_absolute() {
+                override_path.join("objects")
+            } else {
+                self.base_path.parent().unwrap_or(&self.base_path).join(override_path).join("objects")
+            }
+        } else {
+            self.base_path.join(repo).join("objects")
+        };
         std::fs::create_dir_all(&dir).ok();
         ChunkStore::new(dir)
     }

@@ -367,6 +367,21 @@ function enc(s: string) {
 
 export default api;
 
+export interface LanguageStat {
+  name: string;
+  color: string;
+  percentage: number;
+  bytes: number;
+  count: number;
+}
+
+export async function getLanguageStats(repo: string, branch: string): Promise<LanguageStat[]> {
+  const resp = await fetch(`/api/repos/${encodeURIComponent(repo)}/stats/languages?branch=${encodeURIComponent(branch)}`);
+  if (!resp.ok) return [];
+  const data = await resp.json();
+  return data.languages || [];
+}
+
 /** Clipboard write with fallback for non-HTTPS (e.g. LAN access) */
 export function copyToClipboard(text: string): Promise<void> {
   if (navigator.clipboard && window.isSecureContext) {

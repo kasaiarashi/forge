@@ -1,6 +1,5 @@
 import { Link } from 'react-router-dom';
-import { UnderlineNav, Label, Button } from '@primer/react';
-import { useState } from 'react';
+import { UnderlineNav, Label } from '@primer/react';
 import {
   RepoIcon,
   CodeIcon,
@@ -11,17 +10,10 @@ import {
   GearIcon,
   IssueOpenedIcon,
   GitPullRequestIcon,
-  ProjectIcon,
-  EyeIcon,
-  RepoForkedIcon,
-  StarIcon,
-  ShieldIcon,
-  GraphIcon,
-  StarFillIcon,
 } from '@primer/octicons-react';
 import { useAuth } from '../context/AuthContext';
 
-type Tab = 'code' | 'commits' | 'actions' | 'locks' | 'releases' | 'settings' | 'issues' | 'pulls' | 'projects' | 'security' | 'insights';
+type Tab = 'code' | 'commits' | 'actions' | 'locks' | 'releases' | 'settings' | 'issues' | 'pulls';
 
 interface RepoHeaderProps {
   repo: string;
@@ -40,27 +32,8 @@ export default function RepoHeader({ repo, currentTab, activeBranch }: RepoHeade
   const resolvedBranch = activeBranch || localStorage.getItem(storageKey) || 'main';
   const encBranch = encodeURIComponent(resolvedBranch);
   const { user } = useAuth();
-  
-  const owner = user?.username || 'user';
-  
-  // Interactive mock states
-  const [isWatching, setIsWatching] = useState(false);
-  const [isStarred, setIsStarred] = useState(false);
-  const [starCount, setStarCount] = useState(Math.floor(Math.random() * 100));
-  const [forkCount, setForkCount] = useState(Math.floor(Math.random() * 50));
-  const watchCount = isWatching ? 1 : 0;
 
-  const toggleWatch = () => setIsWatching(!isWatching);
-  const toggleStar = () => {
-    if (isStarred) {
-      setIsStarred(false);
-      setStarCount(s => s - 1);
-    } else {
-      setIsStarred(true);
-      setStarCount(s => s + 1);
-    }
-  };
-  const handleFork = () => setForkCount(f => f + 1);
+  const owner = user?.username || 'user';
 
   return (
     <div style={{ background: 'var(--bg-default)', borderBottom: '1px solid var(--border-default)', paddingTop: '16px', marginBottom: '24px', margin: '-24px -16px 24px -16px', paddingLeft: '16px', paddingRight: '16px' }}>
@@ -86,27 +59,6 @@ export default function RepoHeader({ repo, currentTab, activeBranch }: RepoHeade
             </Label>
           </div>
 
-          {/* Action Buttons */}
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <div style={{ display: 'flex' }}>
-              <Button size="small" leadingVisual={EyeIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0, paddingRight: '8px' }} onClick={toggleWatch}>
-                {isWatching ? 'Unwatch' : 'Watch'} <span style={{ marginLeft: '4px', fontSize: '10px' }}>▾</span>
-              </Button>
-              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>{watchCount}</Button>
-            </div>
-            <div style={{ display: 'flex' }}>
-              <Button size="small" leadingVisual={RepoForkedIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }} onClick={handleFork}>
-                Fork <span style={{ marginLeft: '4px', fontSize: '10px' }}>▾</span>
-              </Button>
-              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>{forkCount}</Button>
-            </div>
-            <div style={{ display: 'flex' }}>
-              <Button size="small" leadingVisual={isStarred ? StarFillIcon : StarIcon} style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }} onClick={toggleStar}>
-                {isStarred ? 'Unstar' : 'Star'}
-              </Button>
-              <Button size="small" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0 }}>{starCount}</Button>
-            </div>
-          </div>
         </div>
 
         {/* Repository tabs */}
@@ -142,30 +94,6 @@ export default function RepoHeader({ repo, currentTab, activeBranch }: RepoHeade
             icon={PlayIcon}
           >
             Actions
-          </UnderlineNav.Item>
-          <UnderlineNav.Item
-            as={Link}
-            to={`/${encRepo}/projects`}
-            aria-current={currentTab === 'projects' ? 'page' : undefined}
-            icon={ProjectIcon}
-          >
-            Projects
-          </UnderlineNav.Item>
-          <UnderlineNav.Item
-            as={Link}
-            to={`/${encRepo}/security`}
-            aria-current={currentTab === 'security' ? 'page' : undefined}
-            icon={ShieldIcon}
-          >
-            Security
-          </UnderlineNav.Item>
-          <UnderlineNav.Item
-            as={Link}
-            to={`/${encRepo}/insights`}
-            aria-current={currentTab === 'insights' ? 'page' : undefined}
-            icon={GraphIcon}
-          >
-            Insights
           </UnderlineNav.Item>
           <UnderlineNav.Item
             as={Link}

@@ -60,12 +60,18 @@ pub fn chunk_file(data: &[u8]) -> ChunkResult {
     }
 }
 
-/// Reassemble a chunked blob from its chunks.
+/// Reassemble a chunked blob from its chunks, verifying sizes.
 pub fn reassemble_chunks(manifest: &ChunkedBlob, get_chunk: impl Fn(&ForgeHash) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
     let mut result = Vec::with_capacity(manifest.total_size as usize);
     for chunk_ref in &manifest.chunks {
         let data = get_chunk(&chunk_ref.hash)?;
+        if data.len() as u64 != chunk_ref.size {
+            return None; // chunk size mismatch
+        }
         result.extend_from_slice(&data);
+    }
+    if result.len() as u64 != manifest.total_size {
+        return None; // total size mismatch
     }
     Some(result)
 }

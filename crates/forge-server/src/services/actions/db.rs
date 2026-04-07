@@ -38,7 +38,6 @@ pub struct RunRecord {
 #[derive(Debug, Clone)]
 pub struct StepRecord {
     pub id: i64,
-    pub run_id: i64,
     pub job_name: String,
     pub step_index: i32,
     pub name: String,
@@ -54,7 +53,6 @@ pub struct ArtifactRecord {
     pub id: i64,
     pub run_id: i64,
     pub name: String,
-    pub path: String,
     pub size_bytes: i64,
     pub created_at: i64,
 }
@@ -74,7 +72,7 @@ pub struct ReleaseRecord {
 impl MetadataDb {
     /// Create the actions tables. Called once during init.
     pub fn create_actions_tables(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS workflows (
@@ -143,7 +141,7 @@ impl MetadataDb {
     // ── Workflows ──
 
     pub fn create_workflow(&self, repo: &str, name: &str, yaml: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO workflows (repo, name, yaml, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, 1, ?4, ?4)",
@@ -153,7 +151,7 @@ impl MetadataDb {
     }
 
     pub fn update_workflow(&self, id: i64, name: &str, yaml: &str, enabled: bool) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let affected = conn.execute(
             "UPDATE workflows SET name = ?1, yaml = ?2, enabled = ?3, updated_at = ?4 WHERE id = ?5",
@@ -163,17 +161,17 @@ impl MetadataDb {
     }
 
     pub fn delete_workflow(&self, id: i64) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let affected = conn.execute("DELETE FROM workflows WHERE id = ?1", [id])?;
         Ok(affected > 0)
     }
 
     pub fn list_workflows(&self, repo: &str) -> Result<Vec<WorkflowRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE repo = ?1 ORDER BY name",
         )?;
-        let rows = stmt.query_map([repo], |row| {
+        let rows = stmt.query_map([repo], |row: &rusqlite::Row| {
             Ok(WorkflowRecord {
                 id: row.get(0)?,
                 repo: row.get(1)?,
@@ -188,10 +186,10 @@ impl MetadataDb {
     }
 
     pub fn get_workflow(&self, id: i64) -> Result<Option<WorkflowRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE id = ?1")?
-            .query_row([id], |row| {
+            .query_row([id], |row: &rusqlite::Row| {
                 Ok(WorkflowRecord {
                     id: row.get(0)?,
                     repo: row.get(1)?,
@@ -207,11 +205,11 @@ impl MetadataDb {
     }
 
     pub fn get_enabled_workflows_for_repo(&self, repo: &str) -> Result<Vec<WorkflowRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE repo = ?1 AND enabled = 1",
         )?;
-        let rows = stmt.query_map([repo], |row| {
+        let rows = stmt.query_map([repo], |row: &rusqlite::Row| {
             Ok(WorkflowRecord {
                 id: row.get(0)?,
                 repo: row.get(1)?,
@@ -236,7 +234,7 @@ impl MetadataDb {
         commit_hash: &str,
         triggered_by: &str,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO workflow_runs (repo, workflow_id, trigger, trigger_ref, commit_hash, status, created_at, triggered_by) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7)",
@@ -246,7 +244,7 @@ impl MetadataDb {
     }
 
     pub fn update_run_status(&self, run_id: i64, status: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         match status {
             "running" => {
@@ -272,17 +270,17 @@ impl MetadataDb {
     }
 
     pub fn list_runs(&self, repo: &str, workflow_id: i64, limit: i32, offset: i32) -> Result<(Vec<RunRecord>, i32)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
         let (where_clause, total) = if workflow_id > 0 {
             let count: i32 = conn
                 .prepare("SELECT COUNT(*) FROM workflow_runs WHERE repo = ?1 AND workflow_id = ?2")?
-                .query_row(rusqlite::params![repo, workflow_id], |row| row.get(0))?;
+                .query_row(rusqlite::params![repo, workflow_id], |row: &rusqlite::Row| row.get(0))?;
             ("WHERE r.repo = ?1 AND r.workflow_id = ?2".to_string(), count)
         } else {
             let count: i32 = conn
                 .prepare("SELECT COUNT(*) FROM workflow_runs WHERE repo = ?1")?
-                .query_row([repo], |row| row.get(0))?;
+                .query_row([repo], |row: &rusqlite::Row| row.get(0))?;
             ("WHERE r.repo = ?1".to_string(), count)
         };
 
@@ -323,7 +321,7 @@ impl MetadataDb {
     }
 
     pub fn get_run(&self, run_id: i64) -> Result<Option<RunRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let result = conn
             .prepare(
                 "SELECT r.id, r.repo, r.workflow_id, COALESCE(w.name, ''), r.trigger, r.trigger_ref, r.commit_hash, r.status, r.started_at, r.finished_at, r.created_at, r.triggered_by \
@@ -343,7 +341,7 @@ impl MetadataDb {
         step_index: i32,
         name: &str,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO workflow_steps (run_id, job_name, step_index, name, status) VALUES (?1, ?2, ?3, ?4, 'pending')",
             rusqlite::params![run_id, job_name, step_index, name],
@@ -352,7 +350,7 @@ impl MetadataDb {
     }
 
     pub fn update_step(&self, step_id: i64, status: &str, exit_code: Option<i32>, log: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         match status {
             "running" => {
@@ -372,22 +370,21 @@ impl MetadataDb {
     }
 
     pub fn list_steps(&self, run_id: i64) -> Result<Vec<StepRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, job_name, step_index, name, status, exit_code, log, started_at, finished_at FROM workflow_steps WHERE run_id = ?1 ORDER BY step_index",
+            "SELECT id, job_name, step_index, name, status, exit_code, log, started_at, finished_at FROM workflow_steps WHERE run_id = ?1 ORDER BY step_index",
         )?;
-        let rows = stmt.query_map([run_id], |row| {
+        let rows = stmt.query_map([run_id], |row: &rusqlite::Row| {
             Ok(StepRecord {
                 id: row.get(0)?,
-                run_id: row.get(1)?,
-                job_name: row.get(2)?,
-                step_index: row.get(3)?,
-                name: row.get(4)?,
-                status: row.get(5)?,
-                exit_code: row.get(6)?,
-                log: row.get(7)?,
-                started_at: row.get(8)?,
-                finished_at: row.get(9)?,
+                job_name: row.get(1)?,
+                step_index: row.get(2)?,
+                name: row.get(3)?,
+                status: row.get(4)?,
+                exit_code: row.get(5)?,
+                log: row.get(6)?,
+                started_at: row.get(7)?,
+                finished_at: row.get(8)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
@@ -396,7 +393,7 @@ impl MetadataDb {
     // ── Artifacts ──
 
     pub fn create_artifact(&self, run_id: i64, name: &str, path: &str, size_bytes: i64) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT OR REPLACE INTO artifacts (run_id, name, path, size_bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -406,35 +403,33 @@ impl MetadataDb {
     }
 
     pub fn list_artifacts(&self, run_id: i64) -> Result<Vec<ArtifactRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, name, path, size_bytes, created_at FROM artifacts WHERE run_id = ?1 ORDER BY name",
+            "SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE run_id = ?1 ORDER BY name",
         )?;
-        let rows = stmt.query_map([run_id], |row| {
+        let rows = stmt.query_map([run_id], |row: &rusqlite::Row| {
             Ok(ArtifactRecord {
                 id: row.get(0)?,
                 run_id: row.get(1)?,
                 name: row.get(2)?,
-                path: row.get(3)?,
-                size_bytes: row.get(4)?,
-                created_at: row.get(5)?,
+                size_bytes: row.get(3)?,
+                created_at: row.get(4)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn get_artifact(&self, artifact_id: i64) -> Result<Option<ArtifactRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let result = conn
-            .prepare("SELECT id, run_id, name, path, size_bytes, created_at FROM artifacts WHERE id = ?1")?
-            .query_row([artifact_id], |row| {
+            .prepare("SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE id = ?1")?
+            .query_row([artifact_id], |row: &rusqlite::Row| {
                 Ok(ArtifactRecord {
                     id: row.get(0)?,
                     run_id: row.get(1)?,
                     name: row.get(2)?,
-                    path: row.get(3)?,
-                    size_bytes: row.get(4)?,
-                    created_at: row.get(5)?,
+                    size_bytes: row.get(3)?,
+                    created_at: row.get(4)?,
                 })
             })
             .ok();
@@ -444,7 +439,7 @@ impl MetadataDb {
     // ── Releases ──
 
     pub fn create_release(&self, repo: &str, run_id: Option<i64>, tag: &str, name: &str, artifact_ids: &[i64]) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO releases (repo, run_id, tag, name, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -462,11 +457,11 @@ impl MetadataDb {
     }
 
     pub fn list_releases(&self, repo: &str) -> Result<Vec<ReleaseRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, run_id, tag, name, created_at FROM releases WHERE repo = ?1 ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map([repo], |row| {
+        let rows = stmt.query_map([repo], |row: &rusqlite::Row| {
             Ok(ReleaseRecord {
                 id: row.get(0)?,
                 repo: row.get(1)?,
@@ -480,10 +475,10 @@ impl MetadataDb {
     }
 
     pub fn get_release(&self, release_id: i64) -> Result<Option<ReleaseRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, run_id, tag, name, created_at FROM releases WHERE id = ?1")?
-            .query_row([release_id], |row| {
+            .query_row([release_id], |row: &rusqlite::Row| {
                 Ok(ReleaseRecord {
                     id: row.get(0)?,
                     repo: row.get(1)?,
@@ -498,11 +493,11 @@ impl MetadataDb {
     }
 
     pub fn get_release_artifact_ids(&self, release_id: i64) -> Result<Vec<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT artifact_id FROM release_artifacts WHERE release_id = ?1",
         )?;
-        let rows = stmt.query_map([release_id], |row| row.get(0))?;
+        let rows = stmt.query_map([release_id], |row: &rusqlite::Row| row.get(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

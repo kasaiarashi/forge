@@ -22,7 +22,7 @@ pub fn run(paths: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
     let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
-        .unwrap_or_else(|_| forge_ignore::ForgeIgnore::from_str("").unwrap());
+        .unwrap_or_default();
 
     // 1. Collect all file paths first (fast walk).
     let mut file_paths: Vec<PathBuf> = Vec::new();
@@ -34,8 +34,27 @@ pub fn run(paths: Vec<String>) -> Result<()> {
         };
 
         if abs_path.is_dir() {
+            let forge_dir_name = std::ffi::OsStr::new(".forge");
             for entry in walkdir::WalkDir::new(&abs_path)
                 .into_iter()
+                .filter_entry(|e| {
+                    // Skip .forge and ignored directories entirely (don't descend).
+                    if e.file_name() == forge_dir_name {
+                        return false;
+                    }
+                    if e.file_type().is_dir() {
+                        let rel = e
+                            .path()
+                            .strip_prefix(&ws.root)
+                            .unwrap_or(e.path())
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        if !rel.is_empty() && ignore.is_ignored(&rel) {
+                            return false;
+                        }
+                    }
+                    true
+                })
                 .filter_map(|e| e.ok())
             {
                 if entry.file_type().is_file() {
@@ -44,14 +63,15 @@ pub fn run(paths: Vec<String>) -> Result<()> {
                         .strip_prefix(&ws.root)
                         .unwrap_or(entry.path());
                     let rel_str = rel.to_string_lossy().replace('\\', "/");
-                    if !ignore.is_ignored(&rel_str) && !rel_str.starts_with(".forge/") {
+                    if !ignore.is_ignored(&rel_str) {
                         file_paths.push(entry.into_path());
                     }
                 }
             }
-        } else {
+        } else if abs_path.exists() {
             file_paths.push(abs_path);
         }
+        // Non-existent files are handled by the deletion detection below.
     }
 
     // Load the index to detect unchanged files and deletions.

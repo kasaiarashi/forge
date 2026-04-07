@@ -21,6 +21,7 @@ export default function RepoSettings() {
 
   const [, setRepoInfo] = useState<RepoInfo | null>(null);
   const [defaultBranch, setDefaultBranch] = useState('main');
+  const [branches, setBranches] = useState<Branch[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -44,14 +45,15 @@ export default function RepoSettings() {
   useEffect(() => {
     setLoading(true);
     Promise.all([api.listRepos(), api.listBranches(repo)])
-      .then(([repos, branches]) => {
+      .then(([repos, br]) => {
         const info = repos.find((r) => r.name === repo);
         if (info) {
           setRepoInfo(info);
           setNewName(info.name);
           setDescription(info.description || '');
         }
-        const main = branches.find((b: Branch) => b.name === 'main') || branches[0];
+        setBranches(br);
+        const main = br.find((b: Branch) => b.name === 'main') || br[0];
         if (main) setDefaultBranch(main.name);
       })
       .catch((e) => setError(e.message))
@@ -197,6 +199,28 @@ export default function RepoSettings() {
               </Button>
             </div>
           </FormControl>
+        </div>
+
+        {/* Default Branch */}
+        <div className="forge-card" style={{ marginBottom: '24px' }}>
+          <div className="forge-card-header"><h3>Default Branch</h3></div>
+          <div style={{ padding: '16px' }}>
+            <p style={{ color: 'var(--fg-muted)', marginBottom: '12px' }}>The default branch is the base for new pull requests and code browsing.</p>
+            <select value={defaultBranch} onChange={e => setDefaultBranch(e.target.value)} style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)' }}>
+              {branches.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {/* Lock Policy */}
+        <div className="forge-card" style={{ marginBottom: '24px' }}>
+          <div className="forge-card-header"><h3>File Lock Policy</h3></div>
+          <div style={{ padding: '16px' }}>
+            <p style={{ color: 'var(--fg-muted)', marginBottom: '12px' }}>Binary files matching these patterns require exclusive locks before editing.</p>
+            <div style={{ fontFamily: 'monospace', fontSize: '13px', padding: '12px', backgroundColor: 'var(--bg-inset)', borderRadius: '6px', border: '1px solid var(--border-muted)' }}>
+              *.uasset<br/>*.umap<br/>*.uexp<br/>*.ubulk
+            </div>
+          </div>
         </div>
 
         {/* Danger Zone */}

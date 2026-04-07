@@ -103,8 +103,10 @@ impl ObjectStore {
     }
 
     fn deserialize<T: serde::de::DeserializeOwned>(&self, data: &[u8]) -> Result<T, ForgeError> {
-        if data.is_empty() {
-            return Err(ForgeError::Serialization("empty data".into()));
+        if data.len() < 2 {
+            return Err(ForgeError::Serialization(
+                format!("object too small ({} bytes)", data.len()),
+            ));
         }
         // Skip the 1-byte type prefix.
         let obj = bincode::deserialize(&data[1..])
