@@ -211,7 +211,7 @@ export default function CommitDetail() {
 
             {file.change_type !== 'deleted' ? (
               <Link
-                to={`/${encRepo}/blob/${info.hash.slice(0, 12)}/${file.path}`}
+                to={`/${encRepo}/blob/${info.hash}/${file.path}`}
                 className="text-mono"
                 style={{
                   flex: 1,

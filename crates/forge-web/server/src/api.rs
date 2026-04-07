@@ -1059,20 +1059,33 @@ async fn resolve_branch(
     repo: &str,
     branch: &str,
 ) -> anyhow::Result<String> {
-    // If it looks like a commit hash (hex string >= 12 chars), use it directly.
+    // If it's a full 64-char hex hash, use directly.
+    if branch.len() == 64 && branch.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(branch.to_string());
+    }
+
+    // If it looks like a short commit hash (hex >= 12 chars), resolve via refs and commit walk.
     if branch.len() >= 12 && branch.chars().all(|c| c.is_ascii_hexdigit()) {
-        // For short hashes, try to find the full hash by prefix match in refs.
-        if branch.len() < 64 {
-            let refs_resp = grpc.get_refs(repo).await?;
-            for hash_bytes in refs_resp.refs.values() {
-                let full = hex::encode(hash_bytes);
-                if full.starts_with(branch) {
-                    return Ok(full);
+        let refs_resp = grpc.get_refs(repo).await?;
+        // Check if any ref tip matches the prefix.
+        for hash_bytes in refs_resp.refs.values() {
+            let full = hex::encode(hash_bytes);
+            if full.starts_with(branch) {
+                return Ok(full);
+            }
+        }
+        // Walk recent commits from each branch to find the full hash.
+        for hash_bytes in refs_resp.refs.values() {
+            let tip = hex::encode(hash_bytes);
+            if let Ok(commits) = grpc.list_commits(repo, &tip, 1, 200).await {
+                for c in &commits.0 {
+                    if c.hash.starts_with(branch) {
+                        return Ok(c.hash.clone());
+                    }
                 }
             }
         }
-        // Use as-is (the gRPC layer will handle short hash resolution).
-        return Ok(branch.to_string());
+        anyhow::bail!("commit '{}' not found", branch);
     }
 
     let refs_resp = grpc.get_refs(repo).await?;
