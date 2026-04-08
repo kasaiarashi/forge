@@ -38,7 +38,7 @@ where
 
         // See `void operator<<(FStructuredArchive::FSlot Slot, FPackageFileSummary& Sum)` in Engine/Source/Runtime/CoreUObject/Private/UObject/PackageFileSummary.cpp
         let legacy_version: i32 = reader.read_le()?;
-        if !(-8..=-5).contains(&legacy_version) {
+        if !(-9..=-5).contains(&legacy_version) {
             return Err(Error::UnsupportedVersion(legacy_version));
         }
 
@@ -64,9 +64,12 @@ where
             .ok_or(Error::UnsupportedUE4Version(file_version))?;
 
         let file_version_ue5 = if file_version_ue5 != 0 {
+            // Use from_i32 for known versions, but for unknown newer versions
+            // use the highest known version for forward compatibility.
+            // UE versions are backward compatible — newer versions only add features.
             Some(
                 ObjectVersionUE5::from_i32(file_version_ue5)
-                    .ok_or(Error::UnsupportedUE5Version(file_version_ue5))?,
+                    .unwrap_or(ObjectVersionUE5::PACKAGE_SAVED_HASH),
             )
         } else {
             None

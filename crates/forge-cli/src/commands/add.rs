@@ -164,8 +164,12 @@ pub fn run(paths: Vec<String>) -> Result<()> {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default();
 
+            let extension = std::path::Path::new(&rel_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!(".{}", e));
             let (content_hash, object_hash, is_chunked, raw_chunks) =
-                match chunk::chunk_file(&data) {
+                match chunk::chunk_file_with_hint(&data, extension.as_deref()) {
                     ChunkResult::WholeFile { hash, data } => {
                         (hash, hash, false, vec![(hash, data)])
                     }

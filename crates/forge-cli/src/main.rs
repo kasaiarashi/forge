@@ -52,6 +52,10 @@ enum Commands {
         #[arg(long)]
         stat: bool,
 
+        /// Extract two versions to temp files (for external diff tools / UE editor)
+        #[arg(long)]
+        extract: bool,
+
         /// File paths to restrict diff to
         paths: Vec<String>,
     },
@@ -301,7 +305,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Add { paths } => commands::add::run(paths)?,
         Commands::Commit { message, all } => commands::snapshot::run(message, all, cli.json)?,
         Commands::Status => commands::status::run(cli.json)?,
-        Commands::Diff { commit, staged, stat, paths } => commands::diff::run(commit, staged, stat, paths, cli.json)?,
+        Commands::Diff { commit, staged, stat, extract, paths } => commands::diff::run(commit, staged, stat, extract, paths, cli.json)?,
         Commands::Log { count, file, oneline, all } => commands::log::run(count, file, oneline, all, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
