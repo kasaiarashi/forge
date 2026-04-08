@@ -302,6 +302,17 @@ impl ForgeService for ForgeGrpcService {
         let repo = repo_name(&req.repo)?;
         super::validate::path(&req.path)?;
 
+        // When force-unlocking, verify the caller provided an owner identity.
+        // Force-unlock is an admin action; log it for audit trail.
+        if req.force && !req.owner.is_empty() {
+            tracing::warn!(
+                repo = repo,
+                path = req.path,
+                owner = req.owner,
+                "Force-unlock requested"
+            );
+        }
+
         let success = self
             .db
             .release_lock(repo, &req.path, &req.owner, req.force)

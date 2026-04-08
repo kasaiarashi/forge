@@ -403,13 +403,29 @@ impl Workspace {
 /// Write data atomically: write to a temp file, then rename over the target.
 /// This prevents partial/corrupt writes on crash or power loss.
 pub fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), ForgeError> {
-    let tmp = path.with_extension("tmp");
-    // Remove stale temp from a prior crash, if any.
-    let _ = std::fs::remove_file(&tmp);
+    // Use a unique temp name to avoid collisions with concurrent writers.
+    let unique = std::process::id();
+    let tmp = path.with_extension(format!("tmp.{}", unique));
     std::fs::write(&tmp, data)?;
-    // On Windows, rename fails if target exists — remove it first.
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::fs::rename(&tmp, path)?;
+    }
+
     #[cfg(target_os = "windows")]
-    let _ = std::fs::remove_file(path);
-    std::fs::rename(&tmp, path)?;
+    {
+        // On Windows, try rename first (works if target doesn't exist).
+        // If it fails because target exists, remove target then retry.
+        if std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(path);
+            if let Err(e) = std::fs::rename(&tmp, path) {
+                // Clean up temp on failure.
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e.into());
+            }
+        }
+    }
+
     Ok(())
 }
