@@ -3,11 +3,13 @@
 //! Compares two `StructuredAsset` instances and produces a list of semantic changes
 //! at the import, export, and property level.
 
+use uasset::ffield::FieldDefinition;
 use uasset::property::{PropertyValue, TaggedProperty};
 use std::collections::BTreeMap;
 use std::fmt;
 
 // Re-export for use by forge-cli without depending on uasset directly.
+pub use uasset::ffield;
 pub use uasset::structured::parse_structured;
 pub use uasset::structured::parse_structured_with_uexp;
 pub use uasset::structured::{ExportInfo, ImportInfo, StructuredAsset};
@@ -44,6 +46,16 @@ pub enum AssetChange {
     ExportDataChanged {
         export_name: String,
         description: String,
+    },
+    /// A variable/property definition was added to a class/struct.
+    FieldAdded {
+        export_name: String,
+        field: FieldDefinition,
+    },
+    /// A variable/property definition was removed from a class/struct.
+    FieldRemoved {
+        export_name: String,
+        field: FieldDefinition,
     },
 }
 
@@ -93,6 +105,12 @@ impl fmt::Display for AssetChange {
                 description,
             } => {
                 write!(f, "  [{}] ~ {}", export_name, description)
+            }
+            AssetChange::FieldAdded { export_name, field } => {
+                write!(f, "  [{}] + variable: {}", export_name, field)
+            }
+            AssetChange::FieldRemoved { export_name, field } => {
+                write!(f, "  [{}] - variable: {}", export_name, field)
             }
         }
     }
@@ -184,8 +202,14 @@ fn diff_exports(old: &[ExportInfo], new: &[ExportInfo], changes: &mut Vec<AssetC
                 }
             }
 
-            // Compare trailing data size.
-            if old_exp.trailing_data_size != new_exp.trailing_data_size {
+            // Compare trailing data size (only if no field definitions to show).
+            let has_field_changes = match (&old_exp.field_definitions, &new_exp.field_definitions) {
+                (Some(old_fields), Some(new_fields)) => old_fields != new_fields,
+                (None, Some(_)) | (Some(_), None) => true,
+                (None, None) => false,
+            };
+
+            if old_exp.trailing_data_size != new_exp.trailing_data_size && !has_field_changes {
                 changes.push(AssetChange::ExportDataChanged {
                     export_name: name.to_string(),
                     description: format!(
@@ -194,6 +218,69 @@ fn diff_exports(old: &[ExportInfo], new: &[ExportInfo], changes: &mut Vec<AssetC
                     ),
                 });
             }
+
+            // Compare field definitions (variable/property definitions in class/struct exports).
+            diff_field_definitions(name, &old_exp.field_definitions, &new_exp.field_definitions, changes);
+        }
+    }
+}
+
+fn diff_field_definitions(
+    export_name: &str,
+    old_fields: &Option<Vec<FieldDefinition>>,
+    new_fields: &Option<Vec<FieldDefinition>>,
+    changes: &mut Vec<AssetChange>,
+) {
+    let (old_f, new_f) = match (old_fields, new_fields) {
+        (Some(o), Some(n)) => (o.as_slice(), n.as_slice()),
+        (None, Some(n)) => {
+            // All fields are new.
+            for f in n {
+                changes.push(AssetChange::FieldAdded {
+                    export_name: export_name.to_string(),
+                    field: f.clone(),
+                });
+            }
+            return;
+        }
+        (Some(o), None) => {
+            // All fields were removed.
+            for f in o {
+                changes.push(AssetChange::FieldRemoved {
+                    export_name: export_name.to_string(),
+                    field: f.clone(),
+                });
+            }
+            return;
+        }
+        (None, None) => return,
+    };
+
+    // Build maps by field name.
+    let old_map: BTreeMap<&str, &FieldDefinition> = old_f.iter()
+        .map(|f| (f.field_name.as_str(), f))
+        .collect();
+    let new_map: BTreeMap<&str, &FieldDefinition> = new_f.iter()
+        .map(|f| (f.field_name.as_str(), f))
+        .collect();
+
+    // Removed fields.
+    for (name, field) in &old_map {
+        if !new_map.contains_key(name) {
+            changes.push(AssetChange::FieldRemoved {
+                export_name: export_name.to_string(),
+                field: (*field).clone(),
+            });
+        }
+    }
+
+    // Added fields.
+    for (name, field) in &new_map {
+        if !old_map.contains_key(name) {
+            changes.push(AssetChange::FieldAdded {
+                export_name: export_name.to_string(),
+                field: (*field).clone(),
+            });
         }
     }
 }

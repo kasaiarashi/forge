@@ -804,6 +804,20 @@ fn try_structured_asset_diff_with_uexp(
                     format!("\x1b[33m~ {}\x1b[0m", description)
                 );
             }
+            uasset_diff::AssetChange::FieldAdded {
+                export_name, field,
+            } => {
+                export_changes.entry(export_name.clone()).or_default().push(
+                    format!("\x1b[32m+ variable: {}\x1b[0m", field)
+                );
+            }
+            uasset_diff::AssetChange::FieldRemoved {
+                export_name, field,
+            } => {
+                export_changes.entry(export_name.clone()).or_default().push(
+                    format!("\x1b[31m- variable: {}\x1b[0m", field)
+                );
+            }
             _ => {}
         }
     }

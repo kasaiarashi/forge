@@ -3,6 +3,7 @@
 //! Combines header parsing with property parsing into a single representation
 //! that captures all semantically meaningful parts of a `.uasset` file.
 
+use crate::ffield::{self, FieldDefinition};
 use crate::property::{self, TaggedProperty};
 use crate::{AssetHeader, ObjectReference, PackageFlags};
 use std::io::Cursor;
@@ -46,6 +47,9 @@ pub struct ExportInfo {
     pub outer_name: Option<String>,
     /// Parsed tagged properties (None if parsing failed or was skipped).
     pub properties: Option<Vec<TaggedProperty>>,
+    /// Parsed field/property definitions for class/struct exports.
+    /// Present when this export is a UClass/UStruct that defines properties (e.g., BlueprintGeneratedClass).
+    pub field_definitions: Option<Vec<FieldDefinition>>,
     /// Size of trailing native data after the property list.
     pub trailing_data_size: usize,
 }
@@ -229,6 +233,7 @@ pub fn parse_structured_with_uexp(
                     serial_size: exp.serial_size,
                     outer_name,
                     properties: None,
+                    field_definitions: None,
                     trailing_data_size: exp.serial_size as usize,
                 };
             }
@@ -237,6 +242,18 @@ pub fn parse_structured_with_uexp(
             let (properties, trailing_data_size) =
                 parse_export_properties(file_data, exp, &header.names, &mut warnings);
 
+            // Try to parse field definitions for class/struct exports.
+            let field_definitions = {
+                let serial_offset = exp.serial_offset as usize;
+                let serial_size = exp.serial_size as usize;
+                if serial_offset + serial_size <= file_data.len() {
+                    let export_data = &file_data[serial_offset..serial_offset + serial_size];
+                    ffield::parse_field_definitions(export_data, &header.names, &class_name)
+                } else {
+                    None
+                }
+            };
+
             ExportInfo {
                 index: i,
                 object_name,
@@ -244,6 +261,7 @@ pub fn parse_structured_with_uexp(
                 serial_size: exp.serial_size,
                 outer_name,
                 properties,
+                field_definitions,
                 trailing_data_size,
             }
         })
