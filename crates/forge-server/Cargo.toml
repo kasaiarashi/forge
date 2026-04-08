@@ -26,3 +26,5 @@ indexmap.workspace = true
 uuid.workspace = true
 globset.workspace = true
 walkdir.workspace = true
+indicatif.workspace = true
+self-replace.workspace = true

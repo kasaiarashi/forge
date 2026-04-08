@@ -4,6 +4,7 @@
 mod config;
 mod services;
 mod storage;
+mod update;
 
 use std::sync::Arc;
 
@@ -43,6 +44,12 @@ enum Commands {
     Init,
     /// Start the server (default)
     Serve,
+    /// Check for updates and self-update the server
+    Update {
+        /// Only check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[tokio::main]
@@ -52,6 +59,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::Update { check }) => {
+            update::run(check)?;
+            return Ok(());
+        }
         Some(Commands::Init) => {
             let path = std::path::Path::new(&cli.config);
             if path.exists() {

@@ -30,3 +30,4 @@ hex.workspace = true
 tokio-stream = "0.1"
 similar.workspace = true
 indicatif.workspace = true
+self-replace.workspace = true

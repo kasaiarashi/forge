@@ -30,3 +30,4 @@ pub mod checkout;
 pub mod restore;
 pub mod asset_info;
 pub mod gc;
+pub mod update;

@@ -293,6 +293,13 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Check for updates and self-update the forge CLI
+    Update {
+        /// Only check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -333,6 +340,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Revert { commit } => commands::revert::run(commit)?,
         Commands::AssetInfo { path } => commands::asset_info::run(path, cli.json)?,
         Commands::Gc { dry_run } => commands::gc::run(dry_run)?,
+        Commands::Update { check } => commands::update::run(check, cli.json)?,
     }
 
     Ok(())

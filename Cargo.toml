@@ -63,3 +63,5 @@ indicatif = "0.17"
 uasset = { path = "crates/uasset" }
 serde_yaml = "0.9"
 indexmap = { version = "2", features = ["serde"] }
+# Self-replacement for updater
+self-replace = "1"
