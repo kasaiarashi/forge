@@ -166,7 +166,8 @@ pub fn diff_assets_with_data(
                              &mut changes);
 
     // 4. Diff UserDefinedEnum enumerators via name table comparison.
-    diff_enum_values(&old.exports, &old.names, &new.exports, &new.names, &mut changes);
+    diff_enum_values(&old.exports, &old.names, old_data,
+                     &new.exports, &new.names, new_data, &mut changes);
 
     changes
 }
@@ -671,8 +672,10 @@ fn pin_category_to_type(category: &str) -> String {
 fn diff_enum_values(
     old_exports: &[ExportInfo],
     old_names: &[String],
+    old_data: Option<&[u8]>,
     new_exports: &[ExportInfo],
     new_names: &[String],
+    new_data: Option<&[u8]>,
     changes: &mut Vec<AssetChange>,
 ) {
     let old_map: BTreeMap<&str, &ExportInfo> =
@@ -687,7 +690,7 @@ fn diff_enum_values(
 
         let prefix = format!("{}::", name);
 
-        // Collect enum values from name tables (entries matching "EnumName::*").
+        // Collect enum values and build display name map.
         let new_values: Vec<&str> = new_names.iter()
             .filter(|n| n.starts_with(&prefix))
             .map(|n| &n[prefix.len()..])
@@ -706,21 +709,23 @@ fn diff_enum_values(
             continue;
         }
 
-        // Also collect display names from the name table.
-        // UE stores display names as separate entries (e.g., "TestCube") that
-        // aren't prefixed with the enum name.
+        // Build display name map from raw file data (display names are inline FText,
+        // not in the name table).
+        let new_display = new_data
+            .map(|d| build_enum_display_map_from_data(name, &new_values, new_names, d))
+            .unwrap_or_default();
+        let old_display = old_data
+            .map(|d| build_enum_display_map_from_data(name, &old_values, old_names, d))
+            .unwrap_or_default();
 
         // Detect added enumerators.
         for val in &new_values {
             if !old_values.contains(val) && !val.ends_with("_MAX") {
-                // Try to find a display name for this enumerator.
-                // Display names are stored via DisplayNameMap tagged property,
-                // but we can check if there's a matching non-prefixed name nearby.
-                let display_name = find_enum_display_name(*val, new_names, &prefix);
+                let display = new_display.get(*val).cloned();
                 changes.push(AssetChange::EnumValueAdded {
                     export_name: name.to_string(),
-                    value_name: val.to_string(),
-                    display_name,
+                    value_name: display.clone().unwrap_or_else(|| val.to_string()),
+                    display_name: if display.is_some() { Some(val.to_string()) } else { None },
                 });
             }
         }
@@ -728,9 +733,11 @@ fn diff_enum_values(
         // Detect removed enumerators.
         for val in &old_values {
             if !new_values.contains(val) && !val.ends_with("_MAX") {
+                let display = old_display.get(*val).cloned()
+                    .unwrap_or_else(|| val.to_string());
                 changes.push(AssetChange::EnumValueRemoved {
                     export_name: name.to_string(),
-                    value_name: val.to_string(),
+                    value_name: display,
                 });
             }
         }
@@ -741,21 +748,67 @@ fn is_enum_export(class_name: &str) -> bool {
     class_name == "UserDefinedEnum" || class_name == "Enum"
 }
 
-/// Try to find a display name for an enum value.
-/// UE stores display names in a DisplayNameMap. We check the name table for
-/// entries that might be display names (non-prefixed, not standard UE names).
-fn find_enum_display_name(value_name: &str, names: &[String], enum_prefix: &str) -> Option<String> {
-    // The display name is often stored as a separate name table entry.
-    // For "NewEnumerator4" with display "TestCube", "TestCube" would be in the name table.
-    // We look for names that appear right after the enum entries in the name table.
+/// Build a map from enumerator internal name to display name by scanning raw data.
+///
+/// Display names are stored as FText values in the DisplayNameMap MapProperty.
+/// FText serializes as: i32 flags + (namespace FString + key FString + value FString).
+/// The display name appears as an inline FString — we search for each enumerator's
+/// FName followed by a nearby readable ASCII string that looks like a display name.
+fn build_enum_display_map_from_data(
+    enum_name: &str,
+    values: &[&str],
+    names: &[String],
+    data: &[u8],
+) -> BTreeMap<String, String> {
+    let mut display_map = BTreeMap::new();
 
-    // Find the position of the enum value in the name table.
-    let full_name = format!("{}{}", enum_prefix, value_name);
-    let val_pos = names.iter().position(|n| n == &full_name)?;
+    // For each enumerator, find its FName bytes in the data (as key in DisplayNameMap),
+    // then look for the next inline FString (the display name FText value).
+    let prefix = format!("{}::", enum_name);
 
-    // Look for a nearby display name — UE typically stores it close to the enum entry.
-    // The DisplayNameMap is a tagged property, but display name strings appear as
-    // separate FName or FString entries. Check a few positions after.
-    // This is a heuristic — not 100% reliable.
-    None // Display name detection is complex; skip for now.
+    for val in values {
+        if val.ends_with("_MAX") { continue; }
+
+        let full_name = format!("{}{}", prefix, val);
+        let Some(name_idx) = names.iter().position(|n| n == &full_name) else { continue };
+
+        // Search for this FName in the data (as part of the DisplayNameMap).
+        let fname_bytes = (name_idx as u32).to_le_bytes();
+        let zero = 0u32.to_le_bytes();
+
+        // Find occurrences of this FName in the raw data.
+        for offset in 0..data.len().saturating_sub(32) {
+            if data[offset..offset + 4] != fname_bytes { continue; }
+            if data[offset + 4..offset + 8] != zero { continue; }
+
+            // After the enumerator FName key, there's the FText value.
+            // FText serialization: i32 flags, then depending on flags:
+            // - Namespace FString + Key FString + SourceString FString
+            // Look for a readable FString (i32 length + ASCII chars) nearby.
+            for text_off in (offset + 8..offset + 100).step_by(4) {
+                if text_off + 4 > data.len() { break; }
+                let len = i32::from_le_bytes(
+                    data[text_off..text_off + 4].try_into().unwrap_or([0; 4])
+                );
+                // Valid FString: positive length, reasonable size, followed by ASCII.
+                if len > 1 && len < 64 {
+                    let str_start = text_off + 4;
+                    let str_end = str_start + len as usize;
+                    if str_end > data.len() { continue; }
+
+                    let bytes = &data[str_start..str_end - 1]; // exclude null terminator
+                    if bytes.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+                        let display = String::from_utf8_lossy(bytes).to_string();
+                        if !display.is_empty() && display.len() > 1 {
+                            display_map.insert(val.to_string(), display);
+                            break;
+                        }
+                    }
+                }
+            }
+            break; // Only need the first occurrence of this FName.
+        }
+    }
+
+    display_map
 }
