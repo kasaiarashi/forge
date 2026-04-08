@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -224,3 +225,63 @@ jobs:
             forge-server-linux-amd64.tar.gz
             forge-server-macos-amd64.tar.gz
             forge-server-macos-arm64.tar.gz
+
+  # ─── Build & push Docker images (reuses build-server linux + build-ui) ───
+  docker:
+    name: Docker (${{ matrix.image }})
+    needs: [build-server, build-ui]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: forge-server
+            target: forge-server
+          - image: forge-web
+            target: forge-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux server artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-server-linux-amd64
+          path: dist/
+
+      - name: Download UI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-web-ui-dist
+          path: dist/ui/
+
+      - name: Make binaries executable
+        run: chmod +x dist/forge-server dist/forge-web
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
