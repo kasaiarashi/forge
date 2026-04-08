@@ -74,6 +74,30 @@ impl ObjectStore {
         self.chunks.get(hash)
     }
 
+    /// Read file content, automatically reassembling chunked blobs.
+    /// Tree entries point to either a raw blob or a ChunkedBlob manifest.
+    /// This method handles both cases transparently.
+    pub fn read_file(&self, hash: &ForgeHash) -> Result<Vec<u8>, ForgeError> {
+        let data = self.chunks.get(hash)?;
+        // Check if this is a typed object (has a type prefix byte).
+        if !data.is_empty() && data[0] == ObjectType::ChunkedBlob as u8 {
+            if let Ok(chunked) = self.get_chunked_blob(hash) {
+                // Reassemble from chunks.
+                return crate::chunk::reassemble_chunks(&chunked, |chunk_hash| {
+                    self.chunks.get(chunk_hash).ok()
+                })
+                .ok_or_else(|| {
+                    ForgeError::Other(format!(
+                        "failed to reassemble chunked blob {}",
+                        hash.short()
+                    ))
+                });
+            }
+        }
+        // Not a chunked blob — return raw data.
+        Ok(data)
+    }
+
     // -- Chunk data (individual chunks of large files) --
 
     pub fn put_chunk(&self, hash: &ForgeHash, data: &[u8]) -> Result<bool, ForgeError> {

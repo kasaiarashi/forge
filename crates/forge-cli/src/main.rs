@@ -94,6 +94,10 @@ enum Commands {
         /// Server URL
         url: String,
 
+        /// Repository name on the server (defaults to "default")
+        #[arg(long)]
+        repo: Option<String>,
+
         /// Local directory (defaults to repo name)
         #[arg(long)]
         path: Option<String>,
@@ -316,7 +320,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Log { count, file, oneline, all } => commands::log::run(count, file, oneline, all, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
-        Commands::Clone { url, path } => commands::clone::run(url, path)?,
+        Commands::Clone { url, repo, path } => commands::clone::run(url, path, repo)?,
         Commands::Lock { path, reason } => commands::lock::run(path, reason, cli.json)?,
         Commands::Unlock { path, force } => commands::unlock::run(path, force, cli.json)?,
         Commands::Locks => commands::locks::run(cli.json)?,

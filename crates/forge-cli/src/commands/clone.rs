@@ -5,17 +5,17 @@ use anyhow::Result;
 use forge_core::object::snapshot::Author;
 use forge_core::workspace::Workspace;
 
-pub fn run(url: String, path: Option<String>) -> Result<()> {
-    // Derive directory name from URL if not specified.
-    let dir_name = path.unwrap_or_else(|| {
-        url.rsplit('/')
-            .next()
-            .unwrap_or("forge-project")
-            .trim_end_matches('/')
-            .to_string()
-    });
+pub fn run(url: String, path: Option<String>, repo: Option<String>) -> Result<()> {
+    // Derive repo name from URL path or use explicit --repo.
+    let repo_name = repo.unwrap_or_else(|| "default".into());
+
+    // Derive directory name: explicit --path, or repo name.
+    let dir_name = path.unwrap_or_else(|| repo_name.clone());
 
     let target = std::env::current_dir()?.join(&dir_name);
+    if target.exists() && std::fs::read_dir(&target)?.next().is_some() {
+        anyhow::bail!("destination path '{}' already exists and is not empty", dir_name);
+    }
     std::fs::create_dir_all(&target)?;
 
     println!("Cloning into '{}'...", target.display());
@@ -27,9 +27,10 @@ pub fn run(url: String, path: Option<String>) -> Result<()> {
     };
     let ws = Workspace::init(&target, author)?;
 
-    // Add origin remote.
+    // Configure remote and repo name.
     let mut config = ws.config()?;
     config.add_remote("origin".into(), url)?;
+    config.repo = repo_name;
     ws.save_config(&config)?;
 
     // Write default .forgeignore.
@@ -38,8 +39,8 @@ pub fn run(url: String, path: Option<String>) -> Result<()> {
         std::fs::write(&ignore_path, forge_ignore::ForgeIgnore::default_content())?;
     }
 
-    // Pull from remote.
-    super::pull::run()?;
+    // Pull using the workspace we just created (not cwd).
+    super::pull::run_with_workspace(&ws)?;
 
     println!("Clone complete.");
     Ok(())
