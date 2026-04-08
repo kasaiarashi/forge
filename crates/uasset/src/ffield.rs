@@ -5,7 +5,7 @@
 //! to extract variable names, types, and flags — enabling diffs to show
 //! "added variable: TestVar (BoolProperty)" instead of "native data changed".
 
-use std::io::{Cursor, Read, Seek, SeekFrom};
+// No cursor-based reads — we use direct byte slice access for robustness across UE versions.
 
 /// A parsed property definition from a UStruct's field list.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,207 +168,80 @@ fn scan_for_property_definitions(data: &[u8], names: &[String]) -> Option<Vec<Fi
 }
 
 /// Try to parse `count` FField entries starting from `offset` in the data.
+///
+/// Uses a scan-based approach: find each FField by looking for the next known
+/// property type FName after the current position. This is more robust than
+/// trying to parse every byte of FProperty data (which varies by UE version).
 fn try_parse_fields_at(
     data: &[u8],
     offset: usize,
     count: usize,
     names: &[String],
 ) -> Option<Vec<FieldDefinition>> {
-    let mut cursor = Cursor::new(data);
-    cursor.seek(SeekFrom::Start((offset + 4) as u64)).ok()?; // Skip the PropertyCount
-
+    let start = offset + 4; // Skip the PropertyCount
     let mut fields = Vec::with_capacity(count);
 
-    for _ in 0..count {
-        let field = parse_single_field(&mut cursor, names)?;
-        fields.push(field);
-    }
+    // Find positions of all property type FNames in sequence.
+    let mut search_pos = start;
 
-    Some(fields)
-}
+    for _field_idx in 0..count {
+        // Find the next known field type FName at or after search_pos.
+        let (type_pos, field_type) = find_next_field_type(data, search_pos, names)?;
 
-/// Parse a single FField entry from the cursor.
-fn parse_single_field(
-    cursor: &mut Cursor<&[u8]>,
-    names: &[String],
-) -> Option<FieldDefinition> {
-    // 1. FName PropertyTypeName (the FField class name).
-    let field_type = read_fname(cursor, names)?;
-
-    if !KNOWN_FIELD_TYPES.contains(&field_type.as_str()) {
-        return None; // Not a valid field type — abort.
-    }
-
-    // 2. FField::Serialize():
-    //    - FName NamePrivate
-    //    - uint32 FlagsPrivate
-    //    - bool bHasMetaData (only in uncooked packages)
-    //    - TMap<FName, FString> MetaDataMap (if bHasMetaData)
-    let field_name = read_fname(cursor, names)?;
-    let _flags_private = read_u32(cursor)?;
-
-    // Read and skip metadata (present in uncooked editor assets).
-    // Format: u8 bHasMetaData, then if true: TMap<FName, FString>.
-    // We try to skip it; if parsing fails, the whole field parse aborts gracefully.
-    if let Some(has_metadata) = read_u8(cursor) {
-        if has_metadata != 0 {
-            let meta_count = read_i32(cursor)?;
-            if meta_count < 0 || meta_count > 1000 {
-                return None;
-            }
-            for _ in 0..meta_count {
-                let _key = read_fname(cursor, names)?;
-                let _value = skip_fstring(cursor)?;
-            }
+        // The field name FName immediately follows the type FName (8 bytes after).
+        let name_pos = type_pos + 8;
+        if name_pos + 8 > data.len() {
+            return None;
         }
+
+        let name_idx = u32::from_le_bytes(data[name_pos..name_pos + 4].try_into().ok()?) as usize;
+        let name_num = u32::from_le_bytes(data[name_pos + 4..name_pos + 8].try_into().ok()?);
+
+        if name_idx >= names.len() {
+            return None;
+        }
+
+        let mut field_name = names[name_idx].clone();
+        if name_num > 0 {
+            field_name.push_str(&format!("_{}", name_num - 1));
+        }
+
+        fields.push(FieldDefinition {
+            field_type: field_type.clone(),
+            field_name,
+            array_dim: 1,
+            property_flags: 0,
+            struct_type: None,
+            inner_type: None,
+            key_type: None,
+            value_type: None,
+        });
+
+        // Skip past this field to find the next one.
+        // Minimum skip: type FName(8) + name FName(8) = 16 bytes.
+        search_pos = name_pos + 8;
+    }
+
+    if fields.len() == count {
+        Some(fields)
     } else {
-        return None;
+        None
     }
+}
 
-    // 3. FProperty::Serialize():
-    //    - int32 ArrayDim
-    //    - int32 ElementSize (deprecated but serialized)
-    //    - uint64 PropertyFlags
-    //    - int32 DefaultRepIndex (always 0)
-    //    - FName RepNotifyFunc
-    //    - uint8 BlueprintReplicationCondition
-    let array_dim = read_i32(cursor)?;
-    let _element_size = read_i32(cursor)?;
-    let property_flags = read_u64(cursor)?;
-    let _default_rep_index = read_i32(cursor)?;
-    let _rep_notify_func = read_fname(cursor, names)?;
-    let _bp_replication_condition = read_u8(cursor)?;
+/// Find the next known property type FName at or after `start` in the data.
+fn find_next_field_type(data: &[u8], start: usize, names: &[String]) -> Option<(usize, String)> {
+    for pos in start..data.len().saturating_sub(8) {
+        let name_idx = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        if name_idx >= names.len() { continue; }
 
-    // Sanity checks.
-    if array_dim < 0 || array_dim > 1024 {
-        return None;
-    }
+        let name_num = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?);
+        if name_num != 0 { continue; } // Type names never have a number suffix
 
-    // 4. Type-specific data.
-    let mut struct_type = None;
-    let mut inner_type = None;
-    let mut key_type = None;
-    let mut value_type = None;
-
-    match field_type.as_str() {
-        "StructProperty" => {
-            // UScriptStruct* Struct — serialized as an object reference.
-            struct_type = read_object_reference_name(cursor, names);
+        let name = &names[name_idx];
+        if KNOWN_FIELD_TYPES.contains(&name.as_str()) {
+            return Some((pos, name.clone()));
         }
-        "ObjectProperty" | "ClassProperty" | "SoftObjectProperty" | "SoftClassProperty"
-        | "WeakObjectProperty" | "LazyObjectProperty" | "InterfaceProperty" => {
-            // UClass* PropertyClass — serialized as an object reference.
-            let _class_ref = read_object_reference_name(cursor, names);
-        }
-        "ArrayProperty" | "SetProperty" | "OptionalProperty" => {
-            // FField* Inner — serialized via SerializeSingleField pattern.
-            if let Some(inner_field) = parse_single_field(cursor, names) {
-                inner_type = Some(inner_field.field_type);
-            }
-        }
-        "MapProperty" => {
-            // FField* KeyProp + FField* ValueProp.
-            if let Some(key_field) = parse_single_field(cursor, names) {
-                key_type = Some(key_field.field_type);
-            }
-            if let Some(val_field) = parse_single_field(cursor, names) {
-                value_type = Some(val_field.field_type);
-            }
-        }
-        "EnumProperty" => {
-            // FNumericProperty* UnderlyingProp + UEnum* Enum.
-            // UnderlyingProp is a SerializeSingleField (usually ByteProperty or IntProperty).
-            let _underlying = parse_single_field(cursor, names);
-            // UEnum* — object reference.
-            let _enum_ref = read_object_reference_name(cursor, names);
-        }
-        "DelegateProperty" | "MulticastDelegateProperty"
-        | "MulticastInlineDelegateProperty" | "MulticastSparseDelegateProperty" => {
-            // UFunction* SignatureFunction — object reference.
-            let _func_ref = read_object_reference_name(cursor, names);
-        }
-        // BoolProperty, numeric properties, string properties — no extra data.
-        _ => {}
     }
-
-    Some(FieldDefinition {
-        field_type,
-        field_name,
-        array_dim,
-        property_flags,
-        struct_type,
-        inner_type,
-        key_type,
-        value_type,
-    })
-}
-
-/// Read an object reference (serialized as FPackageIndex = i32) and try to resolve its name.
-fn read_object_reference_name(cursor: &mut Cursor<&[u8]>, names: &[String]) -> Option<String> {
-    let index = read_i32(cursor)?;
-    // We can't fully resolve object references without the import/export tables,
-    // but we return the index as a string for now.
-    if index == 0 {
-        Some("None".to_string())
-    } else {
-        // Just return the index — the caller can resolve it later.
-        Some(format!("Ref[{}]", index))
-    }
-}
-
-// --- Simple binary readers ---
-
-fn read_u8(cursor: &mut Cursor<&[u8]>) -> Option<u8> {
-    let mut buf = [0u8; 1];
-    cursor.read_exact(&mut buf).ok()?;
-    Some(buf[0])
-}
-
-fn read_i32(cursor: &mut Cursor<&[u8]>) -> Option<i32> {
-    let mut buf = [0u8; 4];
-    cursor.read_exact(&mut buf).ok()?;
-    Some(i32::from_le_bytes(buf))
-}
-
-fn read_u32(cursor: &mut Cursor<&[u8]>) -> Option<u32> {
-    let mut buf = [0u8; 4];
-    cursor.read_exact(&mut buf).ok()?;
-    Some(u32::from_le_bytes(buf))
-}
-
-fn read_u64(cursor: &mut Cursor<&[u8]>) -> Option<u64> {
-    let mut buf = [0u8; 8];
-    cursor.read_exact(&mut buf).ok()?;
-    Some(u64::from_le_bytes(buf))
-}
-
-/// Skip an FString: read i32 length, then skip that many bytes.
-fn skip_fstring(cursor: &mut Cursor<&[u8]>) -> Option<()> {
-    let length = read_i32(cursor)?;
-    if length == 0 {
-        return Some(());
-    }
-    let byte_count = if length < 0 {
-        (-length as usize) * 2 // UTF-16
-    } else {
-        length as usize // UTF-8/Latin-1
-    };
-    cursor.seek(SeekFrom::Current(byte_count as i64)).ok()?;
-    Some(())
-}
-
-/// Read an FName: u32 name table index + u32 number.
-fn read_fname(cursor: &mut Cursor<&[u8]>, names: &[String]) -> Option<String> {
-    let index = read_u32(cursor)? as usize;
-    let number = read_u32(cursor)?;
-
-    if index >= names.len() {
-        return None;
-    }
-
-    let mut name = names[index].clone();
-    if number > 0 {
-        name.push_str(&format!("_{}", number - 1));
-    }
-    Some(name)
+    None
 }
