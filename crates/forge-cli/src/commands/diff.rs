@@ -821,6 +821,25 @@ fn try_structured_asset_diff_with_uexp(
                     format!("\x1b[31m- variable: {}\x1b[0m", field)
                 );
             }
+            uasset_diff::AssetChange::EnumValueAdded {
+                export_name, value_name, display_name,
+            } => {
+                let label = if let Some(dn) = display_name {
+                    format!("{} ({})", value_name, dn)
+                } else {
+                    value_name.clone()
+                };
+                export_changes.entry(export_name.clone()).or_default().push(
+                    format!("\x1b[32m+ enum: {}\x1b[0m", label)
+                );
+            }
+            uasset_diff::AssetChange::EnumValueRemoved {
+                export_name, value_name,
+            } => {
+                export_changes.entry(export_name.clone()).or_default().push(
+                    format!("\x1b[31m- enum: {}\x1b[0m", value_name)
+                );
+            }
             _ => {}
         }
     }

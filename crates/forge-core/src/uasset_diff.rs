@@ -47,6 +47,17 @@ pub enum AssetChange {
         export_name: String,
         description: String,
     },
+    /// An enumerator was added to a UserDefinedEnum.
+    EnumValueAdded {
+        export_name: String,
+        value_name: String,
+        display_name: Option<String>,
+    },
+    /// An enumerator was removed from a UserDefinedEnum.
+    EnumValueRemoved {
+        export_name: String,
+        value_name: String,
+    },
     /// A variable/property definition was added to a class/struct.
     FieldAdded {
         export_name: String,
@@ -106,6 +117,16 @@ impl fmt::Display for AssetChange {
             } => {
                 write!(f, "  [{}] ~ {}", export_name, description)
             }
+            AssetChange::EnumValueAdded { export_name, value_name, display_name } => {
+                if let Some(dn) = display_name {
+                    write!(f, "  [{}] + enum: {} ({})", export_name, value_name, dn)
+                } else {
+                    write!(f, "  [{}] + enum: {}", export_name, value_name)
+                }
+            }
+            AssetChange::EnumValueRemoved { export_name, value_name } => {
+                write!(f, "  [{}] - enum: {}", export_name, value_name)
+            }
             AssetChange::FieldAdded { export_name, field } => {
                 write!(f, "  [{}] + variable: {}", export_name, field)
             }
@@ -143,6 +164,9 @@ pub fn diff_assets_with_data(
     diff_blueprint_variables(&old.exports, old_data, &old.names,
                              &new.exports, new_data, &new.names,
                              &mut changes);
+
+    // 4. Diff UserDefinedEnum enumerators via name table comparison.
+    diff_enum_values(&old.exports, &old.names, &new.exports, &new.names, &mut changes);
 
     changes
 }
@@ -637,4 +661,101 @@ fn pin_category_to_type(category: &str) -> String {
         "delegate" | "mcdelegate" => "Delegate".to_string(),
         other => other.to_string(),
     }
+}
+
+/// Diff UserDefinedEnum enumerators by comparing name table entries.
+///
+/// UE enum values are stored as FName entries in the name table with the pattern
+/// `EnumName::EnumeratorName`. By comparing which enum-prefixed names exist in
+/// the old vs new name tables, we can detect added/removed enumerators.
+fn diff_enum_values(
+    old_exports: &[ExportInfo],
+    old_names: &[String],
+    new_exports: &[ExportInfo],
+    new_names: &[String],
+    changes: &mut Vec<AssetChange>,
+) {
+    let old_map: BTreeMap<&str, &ExportInfo> =
+        old_exports.iter().map(|e| (e.object_name.as_str(), e)).collect();
+    let new_map: BTreeMap<&str, &ExportInfo> =
+        new_exports.iter().map(|e| (e.object_name.as_str(), e)).collect();
+
+    for (name, new_exp) in &new_map {
+        if !is_enum_export(&new_exp.class_name) {
+            continue;
+        }
+
+        let prefix = format!("{}::", name);
+
+        // Collect enum values from name tables (entries matching "EnumName::*").
+        let new_values: Vec<&str> = new_names.iter()
+            .filter(|n| n.starts_with(&prefix))
+            .map(|n| &n[prefix.len()..])
+            .collect();
+
+        let old_values: Vec<&str> = if old_map.contains_key(name) {
+            old_names.iter()
+                .filter(|n| n.starts_with(&prefix))
+                .map(|n| &n[prefix.len()..])
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if new_values == old_values {
+            continue;
+        }
+
+        // Also collect display names from the name table.
+        // UE stores display names as separate entries (e.g., "TestCube") that
+        // aren't prefixed with the enum name.
+
+        // Detect added enumerators.
+        for val in &new_values {
+            if !old_values.contains(val) && !val.ends_with("_MAX") {
+                // Try to find a display name for this enumerator.
+                // Display names are stored via DisplayNameMap tagged property,
+                // but we can check if there's a matching non-prefixed name nearby.
+                let display_name = find_enum_display_name(*val, new_names, &prefix);
+                changes.push(AssetChange::EnumValueAdded {
+                    export_name: name.to_string(),
+                    value_name: val.to_string(),
+                    display_name,
+                });
+            }
+        }
+
+        // Detect removed enumerators.
+        for val in &old_values {
+            if !new_values.contains(val) && !val.ends_with("_MAX") {
+                changes.push(AssetChange::EnumValueRemoved {
+                    export_name: name.to_string(),
+                    value_name: val.to_string(),
+                });
+            }
+        }
+    }
+}
+
+fn is_enum_export(class_name: &str) -> bool {
+    class_name == "UserDefinedEnum" || class_name == "Enum"
+}
+
+/// Try to find a display name for an enum value.
+/// UE stores display names in a DisplayNameMap. We check the name table for
+/// entries that might be display names (non-prefixed, not standard UE names).
+fn find_enum_display_name(value_name: &str, names: &[String], enum_prefix: &str) -> Option<String> {
+    // The display name is often stored as a separate name table entry.
+    // For "NewEnumerator4" with display "TestCube", "TestCube" would be in the name table.
+    // We look for names that appear right after the enum entries in the name table.
+
+    // Find the position of the enum value in the name table.
+    let full_name = format!("{}{}", enum_prefix, value_name);
+    let val_pos = names.iter().position(|n| n == &full_name)?;
+
+    // Look for a nearby display name — UE typically stores it close to the enum entry.
+    // The DisplayNameMap is a tagged property, but display name strings appear as
+    // separate FName or FString entries. Check a few positions after.
+    // This is a heuristic — not 100% reliable.
+    None // Display name detection is complex; skip for now.
 }
