@@ -51,6 +51,7 @@
 mod archive;
 pub mod enums;
 mod error;
+pub mod ffield;
 pub mod property;
 pub mod structured;
 mod serialization;

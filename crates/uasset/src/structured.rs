@@ -3,6 +3,7 @@
 //! Combines header parsing with property parsing into a single representation
 //! that captures all semantically meaningful parts of a `.uasset` file.
 
+use crate::ffield::{self, FieldDefinition};
 use crate::property::{self, TaggedProperty};
 use crate::{AssetHeader, ObjectReference, PackageFlags};
 use std::io::Cursor;
@@ -31,6 +32,8 @@ pub struct ImportInfo {
     pub class_package: String,
     pub class_name: String,
     pub object_name: String,
+    /// Resolved name of the outer (parent) object, if any.
+    pub outer_name: Option<String>,
 }
 
 /// An export object with optional parsed properties.
@@ -40,8 +43,13 @@ pub struct ExportInfo {
     pub object_name: String,
     pub class_name: String,
     pub serial_size: i64,
+    /// Resolved name of the outer (parent) object, if any.
+    pub outer_name: Option<String>,
     /// Parsed tagged properties (None if parsing failed or was skipped).
     pub properties: Option<Vec<TaggedProperty>>,
+    /// Parsed field/property definitions for class/struct exports.
+    /// Present when this export is a UClass/UStruct that defines properties (e.g., BlueprintGeneratedClass).
+    pub field_definitions: Option<Vec<FieldDefinition>>,
     /// Size of trailing native data after the property list.
     pub trailing_data_size: usize,
 }
@@ -142,11 +150,25 @@ pub fn parse_structured_with_uexp(
                 .resolve_name(&imp.object_name)
                 .unwrap_or_else(|_| "???".into())
                 .into_owned();
+            let outer_name = match imp.outer() {
+                ObjectReference::Import { import_index } => {
+                    header.imports.get(import_index).and_then(|o| {
+                        header.resolve_name(&o.object_name).ok().map(|s| s.into_owned())
+                    })
+                }
+                ObjectReference::Export { export_index } => {
+                    header.exports.get(export_index).and_then(|o| {
+                        header.resolve_name(&o.object_name).ok().map(|s| s.into_owned())
+                    })
+                }
+                ObjectReference::None => None,
+            };
             ImportInfo {
                 index: i,
                 class_package,
                 class_name,
                 object_name,
+                outer_name,
             }
         })
         .collect();
@@ -187,6 +209,21 @@ pub fn parse_structured_with_uexp(
                 ObjectReference::None => "Class".to_string(),
             };
 
+            // Resolve outer (parent) name.
+            let outer_name = match exp.outer() {
+                ObjectReference::Export { export_index } => {
+                    header.exports.get(export_index).and_then(|o| {
+                        header.resolve_name(&o.object_name).ok().map(|s| s.into_owned())
+                    })
+                }
+                ObjectReference::Import { import_index } => {
+                    header.imports.get(import_index).and_then(|o| {
+                        header.resolve_name(&o.object_name).ok().map(|s| s.into_owned())
+                    })
+                }
+                ObjectReference::None => None,
+            };
+
             // For cooked assets, skip property parsing but still record export metadata.
             if is_cooked {
                 return ExportInfo {
@@ -194,7 +231,9 @@ pub fn parse_structured_with_uexp(
                     object_name,
                     class_name,
                     serial_size: exp.serial_size,
+                    outer_name,
                     properties: None,
+                    field_definitions: None,
                     trailing_data_size: exp.serial_size as usize,
                 };
             }
@@ -203,12 +242,26 @@ pub fn parse_structured_with_uexp(
             let (properties, trailing_data_size) =
                 parse_export_properties(file_data, exp, &header.names, &mut warnings);
 
+            // Try to parse field definitions for class/struct exports.
+            let field_definitions = {
+                let serial_offset = exp.serial_offset as usize;
+                let serial_size = exp.serial_size as usize;
+                if serial_offset + serial_size <= file_data.len() {
+                    let export_data = &file_data[serial_offset..serial_offset + serial_size];
+                    ffield::parse_field_definitions(export_data, &header.names, &class_name)
+                } else {
+                    None
+                }
+            };
+
             ExportInfo {
                 index: i,
                 object_name,
                 class_name,
                 serial_size: exp.serial_size,
+                outer_name,
                 properties,
+                field_definitions,
                 trailing_data_size,
             }
         })
@@ -274,5 +327,99 @@ fn parse_export_properties(
             warnings.push(format!("Failed to parse properties for '{}': {}", export_name, e));
             (None, serial_size)
         }
+    }
+}
+
+
+/// Scan file data for Blueprint variable names from the `NewVariables` region.
+///
+/// Scans for `VarName` + `NameProperty` FName patterns within FBPVariableDescription
+/// struct elements. Returns Vec<(var_name, var_type)> for each variable found.
+pub fn scan_blueprint_variables(
+    data: &[u8],
+    names: &[String],
+) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+
+    let Some(varname_idx) = names.iter().position(|n| n == "VarName") else { return vars };
+    let Some(nameprop_idx) = names.iter().position(|n| n == "NameProperty") else { return vars };
+
+    let vn_bytes = (varname_idx as u32).to_le_bytes();
+    let zero = 0u32.to_le_bytes();
+    let np_bytes = (nameprop_idx as u32).to_le_bytes();
+
+    let pincat_idx = names.iter().position(|n| n == "PinCategory");
+
+    for offset in 0..data.len().saturating_sub(24) {
+        if data[offset..offset + 4] != vn_bytes { continue; }
+        if data[offset + 4..offset + 8] != zero { continue; }
+        if data[offset + 8..offset + 12] != np_bytes { continue; }
+        if data[offset + 12..offset + 16] != zero { continue; }
+
+        // After two FNames (16 bytes): value_size(i32=4) + array_index(i32=4) +
+        // has_property_guid(u8=1) = 9 bytes of header. FName value at +25.
+        let name_val_offset = offset + 25;
+        if name_val_offset + 8 > data.len() { continue; }
+
+        let Ok(ni) = data[name_val_offset..name_val_offset + 4].try_into() else { continue };
+        let name_idx = u32::from_le_bytes(ni) as usize;
+        let Ok(nn) = data[name_val_offset + 4..name_val_offset + 8].try_into() else { continue };
+        let name_num = u32::from_le_bytes(nn);
+        if name_idx >= names.len() { continue; }
+
+        let mut var_name = names[name_idx].clone();
+        if name_num > 0 {
+            var_name.push_str(&format!("_{}", name_num - 1));
+        }
+
+        let var_type = if let Some(pc_idx) = pincat_idx {
+            find_pin_category_near(data, name_val_offset + 8, pc_idx, names)
+                .unwrap_or_else(|| "Variable".to_string())
+        } else {
+            "Variable".to_string()
+        };
+
+        vars.push((var_name, var_type));
+    }
+    vars
+}
+
+fn find_pin_category_near(data: &[u8], start: usize, pincat_name_idx: usize, names: &[String]) -> Option<String> {
+    let pc_bytes = (pincat_name_idx as u32).to_le_bytes();
+    let zero = 0u32.to_le_bytes();
+    let end = (start + 200).min(data.len().saturating_sub(24));
+
+    for off in start..end {
+        if data[off..off + 4] != pc_bytes { continue; }
+        if data[off + 4..off + 8] != zero { continue; }
+        let Ok(ti) = data[off + 8..off + 12].try_into() else { continue };
+        let type_idx = u32::from_le_bytes(ti) as usize;
+        if type_idx >= names.len() || names[type_idx] != "NameProperty" { continue; }
+        let cat_off = off + 24;
+        if cat_off + 4 > data.len() { continue; }
+        let Ok(ci) = data[cat_off..cat_off + 4].try_into() else { continue };
+        let cat_idx = u32::from_le_bytes(ci) as usize;
+        if cat_idx < names.len() {
+            return Some(pin_category_to_type(&names[cat_idx]));
+        }
+    }
+    None
+}
+
+pub fn pin_category_to_type(category: &str) -> String {
+    match category {
+        "bool" => "bool".to_string(),
+        "byte" => "byte".to_string(),
+        "int" => "int32".to_string(),
+        "int64" => "int64".to_string(),
+        "real" | "float" => "float".to_string(),
+        "double" => "double".to_string(),
+        "string" => "FString".to_string(),
+        "name" => "FName".to_string(),
+        "text" => "FText".to_string(),
+        "object" | "class" => "Object".to_string(),
+        "struct" => "Struct".to_string(),
+        "enum" => "Enum".to_string(),
+        other => other.to_string(),
     }
 }
