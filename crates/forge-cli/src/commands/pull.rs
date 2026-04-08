@@ -8,6 +8,8 @@ use forge_core::index::{Index, IndexEntry};
 use forge_core::workspace::Workspace;
 use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use std::time::SystemTime;
 
 pub fn run() -> Result<()> {
@@ -67,20 +69,24 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
         return Ok(());
     }
 
-    println!("Pulling from remote...");
+    // Progress bar for receiving objects.
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} Receiving objects: {pos}")
+            .unwrap(),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
     // Request all objects from the remote tip that we don't have locally.
-    // Start by requesting the snapshot object and work from there.
     let mut want = vec![remote_tip_bytes.clone()];
     let mut received = 0u64;
 
-    // Iteratively pull objects we're missing.
     loop {
         if want.is_empty() {
             break;
         }
 
-        // Filter to objects we don't already have.
         let need: Vec<Vec<u8>> = want
             .iter()
             .filter(|h| {
@@ -96,7 +102,6 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
             break;
         }
 
-        // Batch into chunks of 5000 to stay under server limits.
         const BATCH_SIZE: usize = 5000;
         let batches: Vec<Vec<Vec<u8>>> = need
             .chunks(BATCH_SIZE)
@@ -129,9 +134,9 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
                     let hash_hex = hex::encode(&chunk.hash);
                     let forge_hash = ForgeHash::from_hex(&hash_hex)?;
 
-                    // Verify received data matches claimed hash.
                     let computed = ForgeHash::from_bytes(&current_data);
                     if computed != forge_hash {
+                        pb.finish_and_clear();
                         anyhow::bail!(
                             "integrity error: server sent corrupt object (claimed {}, got {})",
                             forge_hash.short(),
@@ -144,8 +149,8 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
                         .put(&forge_hash, &current_data)?;
 
                     received += 1;
+                    pb.set_position(received);
 
-                    // Try to parse as snapshot to discover more objects to pull.
                     if let Ok(snapshot) = ws.object_store.get_snapshot(&forge_hash) {
                         want.push(snapshot.tree.as_bytes().to_vec());
                         for parent in &snapshot.parents {
@@ -155,14 +160,12 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
                         }
                     }
 
-                    // Try to parse as tree to discover blob objects.
                     if let Ok(tree) = ws.object_store.get_tree(&forge_hash) {
                         for entry in &tree.entries {
                             want.push(entry.hash.as_bytes().to_vec());
                         }
                     }
 
-                    // Try to parse as chunked blob to discover chunk objects.
                     if let Ok(chunked) = ws.object_store.get_chunked_blob(&forge_hash) {
                         for chunk_ref in &chunked.chunks {
                             want.push(chunk_ref.hash.as_bytes().to_vec());
@@ -173,13 +176,15 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
                     current_hash = None;
                 }
             }
-        } // end batch loop
+        }
     }
+
+    pb.finish_and_clear();
+    println!("Receiving objects: {} done.", received);
 
     // Fast-forward local branch.
     let old_tip = local_tip.short();
     ws.set_branch_tip(&branch, &remote_tip)?;
-    println!("Receiving objects: {} done.", received);
     println!("   {}..{} {} -> {}", old_tip, remote_tip.short(), branch, branch);
 
     // Checkout working tree from the new tip.
@@ -189,6 +194,7 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
 }
 
 /// Write the commit's tree contents into the working directory and update the index.
+/// Uses rayon to read/decompress objects in parallel, then writes files sequentially.
 fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
     let snap = ws.object_store.get_snapshot(commit_hash)?;
     let get_tree = |h: &ForgeHash| ws.object_store.get_tree(h).ok();
@@ -209,11 +215,33 @@ fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
         }
     }
 
-    // Write all files from the target tree.
-    let total = file_map.len();
-    let mut written = 0usize;
-    for (path, (hash, size)) in &file_map {
-        let content = ws.object_store.read_file(hash)?;
+    let total = file_map.len() as u64;
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("Checking out files: [{bar:30}] {pos}/{len} ({percent}%)")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+
+    // Collect entries for parallel read.
+    let entries: Vec<(String, ForgeHash, u64)> = file_map
+        .iter()
+        .map(|(p, (h, s))| (p.clone(), *h, *s))
+        .collect();
+
+    // Parallel read + decompress objects.
+    let read_results: Vec<Result<(String, Vec<u8>, ForgeHash, u64)>> = entries
+        .par_iter()
+        .map(|(path, hash, size)| {
+            let content = ws.object_store.read_file(hash)?;
+            Ok((path.clone(), content, *hash, *size))
+        })
+        .collect();
+
+    // Sequential write to disk + index update.
+    for result in read_results {
+        let (path, content, obj_hash, size) = result?;
         let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = abs_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -226,24 +254,23 @@ fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
             .unwrap_or_default();
 
         index.set(
-            path.clone(),
+            path,
             IndexEntry {
                 hash: ForgeHash::from_bytes(&content),
-                size: *size,
+                size,
                 mtime_secs: mtime.as_secs() as i64,
                 mtime_nanos: mtime.subsec_nanos(),
                 staged: false,
                 is_chunked: false,
-                object_hash: *hash,
+                object_hash: obj_hash,
             },
         );
 
-        written += 1;
-        if written % 100 == 0 || written == total {
-            eprint!("\rChecking out files: {}/{}", written, total);
-        }
+        pb.inc(1);
     }
-    eprintln!();
+
+    pb.finish_and_clear();
+    println!("Checking out files: {} done.", total);
 
     index.save(&ws.forge_dir().join("index"))?;
     Ok(())
