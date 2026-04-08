@@ -120,10 +120,15 @@ pub fn run(paths: Vec<String>) -> Result<()> {
                         return false; // Unchanged — skip
                     }
                     // mtime/size changed — re-hash to confirm
-                    if let Ok(data) = std::fs::read(abs_path) {
-                        let hash = ForgeHash::from_bytes(&data);
-                        if hash == entry.hash {
-                            return false; // Content identical — skip
+                    match std::fs::read(abs_path) {
+                        Ok(data) => {
+                            let hash = ForgeHash::from_bytes(&data);
+                            if hash == entry.hash {
+                                return false; // Content identical — skip
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("warning: cannot read '{}': {}", rel_path, e);
                         }
                     }
                 }

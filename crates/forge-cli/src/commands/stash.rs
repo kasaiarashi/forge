@@ -100,19 +100,11 @@ fn stash_push(message: Option<String>) -> Result<()> {
         flatten_tree(&tree, "", &get_tree)
     };
 
-    // Collect entries that are staged or have different hash from HEAD.
+    // Collect entries that are staged or have different content from HEAD.
     let mut stash_entries = Vec::new();
     for (path, entry) in &index.entries {
-        let dominated = if entry.staged {
-            true
-        } else {
-            // Check if file content differs from HEAD.
-            match head_flat.get(path) {
-                Some((head_hash, _)) => entry.object_hash != *head_hash,
-                None => true, // new file not in HEAD
-            }
-        };
-        if dominated {
+        if entry.staged {
+            // Staged entries are always stashed (content already in object store via add).
             stash_entries.push(StashEntry {
                 path: path.clone(),
                 hash: entry.hash.to_hex(),
@@ -122,7 +114,59 @@ fn stash_push(message: Option<String>) -> Result<()> {
                 mtime_secs: entry.mtime_secs,
                 mtime_nanos: entry.mtime_nanos,
             });
+            continue;
         }
+
+        // For unstaged entries, check if the working tree file differs from the index.
+        let rel_disk = path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let abs_path = ws.root.join(&rel_disk);
+        if !abs_path.exists() {
+            // File deleted on disk but still in index — stash the deletion.
+            if head_flat.contains_key(path) {
+                stash_entries.push(StashEntry {
+                    path: path.clone(),
+                    hash: ForgeHash::ZERO.to_hex(),
+                    size: 0,
+                    is_chunked: false,
+                    object_hash: ForgeHash::ZERO.to_hex(),
+                    mtime_secs: 0,
+                    mtime_nanos: 0,
+                });
+            }
+            continue;
+        }
+
+        // Fast-path: compare mtime + size with index.
+        let metadata = std::fs::metadata(&abs_path)?;
+        let mtime = metadata
+            .modified()?
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        if mtime.as_secs() as i64 == entry.mtime_secs
+            && mtime.subsec_nanos() == entry.mtime_nanos
+            && metadata.len() == entry.size
+        {
+            continue; // Unchanged
+        }
+
+        // Re-hash to confirm content change.
+        let data = std::fs::read(&abs_path)?;
+        let disk_hash = ForgeHash::from_bytes(&data);
+        if disk_hash == entry.hash {
+            continue; // Content identical despite mtime change
+        }
+
+        // Working tree file differs — store the content and record it.
+        let object_hash = ws.object_store.put_blob_data(&data)?;
+        stash_entries.push(StashEntry {
+            path: path.clone(),
+            hash: disk_hash.to_hex(),
+            size: data.len() as u64,
+            is_chunked: false,
+            object_hash: object_hash.to_hex(),
+            mtime_secs: mtime.as_secs() as i64,
+            mtime_nanos: mtime.subsec_nanos(),
+        });
     }
 
     if stash_entries.is_empty() {
@@ -147,6 +191,28 @@ fn stash_push(message: Option<String>) -> Result<()> {
     let stash_path = dir.join(format!("{}.json", id));
     let json = serde_json::to_string_pretty(&stash)?;
     std::fs::write(&stash_path, json)?;
+
+    // Restore working tree files to HEAD state.
+    for se in &stash.entries {
+        let rel_disk = se.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let abs_path = ws.root.join(&rel_disk);
+        match head_flat.get(&se.path) {
+            Some((hash, _)) => {
+                // File exists in HEAD — restore it.
+                let content = read_blob_content(&ws, hash)?;
+                if let Some(parent) = abs_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&abs_path, &content)?;
+            }
+            None => {
+                // File is new (not in HEAD) — remove it from working tree.
+                if abs_path.exists() {
+                    std::fs::remove_file(&abs_path)?;
+                }
+            }
+        }
+    }
 
     // Reset index to HEAD tree state (all unstaged).
     let mut new_index = Index::default();
@@ -189,20 +255,40 @@ fn stash_pop(remove: bool) -> Result<()> {
     let json = std::fs::read_to_string(&stash_path)?;
     let stash: Stash = serde_json::from_str(&json)?;
 
-    // Apply stash entries into the current index.
+    // Apply stash entries: restore file contents to working tree and update index.
     let mut index = Index::load(&index_path)?;
     for se in &stash.entries {
         let hash = ForgeHash::from_hex(&se.hash)?;
         let object_hash = ForgeHash::from_hex(&se.object_hash)?;
-        index.set(se.path.clone(), IndexEntry {
-            hash,
-            size: se.size,
-            mtime_secs: se.mtime_secs,
-            mtime_nanos: se.mtime_nanos,
-            staged: true,
-            is_chunked: se.is_chunked,
-            object_hash,
-        });
+        let rel_disk = se.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let abs_path = ws.root.join(&rel_disk);
+
+        if hash == ForgeHash::ZERO {
+            // Stashed deletion — remove the file.
+            if abs_path.exists() {
+                std::fs::remove_file(&abs_path)?;
+            }
+            index.entries.remove(&se.path);
+        } else {
+            // Restore file content from object store.
+            let content = read_blob_content(&ws, &object_hash)?;
+            if let Some(parent) = abs_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&abs_path, &content)?;
+
+            // Update mtime to reflect the newly written file.
+            let new_mtime = mtime_of(&abs_path);
+            index.set(se.path.clone(), IndexEntry {
+                hash,
+                size: se.size,
+                mtime_secs: new_mtime.0,
+                mtime_nanos: new_mtime.1,
+                staged: true,
+                is_chunked: se.is_chunked,
+                object_hash,
+            });
+        }
     }
     index.save(&index_path)?;
 
@@ -283,6 +369,31 @@ fn stash_show() -> Result<()> {
     println!(" {} file(s) stashed", stash.entries.len());
 
     Ok(())
+}
+
+/// Read blob content, handling both small and chunked blobs.
+fn read_blob_content(ws: &Workspace, object_hash: &ForgeHash) -> Result<Vec<u8>> {
+    let data = ws
+        .object_store
+        .chunks
+        .get(object_hash)
+        .map_err(|e| anyhow::anyhow!("Failed to read object {}: {}", object_hash.short(), e))?;
+
+    if data.is_empty() {
+        return Ok(data);
+    }
+
+    if data[0] == 2 {
+        let manifest: forge_core::object::blob::ChunkedBlob = bincode::deserialize(&data[1..])
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize manifest: {}", e))?;
+        let content = forge_core::chunk::reassemble_chunks(&manifest, |h| {
+            ws.object_store.chunks.get(h).ok()
+        })
+        .ok_or_else(|| anyhow::anyhow!("Failed to reassemble chunked blob"))?;
+        Ok(content)
+    } else {
+        Ok(data)
+    }
 }
 
 fn mtime_of(path: &std::path::Path) -> (i64, u32) {

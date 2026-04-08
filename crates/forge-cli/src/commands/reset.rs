@@ -42,6 +42,33 @@ pub fn run(commit: Option<String>, soft: bool, hard: bool) -> Result<()> {
     }
 
     if soft {
+        // Mark index entries that differ from the new HEAD as staged,
+        // so `forge status` correctly shows them as pending changes.
+        let target_snap = ws.object_store.get_snapshot(&target_hash)?;
+        let target_tree = ws.object_store.get_tree(&target_snap.tree)?;
+        let get_tree = |h: &ForgeHash| ws.object_store.get_tree(h).ok();
+        let target_flat = flatten_tree(&target_tree, "", &get_tree);
+
+        let mut index = Index::load(&index_path)?;
+        for (path, entry) in index.entries.iter_mut() {
+            match target_flat.get(path) {
+                Some((hash, _)) => {
+                    // File exists in target: staged if content differs.
+                    if entry.object_hash != *hash {
+                        entry.staged = true;
+                    }
+                }
+                None => {
+                    // File in index but not in target HEAD: it's a new file.
+                    entry.staged = true;
+                }
+            }
+        }
+        // Files in target but not in index: these are deletions (index lacks them).
+        // We don't need to add them since they're not in the working tree either
+        // after soft reset (working tree is untouched).
+        index.save(&index_path)?;
+
         println!("Soft reset to {}", target_hash.short());
         return Ok(());
     }
@@ -52,6 +79,9 @@ pub fn run(commit: Option<String>, soft: bool, hard: bool) -> Result<()> {
 
     let get_tree = |h: &ForgeHash| ws.object_store.get_tree(h).ok();
     let flat = flatten_tree(&target_tree, "", &get_tree);
+
+    // Load the old index BEFORE overwriting, so hard reset can delete removed files.
+    let old_index = Index::load(&index_path).unwrap_or_default();
 
     let mut index = Index::default();
     for (path, (hash, size)) in &flat {
@@ -96,7 +126,7 @@ pub fn run(commit: Option<String>, soft: bool, hard: bool) -> Result<()> {
 
     if hard {
         // Hard reset: restore working tree to match the target tree.
-        restore_working_tree(&ws, &flat)?;
+        restore_working_tree(&ws, &old_index, &flat)?;
         println!("Hard reset to {}", target_hash.short());
     } else {
         println!("Reset to {}", target_hash.short());
@@ -161,11 +191,10 @@ fn mtime_of(path: &std::path::Path) -> (i64, u32) {
 /// Restore working tree files from a flattened tree map.
 fn restore_working_tree(
     ws: &Workspace,
+    old_index: &Index,
     flat: &BTreeMap<String, (ForgeHash, u64)>,
 ) -> Result<()> {
-    // Collect existing tracked files.
     let index_path = ws.forge_dir().join("index");
-    let old_index = Index::load(&index_path).unwrap_or_default();
 
     // Delete files not in the target tree.
     for (path, _) in &old_index.entries {

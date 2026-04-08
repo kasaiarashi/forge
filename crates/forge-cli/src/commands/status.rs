@@ -145,11 +145,17 @@ pub fn run(json: bool) -> Result<()> {
             if !abs_path.exists() {
                 return Some((path.clone(), "deleted"));
             }
-            let metadata = std::fs::metadata(&abs_path).ok()?;
+            let metadata = match std::fs::metadata(&abs_path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("warning: cannot stat '{}': {}", path, e);
+                    return Some((path.clone(), "modified"));
+                }
+            };
             let mtime = metadata
                 .modified()
-                .ok()?
-                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
                 .unwrap_or_default();
             if mtime.as_secs() as i64 == entry.mtime_secs
                 && mtime.subsec_nanos() == entry.mtime_nanos
@@ -158,7 +164,13 @@ pub fn run(json: bool) -> Result<()> {
                 return None; // unchanged
             }
             // Re-hash to confirm.
-            let data = std::fs::read(&abs_path).ok()?;
+            let data = match std::fs::read(&abs_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("warning: cannot read '{}': {}", path, e);
+                    return Some((path.clone(), "modified"));
+                }
+            };
             let hash = ForgeHash::from_bytes(&data);
             if hash != entry.hash {
                 Some((path.clone(), "modified"))

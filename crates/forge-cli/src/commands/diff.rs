@@ -340,8 +340,8 @@ fn print_colored(diffs: &[FileDiff]) {
 
         for group in &ops {
             // Compute hunk header.
-            let first_op = group.first().unwrap();
-            let last_op = group.last().unwrap();
+            let Some(first_op) = group.first() else { continue };
+            let Some(last_op) = group.last() else { continue };
             let old_start_idx = first_op.old_range().start;
             let new_start_idx = first_op.new_range().start;
             let old_end = last_op.old_range().end;
@@ -396,8 +396,8 @@ fn print_json(diffs: &[FileDiff]) -> Result<()> {
 
         let mut hunks = Vec::new();
         for group in text_diff.grouped_ops(3) {
-            let first_op = group.first().unwrap();
-            let last_op = group.last().unwrap();
+            let Some(first_op) = group.first() else { continue };
+            let Some(last_op) = group.last() else { continue };
             let old_start = first_op.old_range().start;
             let new_start = first_op.new_range().start;
             let old_end = last_op.old_range().end;

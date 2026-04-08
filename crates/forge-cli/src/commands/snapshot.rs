@@ -245,7 +245,7 @@ fn subtree_matches(prev_tree: &Tree, current_entries: &BTreeMap<String, &IndexEn
     let current_dir_count = current_entries
         .iter()
         .filter(|(p, _)| p.contains('/'))
-        .map(|(p, _)| &p[..p.find('/').unwrap()])
+        .filter_map(|(p, _)| p.split_once('/').map(|(dir, _)| dir))
         .collect::<std::collections::HashSet<_>>()
         .len();
 
@@ -275,7 +275,7 @@ fn subtree_matches(prev_tree: &Tree, current_entries: &BTreeMap<String, &IndexEn
     let current_dir_names: std::collections::HashSet<&str> = current_entries
         .iter()
         .filter(|(p, _)| p.contains('/'))
-        .map(|(p, _)| &p[..p.find('/').unwrap()])
+        .filter_map(|(p, _)| p.split_once('/').map(|(dir, _)| dir))
         .collect();
 
     prev_dir_names == current_dir_names
