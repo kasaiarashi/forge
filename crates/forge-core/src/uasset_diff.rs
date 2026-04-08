@@ -721,11 +721,12 @@ fn diff_enum_values(
         // Detect added enumerators.
         for val in &new_values {
             if !old_values.contains(val) && !val.ends_with("_MAX") {
-                let display = new_display.get(*val).cloned();
+                let display = new_display.get(*val).cloned()
+                    .unwrap_or_else(|| val.to_string());
                 changes.push(AssetChange::EnumValueAdded {
                     export_name: name.to_string(),
-                    value_name: display.clone().unwrap_or_else(|| val.to_string()),
-                    display_name: if display.is_some() { Some(val.to_string()) } else { None },
+                    value_name: display,
+                    display_name: None,
                 });
             }
         }
