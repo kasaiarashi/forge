@@ -51,6 +51,8 @@
 mod archive;
 pub mod enums;
 mod error;
+pub mod property;
+pub mod structured;
 mod serialization;
 
 use archive::SerializedObjectVersion;
@@ -353,6 +355,23 @@ where
     pub fn new(reader: R) -> Result<Self> {
         let mut archive = Archive::new(reader)?;
 
+        // UE5.6+ (legacy_version -9, UE5 version >= PACKAGE_SAVED_HASH):
+        // SavedHash (20 bytes) and TotalHeaderSize are serialized BEFORE custom versions.
+        let has_saved_hash = archive.file_version_ue5
+            .map(|v| v >= ObjectVersionUE5::PACKAGE_SAVED_HASH)
+            .unwrap_or(false);
+
+        let total_header_size: i32 = if has_saved_hash {
+            // Read and skip SavedHash (FIoHash = 20 bytes).
+            let mut _saved_hash = [0u8; 20];
+            archive.read_exact(&mut _saved_hash)?;
+            // TotalHeaderSize comes here in the new format.
+            let ths: i32 = archive.read_le()?;
+            ths
+        } else {
+            0 // Will be read below after custom versions.
+        };
+
         // Parse and seek past `CustomVersionContainer`
         let custom_versions_stream_info = ArrayStreamInfo::from_current_position(&mut archive)?;
         match archive.custom_version_serialization_format() {
@@ -370,7 +389,11 @@ where
             }
         }
 
-        let total_header_size = archive.read_le()?;
+        let total_header_size: i32 = if has_saved_hash {
+            total_header_size // Already read above.
+        } else {
+            archive.read_le()?
+        };
 
         let package_name = UnrealString::parse_inline(&mut archive)?;
 
@@ -414,6 +437,19 @@ where
 
         let imports = UnrealArray::<UnrealClassImport>::parse_indirect(&mut archive)?;
 
+        // UE5.5+ (VERSE_CELLS): cell export/import data.
+        if archive.serialized_with(ObjectVersionUE5::VERSE_CELLS) {
+            let _cell_export_count: i32 = archive.read_le()?;
+            let _cell_export_offset: i32 = archive.read_le()?;
+            let _cell_import_count: i32 = archive.read_le()?;
+            let _cell_import_offset: i32 = archive.read_le()?;
+        }
+
+        // UE5.4+ (METADATA_SERIALIZATION_OFFSET): metadata offset.
+        if archive.serialized_with(ObjectVersionUE5::METADATA_SERIALIZATION_OFFSET) {
+            let _metadata_offset: i32 = archive.read_le()?;
+        }
+
         let depends_offset = archive.read_le()?;
 
         let has_string_asset_references_map =
@@ -435,7 +471,17 @@ where
 
         let thumbnail_table_offset = archive.read_le()?;
 
-        let _guid = UnrealGuid::seek_past(&mut archive)?;
+        // UE5.7+ (IMPORT_TYPE_HIERARCHIES): import type hierarchy data.
+        if archive.serialized_with(ObjectVersionUE5::IMPORT_TYPE_HIERARCHIES) {
+            let _import_type_hierarchies_count: i32 = archive.read_le()?;
+            let _import_type_hierarchies_offset: i32 = archive.read_le()?;
+        }
+
+        // UE5.6+ (PACKAGE_SAVED_HASH): GUID no longer serialized at this position
+        // (it was replaced by SavedHash earlier in the header).
+        if !has_saved_hash {
+            let _guid = UnrealGuid::seek_past(&mut archive)?;
+        }
         let supports_package_owner =
             archive.serialized_with(ObjectVersion::VER_UE4_ADDED_PACKAGE_OWNER);
         if supports_package_owner && has_editor_only_data {

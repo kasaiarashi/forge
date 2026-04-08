@@ -98,6 +98,7 @@ pub fn run(branch: String) -> Result<()> {
 
     let mut merged: BTreeMap<String, (ForgeHash, u64)> = BTreeMap::new();
     let mut conflicts: Vec<String> = Vec::new();
+    let mut asset_conflicts: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
 
     for path in &all_paths {
         let base = base_map.get(*path);
@@ -121,9 +122,91 @@ pub fn run(branch: String) -> Result<()> {
             (Some(_b), Some(o), Some(t)) if o == t => {
                 merged.insert((*path).clone(), *o);
             }
-            // Both changed differently — conflict.
-            (Some(_b), Some(_o), Some(_t)) => {
-                conflicts.push((*path).clone());
+            // Both changed differently — try property-level merge for UE assets.
+            (Some(b), Some(o), Some(t)) => {
+                let lower = path.to_lowercase();
+                if lower.ends_with(".uasset") || lower.ends_with(".umap") {
+                    // Load companion .uexp data for split assets.
+                    let base_uexp = try_load_companion_uexp(&ws, path, &base_map);
+                    let ours_uexp = try_load_companion_uexp(&ws, path, &ours_map);
+                    let theirs_uexp = try_load_companion_uexp(&ws, path, &theirs_map);
+                    match try_asset_merge_with_uexp(
+                        &ws,
+                        &b.0, base_uexp.as_deref(),
+                        &o.0, ours_uexp.as_deref(),
+                        &t.0, theirs_uexp.as_deref(),
+                    ) {
+                        AssetMergeOutcome::TakeOurs => {
+                            merged.insert((*path).clone(), *o);
+                        }
+                        AssetMergeOutcome::TakeTheirs => {
+                            merged.insert((*path).clone(), *t);
+                        }
+                        AssetMergeOutcome::AutoMerged { ours_desc, theirs_desc, modifications } => {
+                            println!("  Auto-merged: {}", path);
+                            for c in &ours_desc {
+                                println!("    ours: {}", c);
+                            }
+                            for c in &theirs_desc {
+                                println!("    theirs: {}", c);
+                            }
+
+                            // Attempt binary reconstruction.
+                            if !modifications.is_empty() {
+                                let ours_data = match read_blob(&ws, &o.0) {
+                                    Ok(d) => d,
+                                    Err(_) => {
+                                        asset_conflicts.push(((*path).clone(), ours_desc, theirs_desc));
+                                        continue;
+                                    }
+                                };
+                                let export_mods: Vec<forge_core::uasset_reconstruct::ExportModification> =
+                                    modifications.into_iter().map(|m| {
+                                        forge_core::uasset_reconstruct::ExportModification {
+                                            export_index: m.export_index,
+                                            new_property_data: m.property_data,
+                                        }
+                                    }).collect();
+
+                                if let Some(merged_bytes) = forge_core::uasset_reconstruct::reconstruct_merged(
+                                    &ours_data, &export_mods,
+                                ) {
+                                    // Store the reconstructed binary and use it.
+                                    let hash = ForgeHash::from_bytes(&merged_bytes);
+                                    let merged_size = merged_bytes.len() as u64;
+
+                                    // Store as a regular blob.
+                                    if let Err(e) = ws.object_store.chunks.put(&hash, &merged_bytes) {
+                                        eprintln!("  warning: failed to store merged blob: {}", e);
+                                        asset_conflicts.push(((*path).clone(), ours_desc, theirs_desc));
+                                        continue;
+                                    }
+
+                                    merged.insert((*path).clone(), (hash, merged_size));
+                                    println!("  Reconstructed merged binary for {}", path);
+                                } else {
+                                    // Reconstruction failed — fall back to conflict.
+                                    asset_conflicts.push(((*path).clone(), ours_desc, theirs_desc));
+                                }
+                            } else {
+                                // No modifications computed — fall back to conflict.
+                                asset_conflicts.push(((*path).clone(), ours_desc, theirs_desc));
+                            }
+                        }
+                        AssetMergeOutcome::Conflict(details) => {
+                            println!("  Property-level conflict: {}", path);
+                            for c in &details {
+                                println!("    {}", c);
+                            }
+                            conflicts.push((*path).clone());
+                        }
+                        AssetMergeOutcome::CannotMerge => {
+                            conflicts.push((*path).clone());
+                        }
+                    }
+                } else {
+                    conflicts.push((*path).clone());
+                }
             }
             // File added only in ours.
             (None, Some(o), None) => {
@@ -163,6 +246,12 @@ pub fn run(branch: String) -> Result<()> {
             // No entry anywhere.
             (_, None, None) => {}
         }
+    }
+
+    // Asset conflicts where both sides have non-conflicting property changes
+    // but we can't reconstruct the binary yet — report as conflicts with details.
+    for (path, _ours_desc, _theirs_desc) in &asset_conflicts {
+        conflicts.push(path.clone());
     }
 
     if !conflicts.is_empty() {
@@ -391,4 +480,80 @@ fn build_tree(
 
     files.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Tree { entries: files })
+}
+
+/// Outcome of attempting a property-level asset merge.
+enum AssetMergeOutcome {
+    TakeOurs,
+    TakeTheirs,
+    AutoMerged {
+        ours_desc: Vec<String>,
+        theirs_desc: Vec<String>,
+        modifications: Vec<forge_core::uasset_merge::MergedExportData>,
+    },
+    Conflict(Vec<String>),
+    CannotMerge,
+}
+
+/// Try to load companion .uexp data for a .uasset file from the object store.
+fn try_load_companion_uexp(
+    ws: &Workspace,
+    header_path: &str,
+    file_map: &BTreeMap<String, (ForgeHash, u64)>,
+) -> Option<Vec<u8>> {
+    let companions = forge_core::asset_group::companion_paths(header_path);
+    // The first companion is always .uexp.
+    let uexp_path = companions.first()?;
+    let (hash, _) = file_map.get(uexp_path)?;
+    read_blob(ws, hash).ok()
+}
+
+/// Try property-level merge with optional .uexp companion data.
+fn try_asset_merge_with_uexp(
+    ws: &Workspace,
+    base_hash: &ForgeHash,
+    base_uexp: Option<&[u8]>,
+    ours_hash: &ForgeHash,
+    ours_uexp: Option<&[u8]>,
+    theirs_hash: &ForgeHash,
+    theirs_uexp: Option<&[u8]>,
+) -> AssetMergeOutcome {
+    let base_data = match read_blob(ws, base_hash) {
+        Ok(d) => d,
+        Err(_) => return AssetMergeOutcome::CannotMerge,
+    };
+    let ours_data = match read_blob(ws, ours_hash) {
+        Ok(d) => d,
+        Err(_) => return AssetMergeOutcome::CannotMerge,
+    };
+    let theirs_data = match read_blob(ws, theirs_hash) {
+        Ok(d) => d,
+        Err(_) => return AssetMergeOutcome::CannotMerge,
+    };
+
+    use forge_core::uasset_merge::{self, MergeResult};
+
+    match uasset_merge::merge_assets_with_uexp(
+        &base_data, base_uexp,
+        &ours_data, ours_uexp,
+        &theirs_data, theirs_uexp,
+    ) {
+        MergeResult::Identical => AssetMergeOutcome::TakeOurs,
+        MergeResult::TakeOurs => AssetMergeOutcome::TakeOurs,
+        MergeResult::TakeTheirs => AssetMergeOutcome::TakeTheirs,
+        MergeResult::AutoMerged {
+            ours_changes,
+            theirs_changes,
+            modifications,
+        } => AssetMergeOutcome::AutoMerged {
+            ours_desc: ours_changes,
+            theirs_desc: theirs_changes,
+            modifications,
+        },
+        MergeResult::Conflict(conflicts) => {
+            let details: Vec<String> = conflicts.iter().map(|c| format!("{}", c)).collect();
+            AssetMergeOutcome::Conflict(details)
+        }
+        MergeResult::CannotMerge => AssetMergeOutcome::CannotMerge,
+    }
 }

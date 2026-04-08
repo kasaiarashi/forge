@@ -23,6 +23,57 @@ pub enum ChunkResult {
     },
 }
 
+/// Chunk a file, using semantic chunking for UE assets when possible.
+/// Falls back to size-based chunking (small blob or FastCDC).
+pub fn chunk_file_with_hint(data: &[u8], extension: Option<&str>) -> ChunkResult {
+    chunk_file_with_hint_and_companion(data, extension, None)
+}
+
+/// Chunk a file with optional companion header data for `.uexp` files.
+///
+/// For `.uasset`/`.umap` files, attempts semantic chunking by export boundaries.
+/// For `.uexp` files, if `companion_header` is provided (the `.uasset` bytes),
+/// uses export boundaries from the header to chunk the `.uexp` at export boundaries.
+/// For all other files, falls back to size-based chunking.
+pub fn chunk_file_with_hint_and_companion(
+    data: &[u8],
+    extension: Option<&str>,
+    companion_header: Option<&[u8]>,
+) -> ChunkResult {
+    if let Some(ext) = extension {
+        let lower = ext.to_lowercase();
+        // Semantic chunking for .uasset/.umap header files.
+        if lower == ".uasset" || lower == ".umap" {
+            if let crate::uasset_chunk::SemanticChunkResult::Chunked { manifest, chunks } =
+                crate::uasset_chunk::chunk_uasset(data)
+            {
+                return ChunkResult::Chunked { manifest, chunks };
+            }
+        }
+        // Semantic chunking for .uexp companion files (export-boundary splitting).
+        if lower == ".uexp" {
+            if let Some(header_data) = companion_header {
+                if let crate::uasset_chunk::SemanticChunkResult::Chunked { manifest, chunks } =
+                    crate::uasset_chunk::chunk_uexp_with_header(data, header_data)
+                {
+                    return ChunkResult::Chunked { manifest, chunks };
+                }
+            }
+        }
+        // Type-specific chunking for .ubulk bulk data files.
+        if lower == ".ubulk" {
+            if let Some(header_data) = companion_header {
+                if let crate::bulk_chunk::BulkChunkResult::Chunked { manifest, chunks } =
+                    crate::bulk_chunk::chunk_bulk_data(data, header_data)
+                {
+                    return ChunkResult::Chunked { manifest, chunks };
+                }
+            }
+        }
+    }
+    chunk_file(data)
+}
+
 /// Chunk a file based on its size. Small files are stored whole,
 /// large files are split using FastCDC content-defined chunking.
 pub fn chunk_file(data: &[u8]) -> ChunkResult {

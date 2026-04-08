@@ -4,10 +4,10 @@ use forge_core::hash::ForgeHash;
 use forge_core::index::Index;
 use forge_core::workspace::Workspace;
 use similar::ChangeTag;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::SystemTime;
 
-pub fn run(commit: Option<String>, staged: bool, stat: bool, paths: Vec<String>, json: bool) -> Result<()> {
+pub fn run(commit: Option<String>, staged: bool, stat: bool, extract: bool, paths: Vec<String>, json: bool) -> Result<()> {
     if staged && commit.is_some() {
         bail!("Cannot use --staged with --commit");
     }
@@ -29,7 +29,9 @@ pub fn run(commit: Option<String>, staged: bool, stat: bool, paths: Vec<String>,
         diff_unstaged(&ws, &index, &filter)?
     };
 
-    if json {
+    if extract {
+        print_extract(&file_diffs)?;
+    } else if json {
         print_json(&file_diffs)?;
     } else if stat {
         print_stat(&file_diffs);
@@ -299,8 +301,46 @@ fn build_file_map(
 }
 
 fn print_colored(diffs: &[FileDiff]) {
+    // Collect companion .uexp data for UE asset diffs.
+    let uexp_map: HashMap<String, &[u8]> = diffs
+        .iter()
+        .filter(|d| is_ue_companion_path(&d.path) && d.path.to_lowercase().ends_with(".uexp"))
+        .filter_map(|d| {
+            let header_path = forge_core::asset_group::header_for_companion(&d.path)?;
+            Some((header_path, d.new_content.as_slice()))
+        })
+        .collect();
+
     for diff in diffs {
+        // Suppress standalone companion file entries — their changes are shown
+        // as part of the parent .uasset diff.
+        if is_ue_companion_path(&diff.path) {
+            if let Some(header) = forge_core::asset_group::header_for_companion(&diff.path) {
+                if diffs.iter().any(|d| d.path == header) {
+                    continue; // Will be shown with the header file.
+                }
+            }
+        }
+
         if diff.binary {
+            // Try structured diff for UE assets.
+            if is_uasset_path(&diff.path)
+                && !diff.old_content.is_empty()
+                && !diff.new_content.is_empty()
+            {
+                // Look up companion .uexp data for this header.
+                let new_uexp = uexp_map.get(&diff.path).copied();
+                if let Some(output) = try_structured_asset_diff_with_uexp(
+                    &diff.path,
+                    &diff.old_content,
+                    None, // TODO: old uexp from object store
+                    &diff.new_content,
+                    new_uexp,
+                ) {
+                    print!("{}", output);
+                    continue;
+                }
+            }
             println!(
                 "Binary files a/{} and b/{} differ",
                 diff.path, diff.path
@@ -340,8 +380,8 @@ fn print_colored(diffs: &[FileDiff]) {
 
         for group in &ops {
             // Compute hunk header.
-            let first_op = group.first().unwrap();
-            let last_op = group.last().unwrap();
+            let Some(first_op) = group.first() else { continue };
+            let Some(last_op) = group.last() else { continue };
             let old_start_idx = first_op.old_range().start;
             let new_start_idx = first_op.new_range().start;
             let old_end = last_op.old_range().end;
@@ -380,6 +420,15 @@ fn print_json(diffs: &[FileDiff]) -> Result<()> {
     let mut entries = Vec::new();
 
     for diff in diffs {
+        // Suppress standalone companion files in JSON output too.
+        if is_ue_companion_path(&diff.path) {
+            if let Some(header) = forge_core::asset_group::header_for_companion(&diff.path) {
+                if diffs.iter().any(|d| d.path == header) {
+                    continue;
+                }
+            }
+        }
+
         if diff.binary {
             entries.push(serde_json::json!({
                 "path": diff.path,
@@ -396,8 +445,8 @@ fn print_json(diffs: &[FileDiff]) -> Result<()> {
 
         let mut hunks = Vec::new();
         for group in text_diff.grouped_ops(3) {
-            let first_op = group.first().unwrap();
-            let last_op = group.last().unwrap();
+            let Some(first_op) = group.first() else { continue };
+            let Some(last_op) = group.last() else { continue };
             let old_start = first_op.old_range().start;
             let new_start = first_op.new_range().start;
             let old_end = last_op.old_range().end;
@@ -452,6 +501,15 @@ fn print_stat(diffs: &[FileDiff]) {
     // First pass: compute stats.
     let mut stats: Vec<(&str, &str, usize, usize)> = Vec::new();
     for diff in diffs {
+        // Suppress standalone companion files in stat output.
+        if is_ue_companion_path(&diff.path) {
+            if let Some(header) = forge_core::asset_group::header_for_companion(&diff.path) {
+                if diffs.iter().any(|d| d.path == header) {
+                    continue;
+                }
+            }
+        }
+
         if diff.binary {
             stats.push((&diff.path, "Bin", 0, 0));
             if diff.path.len() > max_path_len {
@@ -507,4 +565,198 @@ fn print_stat(diffs: &[FileDiff]) {
             total_deletions
         );
     }
+}
+
+/// Extract old and new versions of diffed files to temp files.
+///
+/// Writes each version to a temp file and prints the paths, enabling external
+/// diff tools (e.g., UE editor's built-in diff viewer) to compare them:
+///   `UE4Editor.exe -diff <left_path> <right_path>`
+fn print_extract(diffs: &[FileDiff]) -> Result<()> {
+    if diffs.is_empty() {
+        println!("No differences found.");
+        return Ok(());
+    }
+
+    let temp_dir = std::env::temp_dir().join("forge-diff-extract");
+    std::fs::create_dir_all(&temp_dir)?;
+
+    let mut entries = Vec::new();
+
+    for diff in diffs {
+        let file_name = std::path::Path::new(&diff.path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+
+        let old_path = if !diff.old_content.is_empty() {
+            let p = temp_dir.join(format!("old_{}", file_name));
+            std::fs::write(&p, &diff.old_content)?;
+            Some(p)
+        } else {
+            None
+        };
+
+        let new_path = if !diff.new_content.is_empty() {
+            let p = temp_dir.join(format!("new_{}", file_name));
+            std::fs::write(&p, &diff.new_content)?;
+            Some(p)
+        } else {
+            None
+        };
+
+        entries.push(serde_json::json!({
+            "path": diff.path,
+            "status": diff.status,
+            "old_file": old_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            "new_file": new_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        }));
+
+        // Also print human-readable output.
+        match diff.status {
+            "added" => {
+                println!("{} (added)", diff.path);
+                if let Some(p) = &new_path {
+                    println!("  new: {}", p.display());
+                }
+            }
+            "deleted" => {
+                println!("{} (deleted)", diff.path);
+                if let Some(p) = &old_path {
+                    println!("  old: {}", p.display());
+                }
+            }
+            _ => {
+                println!("{} ({})", diff.path, diff.status);
+                if let Some(p) = &old_path {
+                    println!("  old: {}", p.display());
+                }
+                if let Some(p) = &new_path {
+                    println!("  new: {}", p.display());
+                }
+            }
+        }
+    }
+
+    println!("\nExtracted {} file(s) to {}", diffs.len(), temp_dir.display());
+    Ok(())
+}
+
+/// Check if a file path is a UE asset header that supports structured diffing.
+fn is_uasset_path(path: &str) -> bool {
+    forge_core::asset_group::is_header_path(path)
+}
+
+/// Check if a file path is a UE companion file (.uexp, .ubulk, .uptnl).
+fn is_ue_companion_path(path: &str) -> bool {
+    forge_core::asset_group::is_companion_path(path)
+}
+
+/// Attempt a structured diff with optional .uexp companion data.
+fn try_structured_asset_diff_with_uexp(
+    path: &str,
+    old_data: &[u8],
+    old_uexp: Option<&[u8]>,
+    new_data: &[u8],
+    new_uexp: Option<&[u8]>,
+) -> Option<String> {
+    use forge_core::uasset_diff::{self, parse_structured_with_uexp};
+
+    let old_asset = parse_structured_with_uexp(old_data, old_uexp).ok()?;
+    let new_asset = parse_structured_with_uexp(new_data, new_uexp).ok()?;
+
+    let changes = uasset_diff::diff_assets(&old_asset, &new_asset);
+
+    if changes.is_empty() {
+        return None; // No semantic changes detected.
+    }
+
+    let mut output = String::new();
+    output.push_str(&format!(
+        "\x1b[1mdiff --forge a/{} b/{}\x1b[0m\n",
+        path, path
+    ));
+    output.push_str(&format!(
+        "  \x1b[36m[asset]\x1b[0m Engine: {} | Exports: {} | Imports: {}\n",
+        new_asset.engine_version,
+        new_asset.exports.len(),
+        new_asset.imports.len()
+    ));
+
+    if !new_asset.parse_warnings.is_empty() {
+        for w in &new_asset.parse_warnings {
+            output.push_str(&format!("  \x1b[33mwarning: {}\x1b[0m\n", w));
+        }
+    }
+
+    for change in &changes {
+        match change {
+            uasset_diff::AssetChange::ImportAdded(imp) => {
+                output.push_str(&format!(
+                    "  \x1b[32m+ import: {} ({})\x1b[0m\n",
+                    imp.object_name, imp.class_name
+                ));
+            }
+            uasset_diff::AssetChange::ImportRemoved(imp) => {
+                output.push_str(&format!(
+                    "  \x1b[31m- import: {} ({})\x1b[0m\n",
+                    imp.object_name, imp.class_name
+                ));
+            }
+            uasset_diff::AssetChange::ExportAdded { name, class } => {
+                output.push_str(&format!(
+                    "  \x1b[32m+ export: {} ({})\x1b[0m\n",
+                    name, class
+                ));
+            }
+            uasset_diff::AssetChange::ExportRemoved { name, class } => {
+                output.push_str(&format!(
+                    "  \x1b[31m- export: {} ({})\x1b[0m\n",
+                    name, class
+                ));
+            }
+            uasset_diff::AssetChange::PropertyChanged {
+                export_name,
+                property_path,
+                old_value,
+                new_value,
+            } => {
+                output.push_str(&format!(
+                    "  \x1b[36m[{}]\x1b[0m \x1b[33m~ {}\x1b[0m: {} \x1b[33m->\x1b[0m {}\n",
+                    export_name, property_path, old_value, new_value
+                ));
+            }
+            uasset_diff::AssetChange::PropertyAdded {
+                export_name,
+                property_name,
+                value,
+            } => {
+                output.push_str(&format!(
+                    "  \x1b[36m[{}]\x1b[0m \x1b[32m+ {}\x1b[0m: {}\n",
+                    export_name, property_name, value
+                ));
+            }
+            uasset_diff::AssetChange::PropertyRemoved {
+                export_name,
+                property_name,
+                value,
+            } => {
+                output.push_str(&format!(
+                    "  \x1b[36m[{}]\x1b[0m \x1b[31m- {}\x1b[0m: {}\n",
+                    export_name, property_name, value
+                ));
+            }
+            uasset_diff::AssetChange::ExportDataChanged {
+                export_name,
+                description,
+            } => {
+                output.push_str(&format!(
+                    "  \x1b[36m[{}]\x1b[0m \x1b[33m~ {}\x1b[0m\n",
+                    export_name, description
+                ));
+            }
+        }
+    }
+
+    Some(output)
 }

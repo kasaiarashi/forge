@@ -1078,7 +1078,7 @@ async fn resolve_branch(
         for hash_bytes in refs_resp.refs.values() {
             let tip = hex::encode(hash_bytes);
             if let Ok(commits) = grpc.list_commits(repo, &tip, 1, 200).await {
-                for c in &commits.0 {
+                for c in &commits.commits {
                     if c.hash.starts_with(branch) {
                         return Ok(c.hash.clone());
                     }

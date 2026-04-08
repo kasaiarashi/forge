@@ -52,6 +52,10 @@ enum Commands {
         #[arg(long)]
         stat: bool,
 
+        /// Extract two versions to temp files (for external diff tools / UE editor)
+        #[arg(long)]
+        extract: bool,
+
         /// File paths to restrict diff to
         paths: Vec<String>,
     },
@@ -69,6 +73,10 @@ enum Commands {
         /// One commit per line (hash + message)
         #[arg(long)]
         oneline: bool,
+
+        /// Show commits from all branches
+        #[arg(long)]
+        all: bool,
     },
 
     /// Push commits to the server
@@ -278,6 +286,13 @@ enum Commands {
         /// Path to the asset file
         path: String,
     },
+
+    /// Garbage collect unreachable objects
+    Gc {
+        /// Show what would be pruned without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -290,8 +305,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Add { paths } => commands::add::run(paths)?,
         Commands::Commit { message, all } => commands::snapshot::run(message, all, cli.json)?,
         Commands::Status => commands::status::run(cli.json)?,
-        Commands::Diff { commit, staged, stat, paths } => commands::diff::run(commit, staged, stat, paths, cli.json)?,
-        Commands::Log { count, file, oneline } => commands::log::run(count, file, oneline, cli.json)?,
+        Commands::Diff { commit, staged, stat, extract, paths } => commands::diff::run(commit, staged, stat, extract, paths, cli.json)?,
+        Commands::Log { count, file, oneline, all } => commands::log::run(count, file, oneline, all, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
         Commands::Clone { url, path } => commands::clone::run(url, path)?,
@@ -317,6 +332,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Stash { action, message } => commands::stash::run(action, message)?,
         Commands::Revert { commit } => commands::revert::run(commit)?,
         Commands::AssetInfo { path } => commands::asset_info::run(path, cli.json)?,
+        Commands::Gc { dry_run } => commands::gc::run(dry_run)?,
     }
 
     Ok(())

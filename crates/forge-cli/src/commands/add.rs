@@ -120,10 +120,15 @@ pub fn run(paths: Vec<String>) -> Result<()> {
                         return false; // Unchanged — skip
                     }
                     // mtime/size changed — re-hash to confirm
-                    if let Ok(data) = std::fs::read(abs_path) {
-                        let hash = ForgeHash::from_bytes(&data);
-                        if hash == entry.hash {
-                            return false; // Content identical — skip
+                    match std::fs::read(abs_path) {
+                        Ok(data) => {
+                            let hash = ForgeHash::from_bytes(&data);
+                            if hash == entry.hash {
+                                return false; // Content identical — skip
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("warning: cannot read '{}': {}", rel_path, e);
                         }
                     }
                 }
@@ -159,8 +164,12 @@ pub fn run(paths: Vec<String>) -> Result<()> {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default();
 
+            let extension = std::path::Path::new(&rel_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!(".{}", e));
             let (content_hash, object_hash, is_chunked, raw_chunks) =
-                match chunk::chunk_file(&data) {
+                match chunk::chunk_file_with_hint(&data, extension.as_deref()) {
                     ChunkResult::WholeFile { hash, data } => {
                         (hash, hash, false, vec![(hash, data)])
                     }
