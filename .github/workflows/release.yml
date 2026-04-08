@@ -141,6 +141,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: forge-*
 
       - name: List artifacts
         run: Get-ChildItem -Recurse artifacts/ | Select-Object FullName
