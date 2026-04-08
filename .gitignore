@@ -1,3 +1,4 @@
 target/
+dist/
 forge-web.toml
 !installers/config/forge-web.toml

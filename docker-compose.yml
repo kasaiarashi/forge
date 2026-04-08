@@ -1,0 +1,30 @@
+services:
+  forge-server:
+    build:
+      context: .
+      target: forge-server
+    image: forge-server:latest
+    ports:
+      - "9876:9876"
+    volumes:
+      - forge-data:/data
+      # Optionally mount a custom config:
+      # - ./docker/forge-server.toml:/etc/forge/forge-server.toml:ro
+    restart: unless-stopped
+
+  forge-web:
+    build:
+      context: .
+      target: forge-web
+    image: forge-web:latest
+    ports:
+      - "3000:3000"
+    depends_on:
+      - forge-server
+    # Optionally mount a custom config:
+    # volumes:
+    #   - ./docker/forge-web.toml:/etc/forge/forge-web.toml:ro
+    restart: unless-stopped
+
+volumes:
+  forge-data:
