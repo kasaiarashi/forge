@@ -67,7 +67,23 @@ pub fn parse_field_definitions(
     // The property definitions appear after the UStruct header (SuperStruct, Children)
     // but before script bytecode. We look for a small positive int32 followed by
     // valid FName property type names.
-    scan_for_property_definitions(export_data, names)
+    // Find all property definition blocks. Blueprints may have multiple
+    // SerializeProperties calls (inherited + own).
+    let mut all_fields = scan_for_all_property_definitions(export_data, names);
+    if all_fields.is_empty() {
+        return None;
+    }
+    // Merge all found field sets, deduplicated by field name.
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    for fields in all_fields {
+        for field in fields {
+            if seen.insert(field.field_name.clone()) {
+                merged.push(field);
+            }
+        }
+    }
+    if merged.is_empty() { None } else { Some(merged) }
 }
 
 /// Check if this export's class is one that serializes property definitions.
@@ -116,7 +132,46 @@ const KNOWN_FIELD_TYPES: &[&str] = &[
     "OptionalProperty",
 ];
 
-/// Scan export data for the PropertyCount + FField entries pattern.
+/// Scan export data for ALL PropertyCount + FField entries patterns.
+/// Returns all successfully parsed field sets (there may be multiple for Blueprints
+/// that inherit from C++ classes — one set for inherited props, one for Blueprint vars).
+fn scan_for_all_property_definitions(data: &[u8], names: &[String]) -> Vec<Vec<FieldDefinition>> {
+    let mut results = Vec::new();
+    if data.len() < 8 {
+        return results;
+    }
+
+    for offset in 0..data.len().saturating_sub(12) {
+        let Ok(count_bytes) = data[offset..offset + 4].try_into() else { continue };
+        let count = i32::from_le_bytes(count_bytes);
+
+        if count < 1 || count > 500 {
+            continue;
+        }
+
+        let Ok(idx_bytes) = data[offset + 4..offset + 8].try_into() else { continue };
+        let name_idx = u32::from_le_bytes(idx_bytes) as usize;
+        if name_idx >= names.len() {
+            continue;
+        }
+
+        let first_type = &names[name_idx];
+        if !KNOWN_FIELD_TYPES.contains(&first_type.as_str()) {
+            continue;
+        }
+
+        if let Some(fields) = try_parse_fields_at(data, offset, count as usize, names) {
+            if !fields.is_empty() {
+                results.push(fields);
+            }
+        }
+    }
+
+    results
+}
+
+/// Scan export data for the PropertyCount + FField entries pattern (best match).
+#[allow(dead_code)]
 fn scan_for_property_definitions(data: &[u8], names: &[String]) -> Option<Vec<FieldDefinition>> {
     if data.len() < 8 {
         return None;
@@ -217,9 +272,14 @@ fn try_parse_fields_at(
             value_type: None,
         });
 
-        // Skip past this field to find the next one.
-        // Minimum skip: type FName(8) + name FName(8) = 16 bytes.
-        search_pos = name_pos + 8;
+        // Skip past this field's full entry to find the next one.
+        // Minimum FField entry size: type FName(8) + name FName(8) + flags(4) +
+        // metadata_bool(4) + ArrayDim(4) + ElementSize(4) + PropertyFlags(8) +
+        // RepIndex(4) + RepNotifyFunc FName(8) + BpReplicationCondition(1) = 53 bytes.
+        // Use 40 bytes as conservative minimum to skip past the FProperty base data
+        // without overshooting into the next field. This avoids picking up inner
+        // property types (ArrayProperty inner, MapProperty key/value) as top-level fields.
+        search_pos = type_pos + 40;
     }
 
     if fields.len() == count {
