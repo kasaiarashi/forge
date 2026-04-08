@@ -881,17 +881,20 @@ fn try_structured_asset_diff_with_uexp(
     for (context, roots) in &root_groups {
         if !context.is_empty() {
             output.push_str(&format!("  \x1b[36m[{}]\x1b[0m", context));
-            // If the context itself has property changes, show them inline.
+            // If the context itself has property changes, show them on separate lines.
             if let Some(lines) = export_changes.get(context.as_str()) {
                 if !changed_export_set.contains(context.as_str()) {
-                    // Context export was modified (property/data change), not added/removed.
+                    output.push('\n');
                     for line in lines {
-                        output.push_str(&format!(" {}", line));
+                        output.push_str(&format!("    {}\n", line));
                     }
                     displayed.insert(context.clone());
+                } else {
+                    output.push('\n');
                 }
+            } else {
+                output.push('\n');
             }
-            output.push('\n');
         }
         for root_name in roots {
             write_unified_tree_node(
