@@ -118,6 +118,19 @@ impl fmt::Display for AssetChange {
 
 /// Compare two structured assets and return a list of semantic changes.
 pub fn diff_assets(old: &StructuredAsset, new: &StructuredAsset) -> Vec<AssetChange> {
+    diff_assets_with_data(old, None, new, None)
+}
+
+/// Compare two structured assets with optional raw file data for deep scanning.
+///
+/// When raw data is provided, Blueprint exports are scanned for `NewVariables`
+/// to detect added/removed Blueprint variables (e.g., "TestVar (bool)").
+pub fn diff_assets_with_data(
+    old: &StructuredAsset,
+    old_data: Option<&[u8]>,
+    new: &StructuredAsset,
+    new_data: Option<&[u8]>,
+) -> Vec<AssetChange> {
     let mut changes = Vec::new();
 
     // 1. Diff imports by object_name.
@@ -125,6 +138,11 @@ pub fn diff_assets(old: &StructuredAsset, new: &StructuredAsset) -> Vec<AssetCha
 
     // 2. Diff exports by object_name.
     diff_exports(&old.exports, &new.exports, &mut changes);
+
+    // 3. Diff Blueprint variables from NewVariables tagged property.
+    diff_blueprint_variables(&old.exports, old_data, &old.names,
+                             &new.exports, new_data, &new.names,
+                             &mut changes);
 
     changes
 }
@@ -417,5 +435,206 @@ fn diff_struct_fields(
                 value: format!("{}", new_prop.value),
             });
         }
+    }
+}
+
+/// Diff Blueprint variables from the `NewVariables` tagged property on UBlueprint exports.
+///
+/// Blueprint user-created variables (like "TestVar") are stored as
+/// `FBPVariableDescription` entries in the `NewVariables` array property
+/// on the UBlueprint export, NOT in the BlueprintGeneratedClass's ChildProperties.
+fn diff_blueprint_variables(
+    old_exports: &[ExportInfo],
+    old_data: Option<&[u8]>,
+    old_names: &[String],
+    new_exports: &[ExportInfo],
+    new_data: Option<&[u8]>,
+    new_names: &[String],
+    changes: &mut Vec<AssetChange>,
+) {
+    let old_map: BTreeMap<&str, &ExportInfo> =
+        old_exports.iter().map(|e| (e.object_name.as_str(), e)).collect();
+    let new_map: BTreeMap<&str, &ExportInfo> =
+        new_exports.iter().map(|e| (e.object_name.as_str(), e)).collect();
+
+    for (name, new_exp) in &new_map {
+        if !is_blueprint_export(&new_exp.class_name) {
+            continue;
+        }
+
+        let new_vars = extract_blueprint_var_names_with_scan(new_exp, new_data, new_names);
+        let old_vars = old_map
+            .get(name)
+            .map(|e| extract_blueprint_var_names_with_scan(e, old_data, old_names))
+            .unwrap_or_default();
+
+        if new_vars == old_vars {
+            continue;
+        }
+
+        // Find the BlueprintGeneratedClass name for display — it's usually the export
+        // name + "_C" suffix, but we use the Blueprint name itself as context.
+        let display_name = format!("{}_C", name);
+
+        // Detect added variables.
+        for (var_name, var_type) in &new_vars {
+            if !old_vars.iter().any(|(n, _)| n == var_name) {
+                changes.push(AssetChange::FieldAdded {
+                    export_name: display_name.clone(),
+                    field: FieldDefinition {
+                        field_type: var_type.clone(),
+                        field_name: var_name.clone(),
+                        array_dim: 1,
+                        property_flags: 0,
+                        struct_type: None,
+                        inner_type: None,
+                        key_type: None,
+                        value_type: None,
+                    },
+                });
+            }
+        }
+
+        // Detect removed variables.
+        for (var_name, var_type) in &old_vars {
+            if !new_vars.iter().any(|(n, _)| n == var_name) {
+                changes.push(AssetChange::FieldRemoved {
+                    export_name: display_name.clone(),
+                    field: FieldDefinition {
+                        field_type: var_type.clone(),
+                        field_name: var_name.clone(),
+                        array_dim: 1,
+                        property_flags: 0,
+                        struct_type: None,
+                        inner_type: None,
+                        key_type: None,
+                        value_type: None,
+                    },
+                });
+            }
+        }
+    }
+}
+
+/// Check if an export is a UBlueprint (stores NewVariables).
+fn is_blueprint_export(class_name: &str) -> bool {
+    class_name == "Blueprint"
+        || class_name == "WidgetBlueprint"
+        || class_name == "AnimBlueprint"
+        || class_name == "GameplayAbilityBlueprint"
+        || class_name.ends_with("Blueprint")
+}
+
+/// Extract variable names and types from a Blueprint export.
+///
+/// Blueprint variables are stored in the `NewVariables` tagged property of the
+/// UBlueprint export. Since the tagged property parser may fail on complex Blueprint
+/// exports (the data starts with native UObject header), we also scan the raw export
+/// data for `VarName` FName patterns within the `NewVariables` section.
+///
+/// Returns Vec<(var_name, var_type_hint)>.
+fn extract_blueprint_var_names(export: &ExportInfo) -> Vec<(String, String)> {
+    // First try: use parsed tagged properties if available.
+    if let Some(ref props) = export.properties {
+        let new_vars_prop = props.iter().find(|p| p.name == "NewVariables");
+        if let Some(TaggedProperty {
+            value: PropertyValue::Array { elements, .. },
+            ..
+        }) = new_vars_prop {
+            let mut vars = Vec::new();
+            for elem in elements {
+                if let PropertyValue::Struct { fields, .. } = elem {
+                    let var_name = fields.iter()
+                        .find(|f| f.name == "VarName")
+                        .and_then(|f| match &f.value {
+                            PropertyValue::Name(n) => Some(n.clone()),
+                            _ => None,
+                        });
+                    let var_type = extract_var_type_from_fields(fields);
+                    if let Some(name) = var_name {
+                        vars.push((name, var_type));
+                    }
+                }
+            }
+            if !vars.is_empty() {
+                return vars;
+            }
+        }
+    }
+
+    // Properties not available from the tagged property parser.
+    Vec::new()
+}
+
+/// Extract Blueprint variable names using raw data scan as fallback.
+fn extract_blueprint_var_names_with_scan(
+    export: &ExportInfo,
+    file_data: Option<&[u8]>,
+    names: &[String],
+) -> Vec<(String, String)> {
+    // First try parsed properties.
+    let from_props = extract_blueprint_var_names(export);
+    if !from_props.is_empty() {
+        return from_props;
+    }
+
+    // Fallback: scan raw export data for NewVariables.
+    let data = match file_data {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+
+    let offset = export.serial_size as usize; // serial_size, not offset — we need serial_offset
+    // We can't get serial_offset from ExportInfo. But we can scan the whole file
+    // for the NewVariables pattern — it only appears once per Blueprint.
+    // Scan the raw file data for VarName FName patterns in the NewVariables region.
+    let vars = uasset::structured::scan_blueprint_variables(data, names);
+    if !vars.is_empty() {
+        return vars;
+    }
+
+    Vec::new()
+}
+
+/// Extract a human-readable type string from FBPVariableDescription fields.
+///
+/// The VarType is an FEdGraphPinType struct with PinCategory (Name) that maps to:
+/// "bool" -> BoolProperty, "int" -> IntProperty, "real"/"float"/"double" -> FloatProperty,
+/// "string" -> StrProperty, "name" -> NameProperty, "text" -> TextProperty,
+/// "object" -> ObjectProperty, "struct" -> StructProperty, etc.
+fn extract_var_type_from_fields(fields: &[TaggedProperty]) -> String {
+    let var_type_field = fields.iter().find(|f| f.name == "VarType");
+    if let Some(TaggedProperty { value: PropertyValue::Struct { fields: type_fields, .. }, .. }) = var_type_field {
+        // PinCategory is a Name property inside the FEdGraphPinType struct.
+        if let Some(cat) = type_fields.iter().find(|f| f.name == "PinCategory") {
+            if let PropertyValue::Name(cat_name) = &cat.value {
+                return pin_category_to_type(cat_name);
+            }
+        }
+    }
+
+    // Fallback: check for PropertyFlags to guess the type.
+    "Variable".to_string()
+}
+
+/// Convert UE pin category name to a human-readable type name.
+fn pin_category_to_type(category: &str) -> String {
+    match category {
+        "bool" => "bool".to_string(),
+        "byte" => "byte".to_string(),
+        "int" => "int32".to_string(),
+        "int64" => "int64".to_string(),
+        "real" | "float" => "float".to_string(),
+        "double" => "double".to_string(),
+        "string" => "FString".to_string(),
+        "name" => "FName".to_string(),
+        "text" => "FText".to_string(),
+        "object" | "class" => "Object".to_string(),
+        "softobject" | "softclass" => "SoftObject".to_string(),
+        "interface" => "Interface".to_string(),
+        "struct" => "Struct".to_string(),
+        "enum" => "Enum".to_string(),
+        "delegate" | "mcdelegate" => "Delegate".to_string(),
+        other => other.to_string(),
     }
 }

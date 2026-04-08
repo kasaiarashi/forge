@@ -665,7 +665,10 @@ fn try_structured_asset_diff_with_uexp(
     let old_asset = parse_structured_with_uexp(old_data, old_uexp).ok()?;
     let new_asset = parse_structured_with_uexp(new_data, new_uexp).ok()?;
 
-    let changes = uasset_diff::diff_assets(&old_asset, &new_asset);
+    let changes = uasset_diff::diff_assets_with_data(
+        &old_asset, Some(old_data),
+        &new_asset, Some(new_data),
+    );
 
     if changes.is_empty() {
         return None; // No semantic changes detected.
