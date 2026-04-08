@@ -69,18 +69,20 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
         return Ok(());
     }
 
-    // Progress bar for receiving objects.
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} Receiving objects: {pos}")
-            .unwrap(),
-    );
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
     // Request all objects from the remote tip that we don't have locally.
     let mut want = vec![remote_tip_bytes.clone()];
     let mut received = 0u64;
+    let mut total_discovered = 0u64;
+
+    // Progress bar for receiving objects — length updated as we discover more.
+    let pb = ProgressBar::new(0);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("Receiving objects: [{bar:30}] {pos}/{len} ({percent}%)")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
     loop {
         if want.is_empty() {
@@ -101,6 +103,9 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
         if need.is_empty() {
             break;
         }
+
+        total_discovered += need.len() as u64;
+        pb.set_length(total_discovered);
 
         const BATCH_SIZE: usize = 5000;
         let batches: Vec<Vec<Vec<u8>>> = need
