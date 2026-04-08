@@ -751,62 +751,84 @@ fn is_enum_export(class_name: &str) -> bool {
 /// Build a map from enumerator internal name to display name by scanning raw data.
 ///
 /// Display names are stored as FText values in the DisplayNameMap MapProperty.
-/// FText serializes as: i32 flags + (namespace FString + key FString + value FString).
-/// The display name appears as an inline FString — we search for each enumerator's
-/// FName followed by a nearby readable ASCII string that looks like a display name.
+/// They appear as inline FStrings in the raw data, in the same order as the
+/// enumerators. We collect all display-name-like FStrings from the export data
+/// and match them to enumerators by order.
 fn build_enum_display_map_from_data(
-    enum_name: &str,
+    _enum_name: &str,
     values: &[&str],
-    names: &[String],
+    _names: &[String],
     data: &[u8],
 ) -> BTreeMap<String, String> {
     let mut display_map = BTreeMap::new();
 
-    // For each enumerator, find its FName bytes in the data (as key in DisplayNameMap),
-    // then look for the next inline FString (the display name FText value).
-    let prefix = format!("{}::", enum_name);
+    // UE keywords and property names to exclude from display name candidates.
+    const EXCLUDE: &[&str] = &[
+        "None", "Class", "Package", "MapProperty", "NameProperty", "TextProperty",
+        "StrProperty", "IntProperty", "BoolProperty", "EnumProperty", "StructProperty",
+        "ArrayProperty", "UInt32Property", "ObjectProperty", "ByteProperty",
+        "UserDefinedEnum", "BlueprintType", "PackageLocalizationNamespace",
+        "UniqueNameIndex", "true", "false", "EnumDescription", "DisplayNameMap",
+    ];
 
-    for val in values {
-        if val.ends_with("_MAX") { continue; }
+    // Collect enumerator display names: readable FStrings that appear after the
+    // name table and aren't UE keywords, paths, or enumerator internal names.
+    // They appear in the raw data as: i32(length) + ASCII bytes + null terminator.
+    let non_max_values: Vec<&&str> = values.iter()
+        .filter(|v| !v.ends_with("_MAX"))
+        .collect();
 
-        let full_name = format!("{}{}", prefix, val);
-        let Some(name_idx) = names.iter().position(|n| n == &full_name) else { continue };
+    let mut display_names: Vec<String> = Vec::new();
 
-        // Search for this FName in the data (as part of the DisplayNameMap).
-        let fname_bytes = (name_idx as u32).to_le_bytes();
-        let zero = 0u32.to_le_bytes();
+    // Scan the data for readable FStrings.
+    let mut off = 0usize;
+    while off + 4 < data.len() {
+        let Ok(lb) = data[off..off + 4].try_into() else { off += 1; continue };
+        let length = i32::from_le_bytes(lb);
 
-        // Find occurrences of this FName in the raw data.
-        for offset in 0..data.len().saturating_sub(32) {
-            if data[offset..offset + 4] != fname_bytes { continue; }
-            if data[offset + 4..offset + 8] != zero { continue; }
-
-            // After the enumerator FName key, there's the FText value.
-            // FText serialization: i32 flags, then depending on flags:
-            // - Namespace FString + Key FString + SourceString FString
-            // Look for a readable FString (i32 length + ASCII chars) nearby.
-            for text_off in (offset + 8..offset + 100).step_by(4) {
-                if text_off + 4 > data.len() { break; }
-                let len = i32::from_le_bytes(
-                    data[text_off..text_off + 4].try_into().unwrap_or([0; 4])
-                );
-                // Valid FString: positive length, reasonable size, followed by ASCII.
-                if len > 1 && len < 64 {
-                    let str_start = text_off + 4;
-                    let str_end = str_start + len as usize;
-                    if str_end > data.len() { continue; }
-
-                    let bytes = &data[str_start..str_end - 1]; // exclude null terminator
-                    if bytes.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
-                        let display = String::from_utf8_lossy(bytes).to_string();
-                        if !display.is_empty() && display.len() > 1 {
-                            display_map.insert(val.to_string(), display);
-                            break;
+        if length >= 3 && length <= 50 {
+            let str_start = off + 4;
+            let str_end = str_start + length as usize;
+            if str_end <= data.len() {
+                let bytes = &data[str_start..str_end - 1]; // exclude null terminator
+                if !bytes.is_empty()
+                    && data[str_end - 1] == 0 // null terminated
+                    && bytes.iter().all(|b| b.is_ascii_graphic() || *b == b' ')
+                {
+                    let text = String::from_utf8_lossy(bytes).to_string();
+                    // Filter: not a UE keyword, not a path, not an internal enum name.
+                    let looks_like_guid = (text.len() == 32
+                        && text.chars().all(|c| c.is_ascii_hexdigit()))
+                        || (text.starts_with('[') && text.ends_with(']')
+                            && text.len() > 20
+                            && text[1..text.len()-1].chars().all(|c| c.is_ascii_hexdigit()));
+                    if !text.starts_with('/')
+                        && !text.starts_with('+')
+                        && !text.contains("::")
+                        && !text.contains('.')
+                        && !text.starts_with("NewEnumerator")
+                        && !text.starts_with("E_")
+                        && !EXCLUDE.contains(&text.as_str())
+                        && !text.contains("_MAX")
+                        && !looks_like_guid
+                    {
+                        // Avoid duplicates — display names appear twice in the file
+                        if !display_names.contains(&text) {
+                            display_names.push(text);
                         }
                     }
+                    off = str_end;
+                    continue;
                 }
             }
-            break; // Only need the first occurrence of this FName.
+        }
+        off += 1;
+    }
+
+    // Match display names to enumerators by order.
+    for (i, val) in non_max_values.iter().enumerate() {
+        if i < display_names.len() {
+            display_map.insert(val.to_string(), display_names[i].clone());
         }
     }
 
