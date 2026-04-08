@@ -13,7 +13,7 @@ import {
 } from '@primer/octicons-react';
 import { useAuth } from '../context/AuthContext';
 
-type Tab = 'code' | 'commits' | 'actions' | 'locks' | 'releases' | 'settings' | 'issues' | 'pulls';
+export type Tab = 'code' | 'commits' | 'actions' | 'locks' | 'releases' | 'settings' | 'issues' | 'pulls';
 
 interface RepoHeaderProps {
   repo: string;

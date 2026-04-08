@@ -1,10 +1,10 @@
 import { TelescopeIcon } from '@primer/octicons-react';
 import { Button } from '@primer/react';
-import RepoHeader from '../components/RepoHeader';
+import RepoHeader, { type Tab } from '../components/RepoHeader';
 import { useParams } from 'react-router-dom';
 
 interface PlaceholderProps {
-  tabName: 'projects' | 'security' | 'insights' | 'settings';
+  tabName: Tab;
   title: string;
   description: string;
   actionText?: string;
