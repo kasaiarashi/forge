@@ -671,6 +671,20 @@ fn try_structured_asset_diff_with_uexp(
         return None; // No semantic changes detected.
     }
 
+    // Build lookup maps for outer (parent) names.
+    let new_outer: HashMap<String, Option<String>> = new_asset.exports.iter()
+        .map(|e| (e.object_name.clone(), e.outer_name.clone()))
+        .collect();
+    let old_outer: HashMap<String, Option<String>> = old_asset.exports.iter()
+        .map(|e| (e.object_name.clone(), e.outer_name.clone()))
+        .collect();
+    let new_import_outer: HashMap<String, Option<String>> = new_asset.imports.iter()
+        .map(|i| (i.object_name.clone(), i.outer_name.clone()))
+        .collect();
+    let old_import_outer: HashMap<String, Option<String>> = old_asset.imports.iter()
+        .map(|i| (i.object_name.clone(), i.outer_name.clone()))
+        .collect();
+
     let mut output = String::new();
     output.push_str(&format!(
         "\x1b[1mdiff --forge a/{} b/{}\x1b[0m\n",
@@ -689,74 +703,260 @@ fn try_structured_asset_diff_with_uexp(
         }
     }
 
+    // Separate changes into categories for hierarchical display.
+    let mut import_adds: Vec<&forge_core::uasset_diff::ImportInfo> = Vec::new();
+    let mut import_removes: Vec<&forge_core::uasset_diff::ImportInfo> = Vec::new();
+    let mut export_adds: Vec<(String, String)> = Vec::new(); // (name, class)
+    let mut export_removes: Vec<(String, String)> = Vec::new();
+    let mut property_changes: Vec<&uasset_diff::AssetChange> = Vec::new();
+
     for change in &changes {
         match change {
-            uasset_diff::AssetChange::ImportAdded(imp) => {
-                output.push_str(&format!(
-                    "  \x1b[32m+ import: {} ({})\x1b[0m\n",
-                    imp.object_name, imp.class_name
-                ));
-            }
-            uasset_diff::AssetChange::ImportRemoved(imp) => {
-                output.push_str(&format!(
-                    "  \x1b[31m- import: {} ({})\x1b[0m\n",
-                    imp.object_name, imp.class_name
-                ));
-            }
+            uasset_diff::AssetChange::ImportAdded(imp) => import_adds.push(imp),
+            uasset_diff::AssetChange::ImportRemoved(imp) => import_removes.push(imp),
             uasset_diff::AssetChange::ExportAdded { name, class } => {
-                output.push_str(&format!(
-                    "  \x1b[32m+ export: {} ({})\x1b[0m\n",
-                    name, class
-                ));
+                export_adds.push((name.clone(), class.clone()));
             }
             uasset_diff::AssetChange::ExportRemoved { name, class } => {
-                output.push_str(&format!(
-                    "  \x1b[31m- export: {} ({})\x1b[0m\n",
-                    name, class
-                ));
+                export_removes.push((name.clone(), class.clone()));
             }
+            _ => property_changes.push(change),
+        }
+    }
+
+    // --- Imports: group by package, combine adds/removes ---
+    {
+        // Merge adds and removes into a unified map keyed by outer.
+        let mut import_groups: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+
+        for imp in &import_removes {
+            let outer = old_import_outer.get(&imp.object_name)
+                .and_then(|o| o.clone()).unwrap_or_default();
+            import_groups.entry(outer).or_default().push(
+                format!("  \x1b[31m- {} ({})\x1b[0m", imp.object_name, imp.class_name)
+            );
+        }
+        for imp in &import_adds {
+            let outer = new_import_outer.get(&imp.object_name)
+                .and_then(|o| o.clone()).unwrap_or_default();
+            import_groups.entry(outer).or_default().push(
+                format!("  \x1b[32m+ {} ({})\x1b[0m", imp.object_name, imp.class_name)
+            );
+        }
+
+        for (outer, lines) in &import_groups {
+            if outer.is_empty() || lines.len() == 1 {
+                for line in lines {
+                    output.push_str(&format!("  import:{}\n", line.trim_start()));
+                }
+            } else {
+                output.push_str(&format!("  \x1b[36m[import: {}]\x1b[0m\n", outer));
+                for line in lines {
+                    output.push_str(&format!("  {}\n", line));
+                }
+            }
+        }
+    }
+
+    // --- Exports + property changes: unified by export name ---
+    // Collect all per-export changes into a single map.
+    let mut export_changes: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+
+    for (name, class) in &export_removes {
+        export_changes.entry(name.clone()).or_default().push(
+            format!("\x1b[31m- {} ({})\x1b[0m", name, class)
+        );
+    }
+    for (name, class) in &export_adds {
+        export_changes.entry(name.clone()).or_default().push(
+            format!("\x1b[32m+ {} ({})\x1b[0m", name, class)
+        );
+    }
+    for change in &property_changes {
+        match change {
             uasset_diff::AssetChange::PropertyChanged {
-                export_name,
-                property_path,
-                old_value,
-                new_value,
+                export_name, property_path, old_value, new_value,
             } => {
-                output.push_str(&format!(
-                    "  \x1b[36m[{}]\x1b[0m \x1b[33m~ {}\x1b[0m: {} \x1b[33m->\x1b[0m {}\n",
-                    export_name, property_path, old_value, new_value
-                ));
+                export_changes.entry(export_name.clone()).or_default().push(
+                    format!("\x1b[33m~ {}\x1b[0m: {} \x1b[33m->\x1b[0m {}", property_path, old_value, new_value)
+                );
             }
             uasset_diff::AssetChange::PropertyAdded {
-                export_name,
-                property_name,
-                value,
+                export_name, property_name, value,
             } => {
-                output.push_str(&format!(
-                    "  \x1b[36m[{}]\x1b[0m \x1b[32m+ {}\x1b[0m: {}\n",
-                    export_name, property_name, value
-                ));
+                export_changes.entry(export_name.clone()).or_default().push(
+                    format!("\x1b[32m+ {}\x1b[0m: {}", property_name, value)
+                );
             }
             uasset_diff::AssetChange::PropertyRemoved {
-                export_name,
-                property_name,
-                value,
+                export_name, property_name, value,
             } => {
-                output.push_str(&format!(
-                    "  \x1b[36m[{}]\x1b[0m \x1b[31m- {}\x1b[0m: {}\n",
-                    export_name, property_name, value
-                ));
+                export_changes.entry(export_name.clone()).or_default().push(
+                    format!("\x1b[31m- {}\x1b[0m: {}", property_name, value)
+                );
             }
             uasset_diff::AssetChange::ExportDataChanged {
-                export_name,
-                description,
+                export_name, description,
             } => {
-                output.push_str(&format!(
-                    "  \x1b[36m[{}]\x1b[0m \x1b[33m~ {}\x1b[0m\n",
-                    export_name, description
-                ));
+                export_changes.entry(export_name.clone()).or_default().push(
+                    format!("\x1b[33m~ {}\x1b[0m", description)
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // Now build the tree display.
+    // Combine the outer maps from old and new for full coverage.
+    let mut all_outer: HashMap<String, Option<String>> = old_outer;
+    for (k, v) in &new_outer {
+        all_outer.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+
+    // Determine which exports are "tree roots" for add/remove grouping.
+    let changed_export_set: std::collections::HashSet<&str> = export_adds.iter()
+        .map(|(n, _)| n.as_str())
+        .chain(export_removes.iter().map(|(n, _)| n.as_str()))
+        .collect();
+
+    // Build parent→children for added/removed exports.
+    let mut tree_children: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut tree_roots: Vec<String> = Vec::new();
+
+    for name in changed_export_set.iter() {
+        let parent = all_outer.get(*name)
+            .and_then(|o| o.as_deref())
+            .unwrap_or("");
+        if parent.is_empty() || !changed_export_set.contains(parent) {
+            tree_roots.push(name.to_string());
+        } else {
+            tree_children.entry(parent.to_string())
+                .or_default()
+                .push(name.to_string());
+        }
+    }
+
+    // Group tree roots by their outer for context headers.
+    let mut root_groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for name in &tree_roots {
+        let parent = all_outer.get(name.as_str())
+            .and_then(|o| o.clone())
+            .unwrap_or_default();
+        root_groups.entry(parent).or_default().push(name.clone());
+    }
+
+    // Collect property-only changes (exports that have property/data changes but weren't added/removed).
+    let mut prop_only: Vec<String> = Vec::new();
+    for name in export_changes.keys() {
+        if !changed_export_set.contains(name.as_str()) {
+            prop_only.push(name.clone());
+        }
+    }
+
+    // Track which exports we've already displayed.
+    let mut displayed: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // --- Display tree-grouped export adds/removes ---
+    for (context, roots) in &root_groups {
+        if !context.is_empty() {
+            output.push_str(&format!("  \x1b[36m[{}]\x1b[0m", context));
+            // If the context itself has property changes, show them inline.
+            if let Some(lines) = export_changes.get(context.as_str()) {
+                if !changed_export_set.contains(context.as_str()) {
+                    // Context export was modified (property/data change), not added/removed.
+                    for line in lines {
+                        output.push_str(&format!(" {}", line));
+                    }
+                    displayed.insert(context.clone());
+                }
+            }
+            output.push('\n');
+        }
+        for root_name in roots {
+            write_unified_tree_node(
+                &mut output, root_name, &export_changes, &tree_children, &all_outer, 2,
+            );
+            displayed.insert(root_name.clone());
+        }
+    }
+
+    // --- Display property-only changes (modified exports not yet shown) ---
+    // Group these by outer.
+    let mut prop_groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for name in &prop_only {
+        if displayed.contains(name) {
+            continue;
+        }
+        let parent = all_outer.get(name.as_str())
+            .and_then(|o| o.clone())
+            .unwrap_or_default();
+        prop_groups.entry(parent).or_default().push(name.clone());
+    }
+
+    for (context, names) in &prop_groups {
+        // If all names share a context and it hasn't been shown yet, show as group.
+        let show_context = !context.is_empty();
+        if show_context && names.len() > 1 {
+            output.push_str(&format!("  \x1b[36m[{}]\x1b[0m\n", context));
+            for name in names {
+                if let Some(lines) = export_changes.get(name) {
+                    for line in lines {
+                        output.push_str(&format!("    \x1b[36m[{}]\x1b[0m {}\n", name, line));
+                    }
+                }
+            }
+        } else {
+            for name in names {
+                if let Some(lines) = export_changes.get(name) {
+                    let label = if show_context { context.as_str() } else { name.as_str() };
+                    if lines.len() == 1 {
+                        output.push_str(&format!("  \x1b[36m[{}]\x1b[0m {}\n", label, lines[0]));
+                    } else {
+                        output.push_str(&format!("  \x1b[36m[{}]\x1b[0m\n", label));
+                        for line in lines {
+                            output.push_str(&format!("    {}\n", line));
+                        }
+                    }
+                }
             }
         }
     }
 
     Some(output)
 }
+
+/// Write a unified tree node showing its add/remove line plus children recursively.
+fn write_unified_tree_node(
+    output: &mut String,
+    name: &str,
+    export_changes: &std::collections::BTreeMap<String, Vec<String>>,
+    tree_children: &std::collections::BTreeMap<String, Vec<String>>,
+    all_outer: &HashMap<String, Option<String>>,
+    depth: usize,
+) {
+    let indent = "  ".repeat(depth);
+
+    // Write this node's own change lines (add or remove).
+    if let Some(lines) = export_changes.get(name) {
+        for line in lines {
+            output.push_str(&format!("{}{}\n", indent, line));
+        }
+    }
+
+    // Write children recursively.
+    if let Some(children) = tree_children.get(name) {
+        let mut sorted = children.clone();
+        sorted.sort();
+        for child in &sorted {
+            write_unified_tree_node(output, child, export_changes, tree_children, all_outer, depth + 1);
+        }
+    }
+}
+
+
+

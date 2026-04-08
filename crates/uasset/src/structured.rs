@@ -31,6 +31,8 @@ pub struct ImportInfo {
     pub class_package: String,
     pub class_name: String,
     pub object_name: String,
+    /// Resolved name of the outer (parent) object, if any.
+    pub outer_name: Option<String>,
 }
 
 /// An export object with optional parsed properties.
@@ -40,6 +42,8 @@ pub struct ExportInfo {
     pub object_name: String,
     pub class_name: String,
     pub serial_size: i64,
+    /// Resolved name of the outer (parent) object, if any.
+    pub outer_name: Option<String>,
     /// Parsed tagged properties (None if parsing failed or was skipped).
     pub properties: Option<Vec<TaggedProperty>>,
     /// Size of trailing native data after the property list.
@@ -142,11 +146,25 @@ pub fn parse_structured_with_uexp(
                 .resolve_name(&imp.object_name)
                 .unwrap_or_else(|_| "???".into())
                 .into_owned();
+            let outer_name = match imp.outer() {
+                ObjectReference::Import { import_index } => {
+                    header.imports.get(import_index).and_then(|o| {
+                        header.resolve_name(&o.object_name).ok().map(|s| s.into_owned())
+                    })
+                }
+                ObjectReference::Export { export_index } => {
+                    header.exports.get(export_index).and_then(|o| {
+                        header.resolve_name(&o.object_name).ok().map(|s| s.into_owned())
+                    })
+                }
+                ObjectReference::None => None,
+            };
             ImportInfo {
                 index: i,
                 class_package,
                 class_name,
                 object_name,
+                outer_name,
             }
         })
         .collect();
@@ -187,6 +205,21 @@ pub fn parse_structured_with_uexp(
                 ObjectReference::None => "Class".to_string(),
             };
 
+            // Resolve outer (parent) name.
+            let outer_name = match exp.outer() {
+                ObjectReference::Export { export_index } => {
+                    header.exports.get(export_index).and_then(|o| {
+                        header.resolve_name(&o.object_name).ok().map(|s| s.into_owned())
+                    })
+                }
+                ObjectReference::Import { import_index } => {
+                    header.imports.get(import_index).and_then(|o| {
+                        header.resolve_name(&o.object_name).ok().map(|s| s.into_owned())
+                    })
+                }
+                ObjectReference::None => None,
+            };
+
             // For cooked assets, skip property parsing but still record export metadata.
             if is_cooked {
                 return ExportInfo {
@@ -194,6 +227,7 @@ pub fn parse_structured_with_uexp(
                     object_name,
                     class_name,
                     serial_size: exp.serial_size,
+                    outer_name,
                     properties: None,
                     trailing_data_size: exp.serial_size as usize,
                 };
@@ -208,6 +242,7 @@ pub fn parse_structured_with_uexp(
                 object_name,
                 class_name,
                 serial_size: exp.serial_size,
+                outer_name,
                 properties,
                 trailing_data_size,
             }

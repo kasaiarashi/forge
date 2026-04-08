@@ -4,13 +4,13 @@
 //! at the import, export, and property level.
 
 use uasset::property::{PropertyValue, TaggedProperty};
-use uasset::structured::{ExportInfo, ImportInfo, StructuredAsset};
 use std::collections::BTreeMap;
 use std::fmt;
 
 // Re-export for use by forge-cli without depending on uasset directly.
 pub use uasset::structured::parse_structured;
 pub use uasset::structured::parse_structured_with_uexp;
+pub use uasset::structured::{ExportInfo, ImportInfo, StructuredAsset};
 
 /// A single semantic change within a UE asset.
 #[derive(Debug)]
