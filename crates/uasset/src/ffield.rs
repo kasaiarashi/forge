@@ -67,23 +67,16 @@ pub fn parse_field_definitions(
     // The property definitions appear after the UStruct header (SuperStruct, Children)
     // but before script bytecode. We look for a small positive int32 followed by
     // valid FName property type names.
-    // Find all property definition blocks. Blueprints may have multiple
-    // SerializeProperties calls (inherited + own).
-    let mut all_fields = scan_for_all_property_definitions(export_data, names);
+    // Find all valid property definition blocks and return the one with the
+    // most fields (after inner-type filtering). This ensures we find the real
+    // SerializeProperties() output that includes Blueprint variables, not a
+    // smaller subset from inherited properties.
+    let all_fields = scan_for_all_property_definitions(export_data, names);
     if all_fields.is_empty() {
         return None;
     }
-    // Merge all found field sets, deduplicated by field name.
-    let mut seen = std::collections::HashSet::new();
-    let mut merged = Vec::new();
-    for fields in all_fields {
-        for field in fields {
-            if seen.insert(field.field_name.clone()) {
-                merged.push(field);
-            }
-        }
-    }
-    if merged.is_empty() { None } else { Some(merged) }
+    // Return the set with the most fields.
+    all_fields.into_iter().max_by_key(|f| f.len())
 }
 
 /// Check if this export's class is one that serializes property definitions.
@@ -234,13 +227,20 @@ fn try_parse_fields_at(
     names: &[String],
 ) -> Option<Vec<FieldDefinition>> {
     let start = offset + 4; // Skip the PropertyCount
-    let mut fields = Vec::with_capacity(count);
+    let mut raw_fields = Vec::with_capacity(count);
 
     // Find positions of all property type FNames in sequence.
+    // Minimum FField entry: type FName(8) + name FName(8) + FlagsPrivate(4) +
+    //   bHasMetaData(4) + ArrayDim(4) + ElementSize(4) + PropertyFlags(8) +
+    //   RepIndex(4) + RepNotifyFunc FName(8) + BpReplicationCondition(1) = 53 bytes.
+    // Inner types (Array/Map/Set inners) also have this same structure, so we use
+    // 53 bytes minimum skip to land past both the field AND any type-specific data
+    // like object references (4 bytes for StructProperty/ObjectProperty).
+    const MIN_FIELD_SKIP: usize = 53;
+
     let mut search_pos = start;
 
     for _field_idx in 0..count {
-        // Find the next known field type FName at or after search_pos.
         let (type_pos, field_type) = find_next_field_type(data, search_pos, names)?;
 
         // The field name FName immediately follows the type FName (8 bytes after).
@@ -261,7 +261,7 @@ fn try_parse_fields_at(
             field_name.push_str(&format!("_{}", name_num - 1));
         }
 
-        fields.push(FieldDefinition {
+        raw_fields.push(FieldDefinition {
             field_type: field_type.clone(),
             field_name,
             array_dim: 1,
@@ -272,21 +272,53 @@ fn try_parse_fields_at(
             value_type: None,
         });
 
-        // Skip past this field's full entry to find the next one.
-        // Minimum FField entry size: type FName(8) + name FName(8) + flags(4) +
-        // metadata_bool(4) + ArrayDim(4) + ElementSize(4) + PropertyFlags(8) +
-        // RepIndex(4) + RepNotifyFunc FName(8) + BpReplicationCondition(1) = 53 bytes.
-        // Use 40 bytes as conservative minimum to skip past the FProperty base data
-        // without overshooting into the next field. This avoids picking up inner
-        // property types (ArrayProperty inner, MapProperty key/value) as top-level fields.
-        search_pos = type_pos + 40;
+        search_pos = type_pos + MIN_FIELD_SKIP;
     }
 
-    if fields.len() == count {
-        Some(fields)
-    } else {
-        None
+    if raw_fields.len() != count {
+        return None;
     }
+
+    // Filter out inner types from container properties.
+    // When a MapProperty "X" is serialized, its key/value inner properties are also
+    // serialized via SerializeSingleField and appear as separate entries with the same
+    // name "X". Same for ArrayProperty and SetProperty inners.
+    let fields = filter_inner_types(raw_fields);
+    Some(fields)
+}
+
+/// Remove inner type entries that belong to container properties.
+///
+/// Container properties (Map, Array, Set) serialize their inner type(s) immediately
+/// after the parent, using SerializeSingleField. These inner fields share the same
+/// name as the parent container. We detect and remove them.
+fn filter_inner_types(fields: Vec<FieldDefinition>) -> Vec<FieldDefinition> {
+    let mut result = Vec::with_capacity(fields.len());
+    let mut skip_name: Option<String> = None;
+
+    for field in fields {
+        if let Some(ref skip) = skip_name {
+            if field.field_name == *skip {
+                // This is an inner type of the previous container — skip it.
+                continue;
+            } else {
+                skip_name = None;
+            }
+        }
+
+        let is_container = matches!(
+            field.field_type.as_str(),
+            "MapProperty" | "ArrayProperty" | "SetProperty" | "EnumProperty"
+        );
+
+        if is_container {
+            skip_name = Some(field.field_name.clone());
+        }
+
+        result.push(field);
+    }
+
+    result
 }
 
 /// Find the next known property type FName at or after `start` in the data.
