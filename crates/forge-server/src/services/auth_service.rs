@@ -23,10 +23,23 @@ use crate::auth::interceptor::caller_of;
 use crate::auth::store::{NewUser, RepoRole, UserStore};
 use crate::auth::tokens::{self, Scope};
 
+/// Log then mask — see the twin helper in services/grpc.rs.
+fn internal_err<E: std::fmt::Display>(label: &'static str, err: E) -> Status {
+    tracing::error!(op = label, error = %err, "internal error");
+    Status::internal("internal server error")
+}
+
 const SESSION_TTL_SECONDS: i64 = 24 * 60 * 60; // 24h
 
 pub struct ForgeAuthService {
     pub store: Arc<dyn UserStore>,
+    /// One-time bootstrap token generated at first start. Required on
+    /// `BootstrapAdmin` until the first user exists, then consumed (token
+    /// file deleted).
+    pub bootstrap_token: Option<String>,
+    /// Path to the bootstrap token file so we can delete it after the first
+    /// admin is created.
+    pub bootstrap_token_path: std::path::PathBuf,
 }
 
 fn user_to_proto(u: &crate::auth::store::User) -> UserInfo {
@@ -86,7 +99,7 @@ impl AuthService for ForgeAuthService {
         let user = self
             .store
             .verify_password(&req.username, &req.password)
-            .map_err(|e| Status::internal(format!("auth: {e}")))?
+            .map_err(|e| internal_err("auth", e))?
             .ok_or_else(|| Status::unauthenticated("invalid username or password"))?;
 
         let token = self
@@ -97,7 +110,7 @@ impl AuthService for ForgeAuthService {
                 non_empty(&req.user_agent),
                 non_empty(&req.ip),
             )
-            .map_err(|e| Status::internal(format!("create session: {e}")))?;
+            .map_err(|e| internal_err("create session", e))?;
 
         Ok(Response::new(LoginResponse {
             session_token: token.plaintext,
@@ -126,11 +139,11 @@ impl AuthService for ForgeAuthService {
                 if let Some((session, _user)) = self
                     .store
                     .find_session_by_plaintext(&token)
-                    .map_err(|e| Status::internal(format!("session lookup: {e}")))?
+                    .map_err(|e| internal_err("session lookup", e))?
                 {
                     self.store
                         .revoke_session(session.id)
-                        .map_err(|e| Status::internal(format!("revoke session: {e}")))?;
+                        .map_err(|e| internal_err("revoke session", e))?;
                 }
             }
         }
@@ -152,7 +165,7 @@ impl AuthService for ForgeAuthService {
                 let user = self
                     .store
                     .find_user_by_id(a.user_id)
-                    .map_err(|e| Status::internal(format!("lookup: {e}")))?
+                    .map_err(|e| internal_err("lookup", e))?
                     .ok_or_else(|| Status::not_found("user no longer exists"))?;
                 let scopes = match a.credential {
                     crate::auth::caller::CredentialKind::Session => vec![
@@ -211,7 +224,7 @@ impl AuthService for ForgeAuthService {
         let pats = self
             .store
             .list_pats_for_user(auth.user_id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(ListPatsResponse {
             pats: pats.iter().map(pat_to_proto).collect(),
         }))
@@ -228,7 +241,7 @@ impl AuthService for ForgeAuthService {
         let pats = self
             .store
             .list_pats_for_user(auth.user_id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let owns = pats.iter().any(|p| p.id == req.id);
         if !owns && !auth.is_server_admin {
             return Err(Status::permission_denied("cannot revoke another user's token"));
@@ -236,7 +249,7 @@ impl AuthService for ForgeAuthService {
         let removed = self
             .store
             .revoke_pat(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(RevokePatResponse { success: removed }))
     }
 
@@ -251,7 +264,7 @@ impl AuthService for ForgeAuthService {
         let sessions = self
             .store
             .list_sessions_for_user(auth.user_id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(ListSessionsResponse {
             sessions: sessions.iter().map(session_to_proto).collect(),
         }))
@@ -268,7 +281,7 @@ impl AuthService for ForgeAuthService {
         let sessions = self
             .store
             .list_sessions_for_user(auth.user_id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let owns = sessions.iter().any(|s| s.id == req.id);
         if !owns && !auth.is_server_admin {
             return Err(Status::permission_denied(
@@ -278,7 +291,7 @@ impl AuthService for ForgeAuthService {
         let removed = self
             .store
             .revoke_session(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(RevokeSessionResponse { success: removed }))
     }
 
@@ -315,7 +328,7 @@ impl AuthService for ForgeAuthService {
         let users = self
             .store
             .list_users()
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(ListUsersResponse {
             users: users.iter().map(user_to_proto).collect(),
         }))
@@ -331,7 +344,7 @@ impl AuthService for ForgeAuthService {
         let removed = self
             .store
             .delete_user(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(DeleteUserResponse { success: removed }))
     }
 
@@ -349,7 +362,7 @@ impl AuthService for ForgeAuthService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         self.store
             .set_repo_role(&req.repo, req.user_id, role, granted_by)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(GrantRepoRoleResponse { success: true }))
     }
 
@@ -363,7 +376,7 @@ impl AuthService for ForgeAuthService {
         let removed = self
             .store
             .revoke_repo_role(&req.repo, req.user_id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(RevokeRepoRoleResponse { success: removed }))
     }
 
@@ -377,7 +390,7 @@ impl AuthService for ForgeAuthService {
         let members = self
             .store
             .list_repo_members(&req.repo)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(ListRepoMembersResponse {
             members: members
                 .iter()
@@ -398,7 +411,7 @@ impl AuthService for ForgeAuthService {
         let count = self
             .store
             .count_users()
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(IsServerInitializedResponse {
             initialized: count > 0,
         }))
@@ -412,13 +425,40 @@ impl AuthService for ForgeAuthService {
         let count = self
             .store
             .count_users()
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "count_users failed during bootstrap");
+                Status::internal("internal server error")
+            })?;
         if count > 0 {
             return Err(Status::failed_precondition(
                 "server is already initialized — use Login to obtain a session",
             ));
         }
+
+        // Bootstrap-token check: the server prints a one-time token on
+        // first start and writes it to <base>/.bootstrap_token. Require it
+        // so that a publicly-reachable fresh install cannot be hijacked by
+        // whoever races to the bootstrap endpoint first.
         let req = request.into_inner();
+        match self.bootstrap_token.as_deref() {
+            Some(expected) => {
+                if !constant_time_eq(expected.as_bytes(), req.bootstrap_token.as_bytes()) {
+                    tracing::warn!("bootstrap_admin denied: missing or invalid bootstrap token");
+                    return Err(Status::permission_denied(
+                        "missing or invalid bootstrap token — see forge-server logs \
+                         or the file <base_path>/.bootstrap_token",
+                    ));
+                }
+            }
+            None => {
+                // No token configured on the server — refuse rather than
+                // silently allowing an uncontrolled bootstrap.
+                return Err(Status::failed_precondition(
+                    "bootstrap token not initialized on the server",
+                ));
+            }
+        }
+
         let user = self
             .store
             .create_user(NewUser {
@@ -429,10 +469,37 @@ impl AuthService for ForgeAuthService {
                 is_server_admin: true,
             })
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        // Consume the token so it can't be reused. We do this AFTER the
+        // user is successfully created so a transient failure (duplicate
+        // username, invalid password policy) doesn't lock the operator out.
+        if let Err(e) = std::fs::remove_file(&self.bootstrap_token_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    error = %e,
+                    path = ?self.bootstrap_token_path,
+                    "failed to delete bootstrap token file after successful bootstrap"
+                );
+            }
+        }
+
         Ok(Response::new(BootstrapAdminResponse {
             user: Some(user_to_proto(&user)),
         }))
     }
+}
+
+/// Constant-time byte comparison. Returns false on length mismatch without
+/// short-circuiting.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
 }
 
 fn non_empty(s: &str) -> Option<&str> {

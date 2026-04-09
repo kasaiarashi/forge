@@ -4,9 +4,10 @@
 use forge_proto::forge::auth_service_client::AuthServiceClient;
 use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
+use std::path::Path;
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Status};
 
 use crate::auth::current_session_token;
@@ -24,10 +25,42 @@ pub struct ForgeGrpcClient {
 
 impl ForgeGrpcClient {
     /// Connect to the forge-server at the given gRPC URL.
-    pub async fn connect(grpc_url: &str) -> anyhow::Result<Self> {
-        let channel = Endpoint::from_shared(grpc_url.to_string())?
-            .connect()
-            .await?;
+    ///
+    /// - `http://…` URLs use plaintext h2c.
+    /// - `https://…` URLs negotiate TLS. When `ca_cert_path` is provided,
+    ///   that PEM file is the sole trust root (required for self-signed
+    ///   deployments). Without it, the OS trust store is used.
+    pub async fn connect(grpc_url: &str, ca_cert_path: Option<&Path>) -> anyhow::Result<Self> {
+        let endpoint = Endpoint::from_shared(grpc_url.to_string())?;
+        let endpoint = if grpc_url.starts_with("https://") {
+            let tls = if let Some(path) = ca_cert_path {
+                let pem = std::fs::read(path).map_err(|e| {
+                    anyhow::anyhow!("failed to read CA cert {}: {e}", path.display())
+                })?;
+                // Self-signed deployments: the operator-supplied PEM is the
+                // ONLY trust root. We don't merge with_native_roots() here
+                // because a typo in ca_cert_path could otherwise silently
+                // fall back to whatever the system trusts.
+                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem))
+            } else {
+                ClientTlsConfig::new().with_native_roots()
+            };
+            endpoint.tls_config(tls)?
+        } else {
+            endpoint
+        };
+        let channel = endpoint.connect().await.map_err(|e| {
+            // tonic::transport::Error has Display = "transport error" — walk
+            // the source chain by hand to get the real rustls / io cause.
+            let mut msg = format!("{e}");
+            let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&e);
+            while let Some(s) = src {
+                msg.push_str(" :: ");
+                msg.push_str(&s.to_string());
+                src = s.source();
+            }
+            anyhow::anyhow!("gRPC connect failed: {msg}")
+        })?;
         Ok(Self { channel })
     }
 

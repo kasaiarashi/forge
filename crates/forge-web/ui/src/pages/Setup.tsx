@@ -25,6 +25,7 @@ export default function Setup() {
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
+  const [bootstrapToken, setBootstrapToken] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -32,8 +33,9 @@ export default function Setup() {
   const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
   const passwordOk = password.length >= 8;
   const matches = password === confirm;
+  const tokenOk = bootstrapToken.trim().length >= 32;
   const canSubmit =
-    usernameOk && emailOk && passwordOk && matches && !submitting;
+    usernameOk && emailOk && passwordOk && matches && tokenOk && !submitting;
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -46,6 +48,7 @@ export default function Setup() {
         email: email.trim(),
         display_name: displayName.trim() || username.trim(),
         password,
+        bootstrap_token: bootstrapToken.trim(),
       });
       // Auto-login fired inside bootstrap(); land on the dashboard.
       navigate('/');
@@ -191,6 +194,31 @@ export default function Setup() {
             {confirm.length > 0 && !matches && (
               <FormControl.Validation variant="error">
                 Passwords don't match
+              </FormControl.Validation>
+            )}
+          </FormControl>
+        </div>
+
+        <div style={{ marginTop: '16px' }}>
+          <FormControl>
+            <FormControl.Label>Bootstrap token</FormControl.Label>
+            <TextInput
+              block
+              value={bootstrapToken}
+              onChange={(e) => setBootstrapToken(e.target.value)}
+              autoComplete="off"
+              placeholder="hex token from the forge-server logs"
+              aria-invalid={bootstrapToken.length > 0 && !tokenOk}
+              monospace
+            />
+            <FormControl.Caption>
+              Printed by <code>forge-server</code> on first start, also saved
+              to <code>&lt;base_path&gt;/.bootstrap_token</code>. Consumed after
+              the first admin is created.
+            </FormControl.Caption>
+            {bootstrapToken.length > 0 && !tokenOk && (
+              <FormControl.Validation variant="error">
+                Token looks too short — paste the full hex value
               </FormControl.Validation>
             )}
           </FormControl>

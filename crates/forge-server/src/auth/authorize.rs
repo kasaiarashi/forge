@@ -56,7 +56,7 @@ pub fn require_repo_read(
     }
     let role = store
         .get_repo_role(repo, auth.user_id)
-        .map_err(|e| Status::internal(format!("repo role lookup: {e}")))?;
+        .map_err(|e| { tracing::error!(error = %e, "repo role lookup"); Status::internal("internal server error") })?;
     match role {
         Some(r) if r.satisfies(RepoRole::Read) => Ok(()),
         _ => Err(Status::permission_denied(format!(
@@ -80,7 +80,7 @@ pub fn require_repo_write(
     }
     let role = store
         .get_repo_role(repo, auth.user_id)
-        .map_err(|e| Status::internal(format!("repo role lookup: {e}")))?;
+        .map_err(|e| { tracing::error!(error = %e, "repo role lookup"); Status::internal("internal server error") })?;
     match role {
         Some(r) if r.satisfies(RepoRole::Write) => Ok(()),
         _ => Err(Status::permission_denied(format!(
@@ -103,7 +103,7 @@ pub fn require_repo_admin(
     }
     let role = store
         .get_repo_role(repo, auth.user_id)
-        .map_err(|e| Status::internal(format!("repo role lookup: {e}")))?;
+        .map_err(|e| { tracing::error!(error = %e, "repo role lookup"); Status::internal("internal server error") })?;
     match role {
         Some(RepoRole::Admin) => Ok(()),
         _ => Err(Status::permission_denied(format!(

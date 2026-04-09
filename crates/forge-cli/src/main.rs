@@ -2,6 +2,8 @@ mod client;
 mod commands;
 mod credentials;
 mod pager;
+mod tofu;
+mod url_resolver;
 
 use clap::{Parser, Subcommand};
 
@@ -326,6 +328,11 @@ enum Commands {
         /// Password (skips the interactive prompt; avoid in shared shells)
         #[arg(long, short = 'p')]
         password: Option<String>,
+        /// Automatically trust the server's TLS certificate on first
+        /// connect without prompting. Use in CI / scripts only — interactive
+        /// users should verify the fingerprint manually.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// Forget the stored credential for a server (and revoke its session)
@@ -341,10 +348,30 @@ enum Commands {
         #[arg(long)]
         server: Option<String>,
     },
+
+    /// Pin a forge server's self-signed TLS certificate (trust on first use).
+    ///
+    /// Connects to the given `https://<host>:<port>` URL, captures the
+    /// presented certificate chain, prints the CA fingerprint for manual
+    /// comparison, and — on confirmation — saves the trust anchor to
+    /// `~/.forge/trusted/<host>_<port>.pem`. Subsequent forge CLI calls to
+    /// that server will use the pinned certificate automatically.
+    Trust {
+        /// Full server URL, e.g. `https://forge.example.com:9876`
+        server: String,
+        /// Skip the interactive confirmation prompt (scripts, CI).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn main() {
     tracing_subscriber::fmt::init();
+
+    // Install a rustls crypto provider so `https://` server URLs work.
+    // See twin call in forge-server/forge-web main — multiple provider crates
+    // can end up in the build, so we pick aws-lc-rs explicitly.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let cli = Cli::parse();
     if let Err(err) = run_cli(cli) {
@@ -388,9 +415,10 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::AssetInfo { path } => commands::asset_info::run(path, cli.json)?,
         Commands::Gc { dry_run } => commands::gc::run(dry_run)?,
         Commands::Update { check } => commands::update::run(check, cli.json)?,
-        Commands::Login { server, token, username, password } => commands::login::run(server, token, username, password)?,
+        Commands::Login { server, token, username, password, yes } => commands::login::run(server, token, username, password, yes)?,
         Commands::Logout { server } => commands::logout::run(server)?,
         Commands::Whoami { server } => commands::whoami::run(server)?,
+        Commands::Trust { server, yes } => commands::trust::run(server, yes)?,
     }
 
     Ok(())
@@ -511,7 +539,7 @@ fn offer_login() {
     // Run the regular interactive login flow. It'll prompt for username +
     // password (rpassword), call AuthService::Login, mint a PAT, and store
     // it in the keychain / credentials file.
-    if let Err(e) = commands::login::run(server, None, None, None) {
+    if let Err(e) = commands::login::run(server, None, None, None, false) {
         eprintln!("\x1b[1;31mlogin failed:\x1b[0m {e}");
         return;
     }

@@ -119,6 +119,10 @@ pub struct BootstrapBody {
     pub email: String,
     pub display_name: String,
     pub password: String,
+    /// One-time token printed to the forge-server logs / written to
+    /// `<base_path>/.bootstrap_token`. Required to create the first admin.
+    #[serde(default)]
+    pub bootstrap_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,6 +152,16 @@ fn user_dto(u: &UserInfo) -> UserDto {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
+/// Build the cookie attributes suffix based on the app state. Adds `Secure`
+/// when TLS is terminated here or the operator explicitly opted in.
+fn cookie_attrs(state: &AppState) -> &'static str {
+    if state.secure_cookies {
+        "Path=/; HttpOnly; Secure; SameSite=Strict"
+    } else {
+        "Path=/; HttpOnly; SameSite=Strict"
+    }
+}
+
 /// `POST /api/auth/login` — username + password in, session cookie out.
 ///
 /// Uses the anonymous gRPC client so a user who already has a stale or
@@ -157,7 +171,10 @@ fn user_dto(u: &UserInfo) -> UserDto {
 pub async fn login(State(state): State<Arc<AppState>>, Json(body): Json<LoginBody>) -> Response {
     let mut auth = match state.grpc_auth_client_anonymous().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => {
+            tracing::error!(error = %e, "gRPC client unavailable for login");
+            return err(StatusCode::BAD_GATEWAY, "auth service unavailable");
+        }
     };
 
     let resp = match auth
@@ -171,20 +188,24 @@ pub async fn login(State(state): State<Arc<AppState>>, Json(body): Json<LoginBod
     {
         Ok(r) => r.into_inner(),
         Err(s) if s.code() == tonic::Code::Unauthenticated => {
-            return err(StatusCode::UNAUTHORIZED, s.message());
+            return err(StatusCode::UNAUTHORIZED, "invalid username or password");
         }
-        Err(s) => return err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => {
+            tracing::error!(code = ?s.code(), msg = s.message(), "login gRPC error");
+            return err(StatusCode::BAD_GATEWAY, "auth service error");
+        }
     };
 
     let user = match resp.user {
         Some(u) => u,
-        None => return err(StatusCode::BAD_GATEWAY, "no user in response"),
+        None => return err(StatusCode::BAD_GATEWAY, "auth service error"),
     };
 
     let max_age = (resp.expires_at - chrono::Utc::now().timestamp()).max(0);
     let cookie = format!(
-        "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}",
+        "{COOKIE_NAME}={token}; {attrs}; Max-Age={max_age}",
         token = resp.session_token,
+        attrs = cookie_attrs(&state),
         max_age = max_age
     );
 
@@ -206,7 +227,10 @@ pub async fn logout(State(state): State<Arc<AppState>>) -> Response {
     if let Ok(mut auth) = state.grpc_auth_client().await {
         let _ = auth.logout(LogoutRequest {}).await;
     }
-    let clear = format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+    let clear = format!(
+        "{COOKIE_NAME}=; {attrs}; Max-Age=0",
+        attrs = cookie_attrs(&state)
+    );
     (
         StatusCode::OK,
         [(header::SET_COOKIE, clear)],
@@ -224,14 +248,14 @@ pub async fn logout(State(state): State<Arc<AppState>>) -> Response {
 pub async fn me(State(state): State<Arc<AppState>>) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     let resp = match auth.who_am_i(WhoAmIRequest {}).await {
         Ok(r) => r.into_inner(),
         Err(s) if s.code() == tonic::Code::Unauthenticated => {
             return err(StatusCode::UNAUTHORIZED, s.message());
         }
-        Err(s) => return err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); return err(StatusCode::BAD_GATEWAY, "auth service error"); },
     };
     if !resp.authenticated {
         return err(StatusCode::UNAUTHORIZED, "not logged in");
@@ -258,14 +282,14 @@ pub async fn me(State(state): State<Arc<AppState>>) -> Response {
 pub async fn is_initialized(State(state): State<Arc<AppState>>) -> Response {
     let mut auth = match state.grpc_auth_client_anonymous().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = ?e, chain = format!("{e:#}"), "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth.is_server_initialized(IsServerInitializedRequest {}).await {
         Ok(r) => Json(InitializedDto {
             initialized: r.into_inner().initialized,
         })
         .into_response(),
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -279,7 +303,7 @@ pub async fn bootstrap_admin(
 ) -> Response {
     let mut auth = match state.grpc_auth_client_anonymous().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     let resp = match auth
         .bootstrap_admin(BootstrapAdminRequest {
@@ -287,6 +311,7 @@ pub async fn bootstrap_admin(
             email: body.email,
             display_name: body.display_name,
             password: body.password,
+            bootstrap_token: body.bootstrap_token,
         })
         .await
     {
@@ -297,7 +322,10 @@ pub async fn bootstrap_admin(
         Err(s) if s.code() == tonic::Code::InvalidArgument => {
             return err(StatusCode::BAD_REQUEST, s.message());
         }
-        Err(s) => return err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) if s.code() == tonic::Code::PermissionDenied => {
+            return err(StatusCode::FORBIDDEN, s.message());
+        }
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); return err(StatusCode::BAD_GATEWAY, "auth service error"); },
     };
     let user = match resp.user {
         Some(u) => u,
@@ -310,14 +338,14 @@ pub async fn bootstrap_admin(
 pub async fn list_tokens(State(state): State<Arc<AppState>>) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth.list_personal_access_tokens(ListPatsRequest {}).await {
         Ok(r) => Json(r.into_inner().pats).into_response(),
         Err(s) if s.code() == tonic::Code::Unauthenticated => {
             err(StatusCode::UNAUTHORIZED, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -336,7 +364,7 @@ pub async fn create_token(
 ) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth
         .create_personal_access_token(CreatePatRequest {
@@ -353,7 +381,7 @@ pub async fn create_token(
         Err(s) if s.code() == tonic::Code::InvalidArgument => {
             err(StatusCode::BAD_REQUEST, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -364,7 +392,7 @@ pub async fn delete_token(
 ) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth.revoke_personal_access_token(RevokePatRequest { id }).await {
         Ok(r) => Json(r.into_inner()).into_response(),
@@ -374,7 +402,7 @@ pub async fn delete_token(
         Err(s) if s.code() == tonic::Code::PermissionDenied => {
             err(StatusCode::FORBIDDEN, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -382,14 +410,14 @@ pub async fn delete_token(
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth.list_my_sessions(ListSessionsRequest {}).await {
         Ok(r) => Json(r.into_inner().sessions).into_response(),
         Err(s) if s.code() == tonic::Code::Unauthenticated => {
             err(StatusCode::UNAUTHORIZED, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -400,7 +428,7 @@ pub async fn delete_session(
 ) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth.revoke_session(RevokeSessionRequest { id }).await {
         Ok(r) => Json(r.into_inner()).into_response(),
@@ -410,7 +438,7 @@ pub async fn delete_session(
         Err(s) if s.code() == tonic::Code::PermissionDenied => {
             err(StatusCode::FORBIDDEN, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -418,7 +446,7 @@ pub async fn delete_session(
 pub async fn list_users(State(state): State<Arc<AppState>>) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth.list_users(ListUsersRequest {}).await {
         Ok(r) => Json(
@@ -435,7 +463,7 @@ pub async fn list_users(State(state): State<Arc<AppState>>) -> Response {
         Err(s) if s.code() == tonic::Code::PermissionDenied => {
             err(StatusCode::FORBIDDEN, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -456,7 +484,7 @@ pub async fn create_user(
 ) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth
         .create_user(CreateUserRequest {
@@ -491,7 +519,7 @@ pub async fn create_user(
         Err(s) if s.code() == tonic::Code::InvalidArgument => {
             err(StatusCode::BAD_REQUEST, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -502,7 +530,7 @@ pub async fn delete_user(
 ) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth.delete_user(DeleteUserRequest { id }).await {
         Ok(r) => Json(r.into_inner()).into_response(),
@@ -512,7 +540,7 @@ pub async fn delete_user(
         Err(s) if s.code() == tonic::Code::PermissionDenied => {
             err(StatusCode::FORBIDDEN, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -530,7 +558,7 @@ pub async fn grant_repo_role(
 ) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth
         .grant_repo_role(GrantRepoRoleRequest {
@@ -550,7 +578,7 @@ pub async fn grant_repo_role(
         Err(s) if s.code() == tonic::Code::InvalidArgument => {
             err(StatusCode::BAD_REQUEST, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -561,7 +589,7 @@ pub async fn revoke_repo_role(
 ) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth
         .revoke_repo_role(RevokeRepoRoleRequest { repo, user_id })
@@ -574,7 +602,7 @@ pub async fn revoke_repo_role(
         Err(s) if s.code() == tonic::Code::PermissionDenied => {
             err(StatusCode::FORBIDDEN, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }
 
@@ -585,7 +613,7 @@ pub async fn list_repo_members(
 ) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
     };
     match auth.list_repo_members(ListRepoMembersRequest { repo }).await {
         Ok(r) => Json(r.into_inner().members).into_response(),
@@ -595,6 +623,6 @@ pub async fn list_repo_members(
         Err(s) if s.code() == tonic::Code::PermissionDenied => {
             err(StatusCode::FORBIDDEN, s.message())
         }
-        Err(s) => err(StatusCode::BAD_GATEWAY, s.message()),
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
     }
 }

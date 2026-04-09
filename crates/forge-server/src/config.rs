@@ -40,6 +40,47 @@ pub struct ServerSection {
     /// Number of worker threads (0 = auto, uses all cores).
     #[serde(default)]
     pub workers: usize,
+
+    /// Optional TLS configuration. When present, the gRPC server terminates
+    /// TLS using rustls; when absent, it speaks plaintext h2c and should
+    /// only be bound to loopback.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+/// TLS settings for the gRPC server.
+///
+/// Two modes:
+/// - **Manual**: supply `cert_path` and `key_path` pointing at real PEM
+///   files (e.g. from an ACME client).
+/// - **Auto-generate**: set `auto_generate = true` and leave `cert_path`
+///   and `key_path` at their defaults. On first start, forge-server mints
+///   a local CA and a leaf certificate covering `hostnames` + loopback,
+///   writes them under `<base_path>/certs/`, and reuses them on every
+///   subsequent start. Use `forge trust` from client machines to pin the
+///   CA.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// PEM-encoded certificate chain (leaf first). Defaults to
+    /// `<base_path>/certs/server.crt`.
+    #[serde(default)]
+    pub cert_path: Option<PathBuf>,
+
+    /// PEM-encoded private key matching the certificate. Defaults to
+    /// `<base_path>/certs/server.key`.
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
+
+    /// When true, generate a CA + leaf on first start if the files don't
+    /// exist yet. When false, missing files are a startup error.
+    #[serde(default)]
+    pub auto_generate: bool,
+
+    /// DNS names / IP addresses to encode into the leaf cert's
+    /// `subjectAltName` extension. `localhost`, `127.0.0.1`, and `::1` are
+    /// always added implicitly. Ignored when `auto_generate` is false.
+    #[serde(default)]
+    pub hostnames: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,8 +109,10 @@ pub struct RepoConfig {
 /// Actions/workflow engine settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionsSection {
-    /// Enable the actions engine.
-    #[serde(default = "default_true")]
+    /// Enable the actions engine. Default **false** because workflow steps
+    /// run as arbitrary shell commands on the server host with the
+    /// forge-server process's privileges.
+    #[serde(default = "default_false")]
     pub enabled: bool,
 
     /// Base directory for artifacts storage (relative to base_path, or absolute).
@@ -89,7 +132,7 @@ pub struct ActionsSection {
     pub executor: String,
 }
 
-fn default_true() -> bool { true }
+fn default_false() -> bool { false }
 fn default_artifacts_path() -> PathBuf { PathBuf::from("artifacts") }
 fn default_workspaces_path() -> PathBuf { PathBuf::from("workspaces") }
 fn default_max_runs() -> usize { 1 }
@@ -98,7 +141,7 @@ fn default_executor() -> String { "native".into() }
 impl Default for ActionsSection {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
+            enabled: default_false(),
             artifacts_path: default_artifacts_path(),
             workspaces_path: default_workspaces_path(),
             max_concurrent_runs: default_max_runs(),
@@ -108,7 +151,7 @@ impl Default for ActionsSection {
 }
 
 fn default_listen() -> String {
-    "0.0.0.0:9876".into()
+    "127.0.0.1:9876".into()
 }
 fn default_max_upload() -> u64 {
     256 * 1024 * 1024 // 256 MiB per message (objects are chunked, so this is generous)
@@ -126,6 +169,7 @@ impl Default for ServerSection {
             listen: default_listen(),
             max_message_size: default_max_upload(),
             workers: 0,
+            tls: None,
         }
     }
 }
@@ -169,7 +213,9 @@ impl ServerConfig {
 # ========================
 
 [server]
-# Address and port to listen on.
+# Address and port to listen on. Bind to 0.0.0.0 to expose the server on
+# the network — the default [server.tls] block below keeps the connection
+# encrypted regardless.
 listen = "0.0.0.0:9876"
 
 # Maximum size per gRPC message in bytes. Default 256 MiB.
@@ -180,6 +226,21 @@ max_message_size = 268435456
 # Worker threads. 0 = auto (all CPU cores).
 workers = 0
 
+# TLS is ON by default. On first start, forge-server generates a local CA
+# under <storage.base_path>/certs/, mints a leaf cert for the hostnames
+# listed below, and prints the CA's SHA-256 fingerprint to the logs.
+#
+# Distribute to clients with:
+#   forge trust https://<this-server>:9876
+#
+# Already have a real cert (Let's Encrypt, corporate CA)? Set `auto_generate
+# = false` and point `cert_path` + `key_path` at your PEM files.
+[server.tls]
+auto_generate = true
+# hostnames = ["forge.example.com", "10.0.0.5"]
+# cert_path = "./certs/server.crt"
+# key_path  = "./certs/server.key"
+
 [storage]
 # Base directory for all repository data.
 # Each repo is stored in: <base_path>/repos/<repo-name>/objects/
@@ -188,6 +249,13 @@ base_path = "./forge-data"
 # SQLite database path (relative to base_path, or absolute).
 # Stores refs (branch tips) and lock metadata.
 db_path = "forge.db"
+
+[actions]
+# DANGER: workflow steps run as arbitrary shell commands on THIS machine
+# as the forge-server process user. Anyone with a repo:admin role on any
+# repo can author a workflow that executes code on the host. The engine is
+# DISABLED by default — enable it only in dedicated, isolated deployments.
+enabled = false
 
 # Per-repo overrides (optional).
 # Useful for placing large repos on a different disk.

@@ -79,10 +79,11 @@ pub fn run(
     token: Option<String>,
     username: Option<String>,
     password: Option<String>,
+    yes: bool,
 ) -> Result<()> {
     let server_url = resolve_server_url(server)?;
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(login_async(server_url, token, username, password))
+    rt.block_on(login_async(server_url, token, username, password, yes))
 }
 
 async fn login_async(
@@ -90,7 +91,22 @@ async fn login_async(
     token: Option<String>,
     username: Option<String>,
     password: Option<String>,
+    yes: bool,
 ) -> Result<()> {
+    // If the user pasted the forge-web URL (port 3000), auto-detect it
+    // and switch to the underlying forge-server gRPC URL. Every subsequent
+    // call in this function — credential save/load, gRPC connect, workspace
+    // identity update — uses the resolved URL, so there's no inconsistency
+    // between the key we save under and the key later commands look up.
+    let server_url = crate::url_resolver::resolve(&server_url).await;
+
+    // Trust-on-first-use: if the resolved URL's cert isn't in the system
+    // trust store and we don't have a pin for it yet, show the fingerprint
+    // and prompt the user to accept (SSH-style). `--yes` skips the prompt
+    // for CI / scripts. Once this returns OK the pinned cert path in
+    // `client::build_endpoint` picks it up on the real gRPC connect.
+    crate::tofu::ensure_trusted(&server_url, yes).await?;
+
     if let Some(pat) = token {
         return login_with_token(&server_url, pat).await;
     }

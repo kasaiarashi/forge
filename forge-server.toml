@@ -2,7 +2,9 @@
 # ========================
 
 [server]
-# Address and port to listen on.
+# Address and port to listen on. Bind to 0.0.0.0 to expose the server on
+# the network — the [server.tls] block below keeps the connection
+# encrypted by default.
 listen = "0.0.0.0:9876"
 
 # Maximum size per gRPC message in bytes. Default 256 MiB.
@@ -12,6 +14,35 @@ max_message_size = 268435456
 
 # Worker threads. 0 = auto (all CPU cores).
 workers = 0
+
+# TLS is ON by default. On first start, forge-server generates a local CA
+# under <storage.base_path>/certs/, mints a leaf certificate covering the
+# hostnames below (plus localhost / 127.0.0.1 / ::1 implicitly), and prints
+# the CA SHA-256 fingerprint to the logs.
+#
+# Distribute to clients with:
+#   forge trust https://<this-server>:9876
+# Clients verify the fingerprint against what forge-server logged and pin
+# it under ~/.forge/trusted/<host>_<port>.pem. Subsequent logins/pushes
+# over https:// "just work".
+#
+# Already have a real cert (Let's Encrypt, corporate CA)? Set
+# `auto_generate = false` and point cert_path/key_path at your PEM files.
+[server.tls]
+auto_generate = true
+# Extra hostnames / IPs to embed in the leaf cert's SAN. When listen is
+# 0.0.0.0 / ::, every non-loopback interface IP is included automatically;
+# add any DNS name (or IP not on a local interface) here manually.
+# hostnames = ["forge.internal"]
+# cert_path = "./certs/server.crt"
+# key_path  = "./certs/server.key"
+
+[actions]
+# DANGER: workflow steps run as arbitrary shell commands on THIS machine
+# as the forge-server process user. Anyone with a repo:admin role on any
+# repo can author a workflow that executes code on the host. The engine is
+# DISABLED by default — enable it only in dedicated, isolated deployments.
+enabled = false
 
 [storage]
 # Base directory for all repository data.
@@ -28,7 +59,3 @@ db_path = "forge.db"
 # [repos.my-game]
 # path = "D:/fast-ssd/my-game"
 # description = "Main game project"
-#
-# [repos.art-assets]
-# path = "E:/large-hdd/art-assets"
-# description = "Art asset repository (large storage)"

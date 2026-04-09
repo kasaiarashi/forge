@@ -31,6 +31,10 @@ self-replace.workspace = true
 argon2 = "0.5"
 rand = "0.8"
 rpassword = "7"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rcgen.workspace = true
+sha2 = "0.10"
+if-addrs = "0.13"
 
 [dev-dependencies]
 tempfile.workspace = true

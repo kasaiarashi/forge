@@ -5,10 +5,35 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::AppState;
+
+/// Characters to percent-encode for the quoted `filename` in Content-Disposition.
+/// We stay conservative — anything outside ASCII alphanumerics plus a few
+/// obviously-safe punctuation chars is encoded.
+const DISPOSITION_FILENAME: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'\\')
+    .add(b';')
+    .add(b',')
+    .add(b'(')
+    .add(b')')
+    .add(b'<')
+    .add(b'>')
+    .add(b'@')
+    .add(b':')
+    .add(b'?')
+    .add(b'=')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'[')
+    .add(b']')
+    .add(b'%');
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -45,24 +70,50 @@ fn internal_error(err: anyhow::Error) -> Response {
 }
 
 fn grpc_status_to_response(status: &tonic::Status) -> Response {
-    let http = match status.code() {
-        tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
-        tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
-        tonic::Code::NotFound => StatusCode::NOT_FOUND,
-        tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
-        tonic::Code::AlreadyExists => StatusCode::CONFLICT,
-        tonic::Code::FailedPrecondition => StatusCode::CONFLICT,
-        tonic::Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
-        tonic::Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
-        tonic::Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
-        tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    use tonic::Code;
+    let code = status.code();
+    let http = match code {
+        Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+        Code::PermissionDenied => StatusCode::FORBIDDEN,
+        Code::NotFound => StatusCode::NOT_FOUND,
+        Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        Code::AlreadyExists => StatusCode::CONFLICT,
+        Code::FailedPrecondition => StatusCode::CONFLICT,
+        Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+        Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
+        Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
+        Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    (
-        http,
-        Json(serde_json::json!({"error": status.message()})),
-    )
-        .into_response()
+
+    // Only forward the message for codes whose messages are known to come from
+    // our own handlers (validation errors, permission denials, etc). Internal /
+    // Unknown / DataLoss / Unavailable often carry raw DB or network error
+    // strings — those get a generic response and a server-side log entry.
+    let is_safe = matches!(
+        code,
+        Code::Unauthenticated
+            | Code::PermissionDenied
+            | Code::NotFound
+            | Code::InvalidArgument
+            | Code::AlreadyExists
+            | Code::FailedPrecondition
+            | Code::ResourceExhausted
+            | Code::DeadlineExceeded
+            | Code::Unimplemented
+    );
+    let msg = if is_safe {
+        status.message().to_string()
+    } else {
+        tracing::error!(
+            code = ?code,
+            upstream_msg = status.message(),
+            "upstream gRPC error — masking from client"
+        );
+        "internal server error".to_string()
+    };
+
+    (http, Json(serde_json::json!({"error": msg}))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -503,13 +554,21 @@ pub async fn get_raw(
 
     match grpc.get_file_content(&repo, &commit_hash, &query.path).await {
         Ok(resp) => {
-            let filename = query.path.rsplit('/').next().unwrap_or("file");
+            // Basename of the requested path. Percent-encode it for both the
+            // ASCII-fallback `filename=` and the RFC 5987 `filename*` form so
+            // a commit that contains quotes, semicolons, or non-ASCII
+            // characters cannot inject header content.
+            let raw_name = query.path.rsplit('/').next().unwrap_or("file");
+            let encoded: String =
+                utf8_percent_encode(raw_name, DISPOSITION_FILENAME).collect();
             let content_type = if resp.is_binary {
                 "application/octet-stream"
             } else {
                 "text/plain; charset=utf-8"
             };
-            let disposition = format!("attachment; filename=\"{}\"", filename);
+            let disposition = format!(
+                "attachment; filename=\"{encoded}\"; filename*=UTF-8''{encoded}"
+            );
 
             (
                 StatusCode::OK,

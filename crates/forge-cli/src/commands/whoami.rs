@@ -16,6 +16,8 @@ pub fn run(server: Option<String>) -> Result<()> {
 }
 
 async fn whoami_async(server_url: String) -> Result<()> {
+    // Same auto-switch web → gRPC as login/logout.
+    let server_url = crate::url_resolver::resolve(&server_url).await;
     let mut auth = client::connect_auth(&server_url).await?;
     let resp = auth
         .who_am_i(WhoAmIRequest {})

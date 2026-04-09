@@ -19,6 +19,15 @@ use crate::auth::UserStore;
 use crate::storage::db::MetadataDb;
 use crate::storage::fs::FsStorage;
 
+/// Log the raw error server-side and return a generic `Status::internal`.
+/// Used to avoid leaking internal error messages (SQL schema, filesystem
+/// paths, etc) to remote callers. The `label` is a short static string so
+/// log grep still works.
+fn internal_err<E: std::fmt::Display>(label: &'static str, err: E) -> Status {
+    tracing::error!(op = label, error = %err, "internal error");
+    Status::internal("internal server error")
+}
+
 pub struct ForgeGrpcService {
     pub fs: Arc<FsStorage>,
     pub db: Arc<MetadataDb>,
@@ -88,7 +97,7 @@ impl ForgeService for ForgeGrpcService {
         while let Some(chunk) = stream
             .message()
             .await
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
         {
             // Read repo from the first chunk.
             if store.is_none() {
@@ -97,7 +106,7 @@ impl ForgeService for ForgeGrpcService {
                 require_repo_write(&caller, &self.user_store, &repo)?;
                 // Auto-register repo if it doesn't exist.
                 self.db.create_repo(&repo, "")
-                    .map_err(|e| Status::internal(format!("failed to register repo: {}", e)))?;
+                    .map_err(|e| internal_err("failed to register repo", e))?;
                 store = Some(self.fs.repo_store(&repo));
             }
 
@@ -121,7 +130,7 @@ impl ForgeService for ForgeGrpcService {
                     .try_into()
                     .map_err(|_| Status::invalid_argument("invalid hash length"))?;
                 let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
-                    .map_err(|e| Status::internal(e.to_string()))?;
+                    .map_err(|e| internal_err("grpc", e))?;
 
                 let s = store.as_ref().ok_or_else(|| Status::internal("no repo specified in stream"))?;
 
@@ -139,11 +148,11 @@ impl ForgeService for ForgeGrpcService {
                         )));
                     }
                     s.put_raw(&forge_hash, &current_buf)
-                        .map_err(|e| Status::internal(e.to_string()))?;
+                        .map_err(|e| internal_err("grpc", e))?;
                 } else {
                     // Uncompressed data — compress and store.
                     s.put(&forge_hash, &current_buf)
-                        .map_err(|e| Status::internal(e.to_string()))?;
+                        .map_err(|e| internal_err("grpc", e))?;
                 }
 
                 received.push(chunk.hash.clone());
@@ -261,7 +270,7 @@ impl ForgeService for ForgeGrpcService {
         let all_refs = self
             .db
             .get_all_refs(repo)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let mut refs = std::collections::HashMap::new();
         for (name, hash) in all_refs {
@@ -284,12 +293,12 @@ impl ForgeService for ForgeGrpcService {
 
         // Auto-register repo if it doesn't exist (first push creates it).
         self.db.create_repo(repo, "")
-            .map_err(|e| Status::internal(format!("failed to register repo: {}", e)))?;
+            .map_err(|e| internal_err("failed to register repo", e))?;
 
         let success = self
             .db
             .update_ref(repo, &req.ref_name, &req.old_hash, &req.new_hash, req.force)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         // Check push triggers on successful ref update.
         if success {
@@ -324,7 +333,7 @@ impl ForgeService for ForgeGrpcService {
         let result = self
             .db
             .acquire_lock(repo, &req.path, &req.owner, &req.workspace_id, &req.reason)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         match result {
             Ok(()) => Ok(Response::new(LockResponse {
@@ -369,7 +378,7 @@ impl ForgeService for ForgeGrpcService {
         let success = self
             .db
             .release_lock(repo, &req.path, &req.owner, req.force)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         Ok(Response::new(UnlockResponse {
             success,
@@ -394,7 +403,7 @@ impl ForgeService for ForgeGrpcService {
         let locks = self
             .db
             .list_locks(repo, &req.path_prefix, &req.owner)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let lock_infos: Vec<LockInfo> = locks
             .into_iter()
@@ -424,7 +433,7 @@ impl ForgeService for ForgeGrpcService {
         let all_locks = self
             .db
             .list_locks(repo, "", "")
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let mut ours = Vec::new();
         let mut theirs = Vec::new();
@@ -471,7 +480,7 @@ impl ForgeService for ForgeGrpcService {
         let repos = self
             .db
             .list_repos()
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let mut repo_infos = Vec::new();
         for r in repos {
@@ -479,7 +488,7 @@ impl ForgeService for ForgeGrpcService {
             let all_refs = self
                 .db
                 .get_all_refs(&r.name)
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| internal_err("grpc", e))?;
 
             let branches: Vec<_> = all_refs
                 .iter()
@@ -561,7 +570,7 @@ impl ForgeService for ForgeGrpcService {
         let created = self
             .db
             .create_repo(&repo, &req.description)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         if !created {
             return Ok(Response::new(CreateRepoResponse {
@@ -628,7 +637,7 @@ impl ForgeService for ForgeGrpcService {
             Err(e) => {
                 return Ok(Response::new(UpdateRepoResponse {
                     success: false,
-                    error: e.to_string(),
+                    error: { tracing::error!(error = %e, "db error"); "internal error".to_string() },
                 }));
             }
         }
@@ -638,9 +647,10 @@ impl ForgeService for ForgeGrpcService {
         if !req.visibility.is_empty() {
             let effective = if new_name.is_empty() { repo.clone() } else { new_name.clone() };
             if let Err(e) = self.db.set_repo_visibility(&effective, &req.visibility) {
+                tracing::error!(error = %e, "set_repo_visibility failed");
                 return Ok(Response::new(UpdateRepoResponse {
                     success: false,
-                    error: format!("visibility update failed: {e}"),
+                    error: "visibility update failed".into(),
                 }));
             }
         }
@@ -648,9 +658,10 @@ impl ForgeService for ForgeGrpcService {
         // If renamed, also rename the filesystem directory.
         if !new_name.is_empty() && new_name != repo {
             if let Err(e) = self.fs.rename_repo(&repo, &new_name) {
+                tracing::error!(error = %e, "fs.rename_repo failed after db update");
                 return Ok(Response::new(UpdateRepoResponse {
                     success: false,
-                    error: format!("db updated but fs rename failed: {}", e),
+                    error: "internal error during rename".into(),
                 }));
             }
         }
@@ -688,7 +699,7 @@ impl ForgeService for ForgeGrpcService {
         let deleted = self
             .db
             .delete_repo(&repo)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         if !deleted {
             return Ok(Response::new(DeleteRepoResponse {
@@ -699,9 +710,10 @@ impl ForgeService for ForgeGrpcService {
 
         // Delete from the filesystem.
         if let Err(e) = self.fs.delete_repo(&repo) {
+            tracing::error!(error = %e, "fs.delete_repo failed after db delete");
             return Ok(Response::new(DeleteRepoResponse {
                 success: false,
-                error: format!("db deleted but fs cleanup failed: {}", e),
+                error: "internal error during delete".into(),
             }));
         }
 
@@ -728,11 +740,11 @@ impl ForgeService for ForgeGrpcService {
 
         let ref_name = format!("refs/heads/{}", if req.branch.is_empty() { "main" } else { &req.branch });
         let tip_bytes = self.db.get_ref(repo, &ref_name)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let tip = match tip_bytes {
             Some(b) => ForgeHash::from_hex(&hex::encode(&b))
-                .map_err(|e| Status::internal(e.to_string()))?,
+                .map_err(|e| internal_err("grpc", e))?,
             None => return Ok(Response::new(ListCommitsResponse { commits: vec![], total: 0 })),
         };
 
@@ -780,9 +792,9 @@ impl ForgeService for ForgeGrpcService {
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let snap = os.get_snapshot(&commit_hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         // Navigate to the requested path within the tree.
         let mut tree_hash = snap.tree;
@@ -790,7 +802,7 @@ impl ForgeService for ForgeGrpcService {
         if !req.path.is_empty() {
             for component in req.path.split('/').filter(|c| !c.is_empty()) {
                 let tree = os.get_tree(&tree_hash)
-                    .map_err(|e| Status::internal(e.to_string()))?;
+                    .map_err(|e| internal_err("grpc", e))?;
                 let entry = tree.entries.iter()
                     .find(|e| e.name == component)
                     .ok_or_else(|| Status::not_found(format!("Path not found: {}", req.path)))?;
@@ -802,7 +814,7 @@ impl ForgeService for ForgeGrpcService {
         }
 
         let tree = os.get_tree(&tree_hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let mut entries: Vec<TreeEntryInfo> = tree.entries.iter().map(|e| {
             // For .uasset/.umap files, try a quick header parse for the asset class.
@@ -857,9 +869,9 @@ impl ForgeService for ForgeGrpcService {
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let snap = os.get_snapshot(&commit_hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         // Navigate to the file.
         let mut tree_hash = snap.tree;
@@ -868,7 +880,7 @@ impl ForgeService for ForgeGrpcService {
 
         for component in dir_parts {
             let tree = os.get_tree(&tree_hash)
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| internal_err("grpc", e))?;
             let entry = tree.entries.iter()
                 .find(|e| e.name == *component)
                 .ok_or_else(|| Status::not_found(format!("Path not found: {}", req.path)))?;
@@ -876,14 +888,14 @@ impl ForgeService for ForgeGrpcService {
         }
 
         let tree = os.get_tree(&tree_hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let file_entry = tree.entries.iter()
             .find(|e| Some(e.name.as_str()) == file_name.first().copied())
             .ok_or_else(|| Status::not_found(format!("File not found: {}", req.path)))?;
 
         // Get the file content.
         let content = os.get_blob_data(&file_entry.hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let is_binary = content.iter().take(8192).any(|&b| b == 0);
         let size = content.len() as u64;
@@ -921,9 +933,9 @@ impl ForgeService for ForgeGrpcService {
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let snap = os.get_snapshot(&commit_hash)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let commit = CommitInfo {
             hash: commit_hash.to_hex(),
@@ -992,14 +1004,14 @@ impl ForgeService for ForgeGrpcService {
         let uptime = self.start_time.elapsed().as_secs() as i64;
 
         let repos = self.db.list_repos()
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let repo_names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
 
         // Count total active locks across all repos (sum per-repo).
         let mut total_locks = 0i32;
         for r in &repos {
             let locks = self.db.list_locks(&r.name, "", "")
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| internal_err("grpc", e))?;
             total_locks += locks.len() as i32;
         }
 
@@ -1027,7 +1039,7 @@ impl ForgeService for ForgeGrpcService {
         let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let workflows = self.db.list_workflows(repo)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let infos = workflows.into_iter().map(|w| WorkflowInfo {
             id: w.id, repo: w.repo, name: w.name, yaml: w.yaml,
             enabled: w.enabled, created_at: w.created_at, updated_at: w.updated_at,
@@ -1052,7 +1064,7 @@ impl ForgeService for ForgeGrpcService {
         }
         match self.db.create_workflow(repo, &req.name, &req.yaml) {
             Ok(id) => Ok(Response::new(CreateWorkflowResponse { success: true, error: String::new(), id })),
-            Err(e) => Ok(Response::new(CreateWorkflowResponse { success: false, error: e.to_string(), id: 0 })),
+            Err(e) => Ok(Response::new(CreateWorkflowResponse { success: false, error: { tracing::error!(error = %e, "db error"); "internal error".to_string() }, id: 0 })),
         }
     }
 
@@ -1064,7 +1076,7 @@ impl ForgeService for ForgeGrpcService {
         let req = request.into_inner();
         // Look up the workflow's repo so we can authz against it.
         let workflow = self.db.get_workflow(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Workflow not found"))?;
         require_repo_admin(&caller, &self.user_store, &workflow.repo)?;
         if !req.yaml.is_empty() {
@@ -1077,7 +1089,7 @@ impl ForgeService for ForgeGrpcService {
         match self.db.update_workflow(req.id, &req.name, &req.yaml, req.enabled) {
             Ok(true) => Ok(Response::new(UpdateWorkflowResponse { success: true, error: String::new() })),
             Ok(false) => Ok(Response::new(UpdateWorkflowResponse { success: false, error: "Workflow not found".into() })),
-            Err(e) => Ok(Response::new(UpdateWorkflowResponse { success: false, error: e.to_string() })),
+            Err(e) => { tracing::error!(error = %e, "update_workflow"); Ok(Response::new(UpdateWorkflowResponse { success: false, error: "internal error".into() })) },
         }
     }
 
@@ -1088,13 +1100,13 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let workflow = self.db.get_workflow(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Workflow not found"))?;
         require_repo_admin(&caller, &self.user_store, &workflow.repo)?;
         match self.db.delete_workflow(req.id) {
             Ok(true) => Ok(Response::new(DeleteWorkflowResponse { success: true, error: String::new() })),
             Ok(false) => Ok(Response::new(DeleteWorkflowResponse { success: false, error: "Workflow not found".into() })),
-            Err(e) => Ok(Response::new(DeleteWorkflowResponse { success: false, error: e.to_string() })),
+            Err(e) => { tracing::error!(error = %e, "delete_workflow"); Ok(Response::new(DeleteWorkflowResponse { success: false, error: "internal error".into() })) },
         }
     }
 
@@ -1109,7 +1121,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let workflow = self.db.get_workflow(req.workflow_id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Workflow not found"))?;
         require_repo_write(&caller, &self.user_store, &workflow.repo)?;
         if !workflow.enabled {
@@ -1128,13 +1140,13 @@ impl ForgeService for ForgeGrpcService {
         // Resolve commit hash from the ref.
         let ref_name = if req.ref_name.is_empty() { "refs/heads/main".to_string() } else { req.ref_name };
         let commit_hash = self.db.get_ref(&workflow.repo, &ref_name)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .map(|h| hex::encode(&h))
             .unwrap_or_default();
 
         let run_id = self.db.create_run(
             &workflow.repo, workflow.id, "manual", &ref_name, &commit_hash, &req.triggered_by,
-        ).map_err(|e| Status::internal(e.to_string()))?;
+        ).map_err(|e| internal_err("grpc", e))?;
 
         // Queue the run for execution (engine integration in Phase 3).
         if let Some(engine) = &self.workflow_engine {
@@ -1154,7 +1166,7 @@ impl ForgeService for ForgeGrpcService {
         let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (runs, total) = self.db.list_runs(repo, req.workflow_id, req.limit, req.offset)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let infos = runs.into_iter().map(|r| WorkflowRunInfo {
             id: r.id, repo: r.repo, workflow_id: r.workflow_id,
             workflow_name: r.workflow_name, trigger: r.trigger,
@@ -1173,13 +1185,13 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let run = self.db.get_run(req.run_id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Run not found"))?;
         require_repo_read(&caller, &self.user_store, &run.repo, self.db.is_repo_public(&run.repo))?;
         let steps = self.db.list_steps(req.run_id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let artifacts_list = self.db.list_artifacts(req.run_id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let run_info = WorkflowRunInfo {
             id: run.id, repo: run.repo, workflow_id: run.workflow_id,
@@ -1212,7 +1224,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let run = self.db.get_run(req.run_id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Run not found"))?;
         require_repo_write(&caller, &self.user_store, &run.repo)?;
         if run.status != "queued" && run.status != "running" {
@@ -1221,7 +1233,7 @@ impl ForgeService for ForgeGrpcService {
             }));
         }
         self.db.update_run_status(req.run_id, "cancelled")
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(CancelWorkflowRunResponse { success: true, error: String::new() }))
     }
 
@@ -1237,11 +1249,11 @@ impl ForgeService for ForgeGrpcService {
         let req = request.into_inner();
         // Look up the run so we know which repo this artifact list belongs to.
         let run = self.db.get_run(req.run_id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Run not found"))?;
         require_repo_read(&caller, &self.user_store, &run.repo, self.db.is_repo_public(&run.repo))?;
         let artifacts = self.db.list_artifacts(req.run_id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let infos = artifacts.into_iter().map(|a| ArtifactInfo {
             id: a.id, run_id: a.run_id, name: a.name,
             size_bytes: a.size_bytes, created_at: a.created_at,
@@ -1259,11 +1271,11 @@ impl ForgeService for ForgeGrpcService {
         let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let releases = self.db.list_releases(repo)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let mut infos = Vec::new();
         for r in releases {
             let artifact_ids = self.db.get_release_artifact_ids(r.id)
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| internal_err("grpc", e))?;
             let mut artifacts = Vec::new();
             for aid in artifact_ids {
                 if let Ok(Some(a)) = self.db.get_artifact(aid) {
@@ -1288,11 +1300,11 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let r = self.db.get_release(req.release_id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Release not found"))?;
         require_repo_read(&caller, &self.user_store, &r.repo, self.db.is_repo_public(&r.repo))?;
         let artifact_ids = self.db.get_release_artifact_ids(r.id)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         let mut artifacts = Vec::new();
         for aid in artifact_ids {
             if let Ok(Some(a)) = self.db.get_artifact(aid) {
@@ -1323,7 +1335,7 @@ impl ForgeService for ForgeGrpcService {
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (issues, total, open_count, closed_count) = self.db
             .list_issues(repo, &req.status, req.limit, req.offset)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let infos: Vec<IssueInfo> = issues.into_iter().map(|i| {
             let labels = if i.labels.is_empty() { vec![] } else {
@@ -1351,7 +1363,7 @@ impl ForgeService for ForgeGrpcService {
         require_repo_write(&caller, &self.user_store, repo)?;
         let labels = req.labels.join(",");
         let id = self.db.create_issue(repo, &req.title, &req.body, &req.author, &labels)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(CreateIssueResponse { success: true, error: String::new(), id }))
     }
 
@@ -1363,12 +1375,12 @@ impl ForgeService for ForgeGrpcService {
         let req = request.into_inner();
         // Look up the issue's repo before mutating.
         let issue = self.db.get_issue(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Issue not found"))?;
         require_repo_write(&caller, &self.user_store, &issue.repo)?;
         let labels = req.labels.join(",");
         let ok = self.db.update_issue(req.id, &req.title, &req.body, &req.status, &labels, &req.assignee)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         if !ok {
             return Ok(Response::new(UpdateIssueResponse { success: false, error: "Issue not found".into() }));
         }
@@ -1388,7 +1400,7 @@ impl ForgeService for ForgeGrpcService {
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (prs, total, open_count, closed_count) = self.db
             .list_pull_requests(repo, &req.status, req.limit, req.offset)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         let infos: Vec<PullRequestInfo> = prs.into_iter().map(|p| {
             let labels = if p.labels.is_empty() { vec![] } else {
@@ -1419,7 +1431,7 @@ impl ForgeService for ForgeGrpcService {
         let id = self.db.create_pull_request(
             repo, &req.title, &req.body, &req.author,
             &req.source_branch, &req.target_branch, &labels,
-        ).map_err(|e| Status::internal(e.to_string()))?;
+        ).map_err(|e| internal_err("grpc", e))?;
         Ok(Response::new(CreatePullRequestResponse { success: true, error: String::new(), id }))
     }
 
@@ -1430,12 +1442,12 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let pr = self.db.get_pull_request(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Pull request not found"))?;
         require_repo_write(&caller, &self.user_store, &pr.repo)?;
         let labels = req.labels.join(",");
         let ok = self.db.update_pull_request(req.id, &req.title, &req.body, &req.status, &labels, &req.assignee)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
         if !ok {
             return Ok(Response::new(UpdatePullRequestResponse { success: false, error: "Pull request not found".into() }));
         }
@@ -1453,7 +1465,7 @@ impl ForgeService for ForgeGrpcService {
 
         // Get the PR to find source/target branches
         let pr = self.db.get_pull_request(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Pull request not found"))?;
         require_repo_write(&caller, &self.user_store, &pr.repo)?;
 
@@ -1467,20 +1479,20 @@ impl ForgeService for ForgeGrpcService {
         // Get the source branch HEAD hash
         let source_ref = format!("refs/heads/{}", pr.source_branch);
         let source_hash = self.db.get_ref(&pr.repo, &source_ref)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found(format!("Source branch '{}' not found", pr.source_branch)))?;
 
         // Get the target branch HEAD hash
         let target_ref = format!("refs/heads/{}", pr.target_branch);
         let target_hash = self.db.get_ref(&pr.repo, &target_ref)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found(format!("Target branch '{}' not found", pr.target_branch)))?;
 
         // Fast-forward merge: CAS-update target branch to point to source
         // branch's HEAD. force = false: a merge that races with a direct
         // push to the target branch should fail and the user can retry.
         let updated = self.db.update_ref(&pr.repo, &target_ref, &target_hash, &source_hash, false)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         if !updated {
             return Ok(Response::new(MergePullRequestResponse {
@@ -1491,7 +1503,7 @@ impl ForgeService for ForgeGrpcService {
 
         // Mark PR as merged
         self.db.update_pull_request(req.id, "", "", "merged", "", "")
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| internal_err("grpc", e))?;
 
         Ok(Response::new(MergePullRequestResponse { success: true, error: String::new() }))
     }
@@ -1505,7 +1517,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let issue = self.db.get_issue(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Issue not found"))?;
         require_repo_read(&caller, &self.user_store, &issue.repo, self.db.is_repo_public(&issue.repo))?;
 
@@ -1529,7 +1541,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let pr = self.db.get_pull_request(req.id)
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| internal_err("grpc", e))?
             .ok_or_else(|| Status::not_found("Pull request not found"))?;
         require_repo_read(&caller, &self.user_store, &pr.repo, self.db.is_repo_public(&pr.repo))?;
 

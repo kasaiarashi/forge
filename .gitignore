@@ -3,3 +3,14 @@ dist/
 forge-web.toml
 !installers/config/forge-web.toml
 !docker/forge-web.toml
+
+# Auto-generated TLS keys/certs from [server.tls].auto_generate or
+# [web.tls].auto_generate. Never commit private keys.
+forge-web-certs/
+forge-data/
+*.pem
+*.key
+!proto/*.proto
+
+# Local MSVC env-setup script — operator-specific paths.
+_build_temp.bat

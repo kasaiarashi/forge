@@ -21,6 +21,10 @@ pub fn run(server: Option<String>) -> Result<()> {
 }
 
 async fn logout_async(server_url: String) -> Result<()> {
+    // Resolve web → gRPC so we delete the credential under the same key
+    // `forge login` saved it. Otherwise a user who logged in via the web
+    // URL and then logged out via the same URL would leave a stale PAT.
+    let server_url = crate::url_resolver::resolve(&server_url).await;
     // Best-effort server-side revocation. We swallow errors here because the
     // local credential cleanup is the operation the user actually asked for.
     if credentials::load(&server_url)?.is_some() {

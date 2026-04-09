@@ -69,7 +69,7 @@ fn resolve_token(store: &dyn UserStore, plaintext: &str) -> Result<Caller, Statu
     if plaintext.starts_with(PAT_PREFIX) {
         match store
             .find_pat_by_plaintext(plaintext)
-            .map_err(|e| Status::internal(format!("token lookup failed: {e}")))?
+            .map_err(|e| { tracing::error!(error = %e, "token lookup"); Status::internal("internal server error") })?
         {
             Some((pat, user)) => {
                 // Best-effort touch — don't fail the request if it errors.
@@ -87,7 +87,7 @@ fn resolve_token(store: &dyn UserStore, plaintext: &str) -> Result<Caller, Statu
     } else if plaintext.starts_with(SESSION_PREFIX) {
         match store
             .find_session_by_plaintext(plaintext)
-            .map_err(|e| Status::internal(format!("session lookup failed: {e}")))?
+            .map_err(|e| { tracing::error!(error = %e, "session lookup"); Status::internal("internal server error") })?
         {
             Some((session, user)) => {
                 let _ = store.touch_session(session.id);

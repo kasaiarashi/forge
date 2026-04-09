@@ -24,6 +24,7 @@ interface AuthContextType {
     email: string;
     display_name: string;
     password: string;
+    bootstrap_token: string;
   }) => Promise<void>;
 }
 
@@ -66,6 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     email: string;
     display_name: string;
     password: string;
+    bootstrap_token: string;
   }) => {
     await api.bootstrapAdmin(input);
     // Mark the server initialized immediately so the gate flips before
