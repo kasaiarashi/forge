@@ -24,6 +24,12 @@ import IssueDetail from './pages/IssueDetail';
 import PullRequests from './pages/PullRequests';
 import NewPullRequest from './pages/NewPullRequest';
 import PullRequestDetail from './pages/PullRequestDetail';
+import Terms from './pages/Terms';
+import Privacy from './pages/Privacy';
+import Security from './pages/Security';
+import Status from './pages/Status';
+import Docs from './pages/Docs';
+import Contact from './pages/Contact';
 
 
 function FullPageSpinner() {
@@ -103,6 +109,18 @@ export default function App() {
           path="/login"
           element={<RequireSetup><Login /></RequireSetup>}
         />
+
+        {/* Public footer pages — no auth gate so the login screen can
+            link to them. They sit BEFORE the catch-all /:owner/:repo
+            route so React Router matches the literal path first; the
+            same names are reserved as user/repo segments by validate.rs
+            on the server side. */}
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/privacy" element={<Privacy />} />
+        <Route path="/security" element={<Security />} />
+        <Route path="/status" element={<Status />} />
+        <Route path="/docs" element={<Docs />} />
+        <Route path="/contact" element={<Contact />} />
 
         <Route path="/" element={<Authenticated><Dashboard /></Authenticated>} />
         <Route path="/admin" element={<Authenticated><Admin /></Authenticated>} />

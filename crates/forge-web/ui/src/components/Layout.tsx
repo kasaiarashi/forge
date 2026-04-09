@@ -143,21 +143,38 @@ export default function Layout({ children }: LayoutProps) {
       </main>
 
       <footer className="forge-footer" style={{ borderTop: 'none', marginTop: '40px', paddingTop: '40px', paddingBottom: '40px', maxWidth: '1012px', margin: '40px auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <span style={{ color: 'var(--fg-muted)', display: 'flex' }}><RepoIcon size={24} /></span>
-          <span>© 2026 Forge VCS</span>
+          {/* Slight extra spacing after the © glyph using a non-breaking
+              space so it doesn't visually crowd the year. */}
+          <span style={{ marginLeft: '4px' }}>©&nbsp; 2026 Forge VCS</span>
         </div>
         <div style={{ display: 'flex', gap: '16px' }}>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Terms</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Privacy</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Security</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Status</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Docs</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Contact</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Manage cookies</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Do not share my personal information</a>
+          <FooterLink to="/terms">Terms</FooterLink>
+          <FooterLink to="/privacy">Privacy</FooterLink>
+          <FooterLink to="/security">Security</FooterLink>
+          <FooterLink to="/status">Status</FooterLink>
+          <FooterLink to="/docs">Docs</FooterLink>
+          <FooterLink to="/contact">Contact</FooterLink>
         </div>
       </footer>
     </div>
+  );
+}
+
+/**
+ * Footer link styled like the rest of the footer row, but routed via
+ * react-router so navigation stays inside the SPA (no full-page reload).
+ */
+function FooterLink({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      style={{ color: 'var(--fg-accent)', textDecoration: 'none' }}
+      onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+      onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}
+    >
+      {children}
+    </Link>
   );
 }

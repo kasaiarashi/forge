@@ -3,6 +3,20 @@ export interface User {
   is_admin: boolean;
 }
 
+/**
+ * Server-side user record returned by `/api/auth/users` (admin only) and
+ * other admin endpoints. Distinct from the lighter [`User`] which is the
+ * shape `/api/auth/me` returns for the SPA's own session — `User` predates
+ * the multi-user admin surface and we don't want to retrofit it.
+ */
+export interface UserSummary {
+  id: number;
+  username: string;
+  email: string;
+  display_name: string;
+  is_server_admin: boolean;
+}
+
 export interface RepoInfo {
   name: string;
   description: string;
@@ -254,6 +268,12 @@ const api = {
     return request<{ initialized: boolean }>('/api/auth/initialized')
       .then((r) => r.initialized)
       .catch(() => false);
+  },
+  listUsers() {
+    // Server-admin only — non-admins get a 401/403, which the caller is
+    // expected to handle gracefully. Used by the Contact page to surface
+    // every active server admin's email.
+    return request<UserSummary[]>('/api/auth/users');
   },
   bootstrapAdmin(input: {
     username: string;
