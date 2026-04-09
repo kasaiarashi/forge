@@ -143,7 +143,7 @@ impl ForgeService for ForgeGrpcService {
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?.to_string();
         // TODO(phase 6): pass real `public` flag from repos.visibility.
-        require_repo_read(&caller, &self.user_store, &repo, false)?;
+        require_repo_read(&caller, &self.user_store, &repo, self.db.is_repo_public(&repo))?;
 
         const MAX_PULL_HASHES: usize = 10_000;
         if req.want_hashes.len() > MAX_PULL_HASHES {
@@ -208,7 +208,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let store = self.fs.repo_store(repo);
         let mut has = Vec::with_capacity(req.hashes.len());
 
@@ -231,7 +231,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
 
         let all_refs = self
             .db
@@ -360,7 +360,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
 
         let locks = self
             .db
@@ -388,7 +388,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
 
         // Get all locks for the requested paths.
         let all_locks = self
@@ -484,6 +484,7 @@ impl ForgeService for ForgeGrpcService {
                 last_commit_message,
                 last_commit_author,
                 last_commit_time,
+                visibility: r.visibility,
             });
         }
 
@@ -559,6 +560,23 @@ impl ForgeService for ForgeGrpcService {
             }
         }
 
+        // Apply visibility change if provided. Empty string = no change so
+        // existing callers don't break. Use the post-rename name (effective
+        // name) so it works alongside a rename in the same call.
+        if !req.visibility.is_empty() {
+            let effective = if req.new_name.is_empty() {
+                req.name.clone()
+            } else {
+                req.new_name.clone()
+            };
+            if let Err(e) = self.db.set_repo_visibility(&effective, &req.visibility) {
+                return Ok(Response::new(UpdateRepoResponse {
+                    success: false,
+                    error: format!("visibility update failed: {e}"),
+                }));
+            }
+        }
+
         // If renamed, also rename the filesystem directory.
         if !req.new_name.is_empty() && req.new_name != req.name {
             if let Err(e) = self.fs.rename_repo(&req.name, &req.new_name) {
@@ -628,7 +646,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let os = self.object_store(repo);
 
         let ref_name = format!("refs/heads/{}", if req.branch.is_empty() { "main" } else { &req.branch });
@@ -680,7 +698,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
@@ -756,7 +774,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
@@ -819,7 +837,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let os = self.object_store(repo);
 
         let commit_hash = ForgeHash::from_hex(&req.commit_hash)
@@ -926,7 +944,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let workflows = self.db.list_workflows(repo)
             .map_err(|e| Status::internal(e.to_string()))?;
         let infos = workflows.into_iter().map(|w| WorkflowInfo {
@@ -1051,7 +1069,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (runs, total) = self.db.list_runs(repo, req.workflow_id, req.limit, req.offset)
             .map_err(|e| Status::internal(e.to_string()))?;
         let infos = runs.into_iter().map(|r| WorkflowRunInfo {
@@ -1074,7 +1092,7 @@ impl ForgeService for ForgeGrpcService {
         let run = self.db.get_run(req.run_id)
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Run not found"))?;
-        require_repo_read(&caller, &self.user_store, &run.repo, false)?;
+        require_repo_read(&caller, &self.user_store, &run.repo, self.db.is_repo_public(&run.repo))?;
         let steps = self.db.list_steps(req.run_id)
             .map_err(|e| Status::internal(e.to_string()))?;
         let artifacts_list = self.db.list_artifacts(req.run_id)
@@ -1138,7 +1156,7 @@ impl ForgeService for ForgeGrpcService {
         let run = self.db.get_run(req.run_id)
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Run not found"))?;
-        require_repo_read(&caller, &self.user_store, &run.repo, false)?;
+        require_repo_read(&caller, &self.user_store, &run.repo, self.db.is_repo_public(&run.repo))?;
         let artifacts = self.db.list_artifacts(req.run_id)
             .map_err(|e| Status::internal(e.to_string()))?;
         let infos = artifacts.into_iter().map(|a| ArtifactInfo {
@@ -1155,7 +1173,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let releases = self.db.list_releases(repo)
             .map_err(|e| Status::internal(e.to_string()))?;
         let mut infos = Vec::new();
@@ -1188,7 +1206,7 @@ impl ForgeService for ForgeGrpcService {
         let r = self.db.get_release(req.release_id)
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Release not found"))?;
-        require_repo_read(&caller, &self.user_store, &r.repo, false)?;
+        require_repo_read(&caller, &self.user_store, &r.repo, self.db.is_repo_public(&r.repo))?;
         let artifact_ids = self.db.get_release_artifact_ids(r.id)
             .map_err(|e| Status::internal(e.to_string()))?;
         let mut artifacts = Vec::new();
@@ -1217,7 +1235,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (issues, total, open_count, closed_count) = self.db
             .list_issues(repo, &req.status, req.limit, req.offset)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -1280,7 +1298,7 @@ impl ForgeService for ForgeGrpcService {
         let caller = caller_of(&request);
         let req = request.into_inner();
         let repo = repo_name(&req.repo)?;
-        require_repo_read(&caller, &self.user_store, repo, false)?;
+        require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (prs, total, open_count, closed_count) = self.db
             .list_pull_requests(repo, &req.status, req.limit, req.offset)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -1399,7 +1417,7 @@ impl ForgeService for ForgeGrpcService {
         let issue = self.db.get_issue(req.id)
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Issue not found"))?;
-        require_repo_read(&caller, &self.user_store, &issue.repo, false)?;
+        require_repo_read(&caller, &self.user_store, &issue.repo, self.db.is_repo_public(&issue.repo))?;
 
         let labels = if issue.labels.is_empty() { vec![] } else {
             issue.labels.split(',').map(|s| s.trim().to_string()).collect()
@@ -1423,7 +1441,7 @@ impl ForgeService for ForgeGrpcService {
         let pr = self.db.get_pull_request(req.id)
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Pull request not found"))?;
-        require_repo_read(&caller, &self.user_store, &pr.repo, false)?;
+        require_repo_read(&caller, &self.user_store, &pr.repo, self.db.is_repo_public(&pr.repo))?;
 
         let labels = if pr.labels.is_empty() { vec![] } else {
             pr.labels.split(',').map(|s| s.trim().to_string()).collect()

@@ -36,6 +36,7 @@ struct RepoInfoJson {
     last_commit_message: String,
     last_commit_author: String,
     last_commit_time: i64,
+    visibility: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +49,8 @@ pub struct CreateRepoBody {
 pub struct UpdateRepoBody {
     pub new_name: Option<String>,
     pub description: Option<String>,
+    /// "private" | "public" | None (no change)
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,6 +181,7 @@ pub async fn list_repos(State(state): State<Arc<AppState>>) -> Response {
                     last_commit_message: r.last_commit_message,
                     last_commit_author: r.last_commit_author,
                     last_commit_time: r.last_commit_time,
+                    visibility: r.visibility,
                 })
                 .collect();
             (StatusCode::OK, Json(repos)).into_response()
@@ -230,8 +234,9 @@ pub async fn update_repo(
 
     let new_name = body.new_name.unwrap_or_default();
     let description = body.description.unwrap_or_default();
+    let visibility = body.visibility.unwrap_or_default();
 
-    match grpc.update_repo(&repo, &new_name, &description).await {
+    match grpc.update_repo(&repo, &new_name, &description, &visibility).await {
         Ok(resp) => {
             if resp.success {
                 (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()

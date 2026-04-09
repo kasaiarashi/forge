@@ -110,6 +110,7 @@ impl ForgeGrpcClient {
         name: &str,
         new_name: &str,
         description: &str,
+        visibility: &str,
     ) -> anyhow::Result<UpdateRepoResponse> {
         let mut client = self.forge();
         let resp = client
@@ -117,6 +118,7 @@ impl ForgeGrpcClient {
                 name: name.to_string(),
                 new_name: new_name.to_string(),
                 description: description.to_string(),
+                visibility: visibility.to_string(),
             })
             .await?;
         Ok(resp.into_inner())

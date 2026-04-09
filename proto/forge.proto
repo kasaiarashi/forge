@@ -362,6 +362,7 @@ message RepoInfo {
     string last_commit_message = 6;
     string last_commit_author = 7;
     int64 last_commit_time = 8;
+    string visibility = 9;          // "private" | "public"
 }
 
 message CreateRepoRequest {
@@ -378,6 +379,7 @@ message UpdateRepoRequest {
     string name = 1;           // current repo name
     string new_name = 2;       // new name (empty = no rename)
     string description = 3;    // new description
+    string visibility = 4;     // "private" | "public" — empty = no change
 }
 
 message UpdateRepoResponse {

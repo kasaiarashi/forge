@@ -156,12 +156,14 @@ impl MetadataDb {
 
     pub fn list_repos(&self) -> Result<Vec<RepoRecord>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT name, description, created_at FROM repos")?;
+        let mut stmt =
+            conn.prepare("SELECT name, description, created_at, visibility FROM repos")?;
         let rows = stmt.query_map([], |row| {
             Ok(RepoRecord {
                 name: row.get(0)?,
                 description: row.get(1)?,
                 created_at: row.get(2)?,
+                visibility: row.get(3)?,
             })
         })?;
         let mut result = Vec::new();
@@ -169,6 +171,40 @@ impl MetadataDb {
             result.push(row?);
         }
         Ok(result)
+    }
+
+    /// Read the visibility flag for a single repo. Returns `None` if the
+    /// repo doesn't exist. Used by the gRPC interceptor's read-path authz
+    /// check to allow anonymous clones of public repos.
+    pub fn get_repo_visibility(&self, name: &str) -> Result<Option<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT visibility FROM repos WHERE name = ?1")?;
+        let result = stmt
+            .query_row([name], |row| row.get::<_, String>(0))
+            .ok();
+        Ok(result)
+    }
+
+    /// Returns true if the repo is publicly readable (anonymous clone/pull
+    /// allowed). Returns false for private repos and for repos that don't
+    /// exist — the latter is fine because the read handler will fail later
+    /// with NotFound.
+    pub fn is_repo_public(&self, name: &str) -> bool {
+        matches!(self.get_repo_visibility(name).ok().flatten().as_deref(), Some("public"))
+    }
+
+    /// Set the visibility of a repo. Returns true on success, false if the
+    /// repo doesn't exist.
+    pub fn set_repo_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        if visibility != "private" && visibility != "public" {
+            anyhow::bail!("visibility must be 'private' or 'public'");
+        }
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE repos SET visibility = ?1 WHERE name = ?2",
+            rusqlite::params![visibility, name],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn create_repo(&self, name: &str, description: &str) -> Result<bool> {
@@ -608,4 +644,5 @@ pub struct RepoRecord {
     pub name: String,
     pub description: String,
     pub created_at: i64,
+    pub visibility: String,
 }
