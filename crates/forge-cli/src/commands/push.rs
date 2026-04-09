@@ -179,25 +179,22 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         }
     }
 
-    // Update remote ref.
-    let old_hash_for_cas = if force {
-        remote_tip_bytes.clone()
-    } else {
-        remote_tip_bytes
-    };
-
+    // Update remote ref. Pass `force` through so the server knows whether
+    // to do an atomic compare-and-swap (default) or an unconditional
+    // overwrite (--force).
     let update_resp = client
         .update_ref(UpdateRefRequest {
             repo: repo_name.to_string(),
             ref_name: ref_name.clone(),
-            old_hash: old_hash_for_cas.clone(),
+            old_hash: remote_tip_bytes.clone(),
             new_hash: local_tip.as_bytes().to_vec(),
+            force,
         })
         .await?
         .into_inner();
 
     if update_resp.success {
-        let remote_short = ForgeHash::from_hex(&hex::encode(&old_hash_for_cas))
+        let remote_short = ForgeHash::from_hex(&hex::encode(&remote_tip_bytes))
             .map(|h| h.short())
             .unwrap_or_else(|_| "(new)".to_string());
         if force {
@@ -211,9 +208,18 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
                 remote_short, local_tip.short(), branch, remote_name, branch
             );
         }
+    } else if force {
+        bail!(
+            "Force push to {} rejected: {}.",
+            ref_name,
+            update_resp.error
+        );
     } else {
         bail!(
-            "Failed to update ref: {}. Someone else may have pushed.",
+            "Push to {} rejected: {}.\n\
+             Pull and rebase, then push again — or use `forge push --force` \
+             to overwrite the remote (rewrites history; use with care).",
+            ref_name,
             update_resp.error
         );
     }

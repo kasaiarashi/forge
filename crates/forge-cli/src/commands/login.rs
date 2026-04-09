@@ -18,10 +18,61 @@
 //! their credential lives in the OS keychain or `~/.forge/credentials`.
 
 use anyhow::{anyhow, bail, Context, Result};
-use forge_proto::forge::{CreatePatRequest, LoginRequest, WhoAmIRequest};
+use forge_proto::forge::{CreatePatRequest, LoginRequest, UserInfo, WhoAmIRequest};
 
 use crate::client;
 use crate::credentials::{self, Credential};
+
+/// Write the logged-in user's identity back into the current workspace
+/// config (if any), so future `forge commit` calls attribute commits to
+/// the real server user — not the OS username that `forge init` prefilled.
+///
+/// Called at the end of both login paths. No-op when:
+///   - the CLI wasn't invoked inside a workspace (no .forge dir), OR
+///   - the workspace's default remote points somewhere else than the URL
+///     we just logged into (so we don't clobber the identity for a
+///     workspace associated with a *different* server).
+fn update_workspace_identity(server_url: &str, user: &UserInfo) {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let ws = match forge_core::workspace::Workspace::discover(&cwd) {
+        Ok(w) => w,
+        Err(_) => return, // not inside a workspace, nothing to do
+    };
+    let mut config = match ws.config() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    // Only update when the workspace is actually targeting the server we
+    // just authenticated against.
+    let same_server = config
+        .default_remote_url()
+        .map(|u| u == server_url)
+        .unwrap_or(false);
+    if !same_server {
+        return;
+    }
+    // Prefer the display_name for name — fall back to username only if the
+    // server didn't give us one (shouldn't happen after the setup wizard
+    // but be defensive).
+    let name = if !user.display_name.is_empty() {
+        user.display_name.clone()
+    } else {
+        user.username.clone()
+    };
+    if config.user.name != name || config.user.email != user.email {
+        config.user.name = name;
+        config.user.email = user.email.clone();
+        if ws.save_config(&config).is_ok() {
+            println!(
+                "Updated workspace commit identity to {} <{}>",
+                config.user.name, config.user.email
+            );
+        }
+    }
+}
 
 pub fn run(
     server: Option<String>,
@@ -51,12 +102,17 @@ async fn login_with_token(server_url: &str, token: String) -> Result<()> {
         bail!("--token cannot be empty");
     }
     // Save first so the WhoAmI call goes out with the new token attached.
+    // We use a dummy user name for the placeholder — WhoAmI will replace it
+    // with the authoritative values from the server.
     let cred = Credential {
         user: String::new(),
         token: token.clone(),
         display_name: String::new(),
         email: String::new(),
     };
+    // Before saving, forget any previous credential for this server so a
+    // stale PAT can't shadow the new one during the WhoAmI round-trip.
+    let _ = credentials::delete(server_url);
     credentials::save(server_url, &cred)?;
 
     // Verify by calling WhoAmI.
@@ -85,8 +141,14 @@ async fn login_with_token(server_url: &str, token: String) -> Result<()> {
         email: user.email.clone(),
     };
     let backend = credentials::save(server_url, &cred)?;
-    println!("Logged in to {} as {}", server_url, user.username);
+    println!(
+        "Logged in to {} as {} <{}>",
+        server_url,
+        if user.display_name.is_empty() { &user.username } else { &user.display_name },
+        user.email
+    );
     println!("Token stored in {backend}");
+    update_workspace_identity(server_url, &user);
     Ok(())
 }
 
@@ -119,8 +181,17 @@ async fn login_interactive(
         bail!("password is required");
     }
 
-    // Step 1: log in with username/password to get a session token.
-    let mut auth = client::connect_auth(server_url).await?;
+    // Forget any previous credential for this server FIRST. A stale PAT in
+    // the OS keychain (e.g. from a previous install, or after the server's
+    // users DB was reset) would otherwise get attached by the regular
+    // `connect_auth` interceptor and make forge-server reject the Login RPC
+    // as "invalid or revoked token" before it ever reached the handler.
+    let _ = credentials::delete(server_url);
+
+    // Step 1: log in with username/password to get a session token. We use
+    // the anonymous client for this call specifically because the user has
+    // no valid credential yet — that's literally what we're about to mint.
+    let mut auth = client::connect_auth_anonymous(server_url).await?;
     let login_resp = auth
         .login(LoginRequest {
             username: username.clone(),
@@ -176,9 +247,15 @@ async fn login_interactive(
         .logout(forge_proto::forge::LogoutRequest {})
         .await;
 
-    println!("Logged in to {} as {}", server_url, user.username);
+    println!(
+        "Logged in to {} as {} <{}>",
+        server_url,
+        if user.display_name.is_empty() { &user.username } else { &user.display_name },
+        user.email
+    );
     println!("Created PAT '{pat_name}' with scopes repo:read, repo:write");
     println!("Token stored in {backend}");
+    update_workspace_identity(server_url, &user);
     Ok(())
 }
 

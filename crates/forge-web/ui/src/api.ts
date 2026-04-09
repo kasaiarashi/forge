@@ -250,6 +250,22 @@ const api = {
   me() {
     return request<User>('/api/auth/me').catch(() => null);
   },
+  isInitialized() {
+    return request<{ initialized: boolean }>('/api/auth/initialized')
+      .then((r) => r.initialized)
+      .catch(() => false);
+  },
+  bootstrapAdmin(input: {
+    username: string;
+    email: string;
+    display_name: string;
+    password: string;
+  }) {
+    return request<{ user: User }>('/api/auth/bootstrap', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
 
   // Repos
   listRepos() {

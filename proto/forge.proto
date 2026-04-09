@@ -278,6 +278,11 @@ message UpdateRefRequest {
     string ref_name = 2;
     bytes old_hash = 3;
     bytes new_hash = 4;
+    // When true, the server overwrites the ref unconditionally (no
+    // compare-and-swap against `old_hash`). Used by `forge push --force`
+    // to publish a rewritten history. Still gated on `repo:write` —
+    // protected-branch enforcement is a future addition.
+    bool force = 5;
 }
 
 message UpdateRefResponse {

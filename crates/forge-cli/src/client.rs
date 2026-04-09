@@ -46,6 +46,24 @@ pub async fn connect_auth(
     Ok(AuthServiceClient::with_interceptor(channel, interceptor))
 }
 
+/// Connect to the `AuthService` with NO stored credential attached.
+///
+/// Used by `forge login` itself: the user might have a stale PAT in their
+/// keychain (e.g. the server's DB was reset, or the token was revoked). If
+/// we forward that stale PAT on the Login RPC, forge-server's interceptor
+/// rejects it as "invalid or revoked token" before the login handler ever
+/// runs — making it impossible to log in again without manually clearing
+/// the keychain. An anonymous client sidesteps that.
+pub async fn connect_auth_anonymous(server_url: &str) -> Result<AuthServiceClient<Channel>> {
+    let endpoint = Endpoint::from_shared(server_url.to_string())
+        .with_context(|| format!("invalid server url '{server_url}'"))?;
+    let channel = endpoint
+        .connect()
+        .await
+        .with_context(|| format!("connect to forge server at {server_url}"))?;
+    Ok(AuthServiceClient::new(channel))
+}
+
 async fn connect_with_auth(server_url: &str) -> Result<(Channel, AuthInterceptor)> {
     let cred = credentials::load(server_url)?;
     let endpoint = Endpoint::from_shared(server_url.to_string())

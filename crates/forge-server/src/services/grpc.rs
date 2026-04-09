@@ -288,7 +288,7 @@ impl ForgeService for ForgeGrpcService {
 
         let success = self
             .db
-            .update_ref(repo, &req.ref_name, &req.old_hash, &req.new_hash)
+            .update_ref(repo, &req.ref_name, &req.old_hash, &req.new_hash, req.force)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Check push triggers on successful ref update.
@@ -1476,8 +1476,10 @@ impl ForgeService for ForgeGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found(format!("Target branch '{}' not found", pr.target_branch)))?;
 
-        // Fast-forward merge: update target branch to point to source branch's HEAD
-        let updated = self.db.update_ref(&pr.repo, &target_ref, &target_hash, &source_hash)
+        // Fast-forward merge: CAS-update target branch to point to source
+        // branch's HEAD. force = false: a merge that races with a direct
+        // push to the target branch should fail and the user can retry.
+        let updated = self.db.update_ref(&pr.repo, &target_ref, &target_hash, &source_hash, false)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         if !updated {
