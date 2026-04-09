@@ -412,11 +412,9 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 {
 	FForgeSourceControlProvider* MutableThis = const_cast<FForgeSourceControlProvider*>(this);
 
-	// Pre-fill user name from the OS so the common case ("accept defaults")
-	// actually works without typing anything.
+	// Identity (user.name / user.email) is pulled from `forge login`, so the
+	// init form only needs the remote URL.
 	TSharedRef<FString> RemoteUrlRef = MakeShared<FString>();
-	TSharedRef<FString> UserNameRef = MakeShared<FString>(FPlatformProcess::UserName());
-	TSharedRef<FString> UserEmailRef = MakeShared<FString>();
 
 	TSharedRef<SVerticalBox> Root = SNew(SVerticalBox);
 
@@ -464,9 +462,11 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 				.AutoWrapText(true)
 			];
 
-		auto MakeRow = [](const FText& Label, TSharedRef<FString> Target, const FText& Hint)
-		{
-			return SNew(SHorizontalBox)
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 4.0f)
+			[
+				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.VAlign(VAlign_Center)
@@ -475,50 +475,31 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 					SNew(SBox)
 					.WidthOverride(110.0f)
 					[
-						SNew(STextBlock).Text(Label)
+						SNew(STextBlock).Text(LOCTEXT("RemoteUrlLabel", "Remote URL:"))
 					]
 				]
 				+ SHorizontalBox::Slot()
 				.FillWidth(1.0f)
 				[
 					SNew(SEditableTextBox)
-					.Text(FText::FromString(*Target))
-					.HintText(Hint)
-					.OnTextChanged_Lambda([Target](const FText& NewText)
+					.Text(FText::FromString(*RemoteUrlRef))
+					.HintText(LOCTEXT("RemoteUrlHint", "https://server/owner/repo (optional)"))
+					.OnTextChanged_Lambda([RemoteUrlRef](const FText& NewText)
 					{
-						*Target = NewText.ToString();
+						*RemoteUrlRef = NewText.ToString();
 					})
-				];
-		};
-
-		Root->AddSlot()
-			.AutoHeight()
-			.Padding(2.0f, 4.0f)
-			[
-				MakeRow(
-					LOCTEXT("UserNameLabel", "User Name:"),
-					UserNameRef,
-					LOCTEXT("UserNameHint", "Your display name"))
+				]
 			];
 
 		Root->AddSlot()
 			.AutoHeight()
 			.Padding(2.0f, 4.0f)
 			[
-				MakeRow(
-					LOCTEXT("UserEmailLabel", "User Email:"),
-					UserEmailRef,
-					LOCTEXT("UserEmailHint", "you@example.com (optional)"))
-			];
-
-		Root->AddSlot()
-			.AutoHeight()
-			.Padding(2.0f, 4.0f)
-			[
-				MakeRow(
-					LOCTEXT("RemoteUrlLabel", "Remote URL:"),
-					RemoteUrlRef,
-					LOCTEXT("RemoteUrlHint", "https://server/owner/repo (optional)"))
+				SNew(STextBlock)
+				.Text(LOCTEXT("InitIdentityHint",
+					"Your name and email will be taken from 'forge login' — "
+					"a terminal will open to sign you in if needed."))
+				.AutoWrapText(true)
 			];
 
 		Root->AddSlot()
@@ -529,13 +510,12 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 				SNew(SButton)
 				.Text(LOCTEXT("InitButton", "Initialize Project with Forge"))
 				.ToolTipText(LOCTEXT("InitButtonTooltip",
-					"Creates a .forge workspace in the project directory, sets your user info, "
-					"and (if provided) adds an 'origin' remote."))
-				.OnClicked_Lambda([MutableThis, RemoteUrlRef, UserNameRef, UserEmailRef]()
+					"Creates a .forge workspace in the project directory and (if provided) "
+					"adds an 'origin' remote. Identity is pulled from 'forge login'."))
+				.OnClicked_Lambda([MutableThis, RemoteUrlRef]()
 				{
 					FText Error;
-					const bool bOk = MutableThis->InitializeWorkspace(
-						*RemoteUrlRef, *UserNameRef, *UserEmailRef, Error);
+					const bool bOk = MutableThis->InitializeWorkspace(*RemoteUrlRef, Error);
 
 					FNotificationInfo Info(bOk
 						? LOCTEXT("InitOk", "Forge workspace initialized.")
@@ -635,8 +615,6 @@ bool FForgeSourceControlProvider::RunForgeCommandInDir(
 
 bool FForgeSourceControlProvider::InitializeWorkspace(
 	const FString& RemoteUrl,
-	const FString& UserName,
-	const FString& UserEmail,
 	FText& OutError)
 {
 	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
@@ -656,35 +634,16 @@ bool FForgeSourceControlProvider::InitializeWorkspace(
 
 	FString StdErr;
 
-	// 1. forge init
+	// 1. forge init. Identity (user.name / user.email) is deliberately NOT
+	//    set here — `forge login` writes those into the workspace config once
+	//    the user authenticates, so any values we set would just be clobbered.
 	if (!RunForgeCommandInDir(TEXT("init"), ProjectDir, StdErr))
 	{
 		OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("forge init failed") : StdErr);
 		return false;
 	}
 
-	// 2. user.name / user.email — only set if non-empty so we don't overwrite
-	//    the CLI's whoami-derived default with a blank string.
-	if (!UserName.IsEmpty())
-	{
-		const FString Args = FString::Printf(TEXT("config set user.name \"%s\""), *UserName);
-		if (!RunForgeCommandInDir(Args, ProjectDir, StdErr))
-		{
-			OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("failed to set user.name") : StdErr);
-			return false;
-		}
-	}
-	if (!UserEmail.IsEmpty())
-	{
-		const FString Args = FString::Printf(TEXT("config set user.email \"%s\""), *UserEmail);
-		if (!RunForgeCommandInDir(Args, ProjectDir, StdErr))
-		{
-			OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("failed to set user.email") : StdErr);
-			return false;
-		}
-	}
-
-	// 3. remote add origin — optional; skip entirely if user didn't provide one.
+	// 2. remote add origin — optional; skip entirely if user didn't provide one.
 	if (!RemoteUrl.IsEmpty())
 	{
 		const FString Args = FString::Printf(TEXT("remote add origin \"%s\""), *RemoteUrl);
@@ -693,12 +652,73 @@ bool FForgeSourceControlProvider::InitializeWorkspace(
 			OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("failed to add remote") : StdErr);
 			return false;
 		}
+
+		// 3. If there's no stored credential for this remote yet, pop an
+		//    interactive terminal so the user can `forge login`. `forge login`
+		//    will then write user.name / user.email back into the workspace
+		//    config, which is why we added the remote first.
+		if (!IsLoggedInToRemote(RemoteUrl))
+		{
+			LaunchLoginShell(RemoteUrl);
+		}
 	}
 
 	// Re-run Init() so WorkspaceRoot / CurrentUserName / bIsAvailable pick up
 	// the freshly-created .forge without an editor restart.
 	Init(false);
 	return true;
+}
+
+bool FForgeSourceControlProvider::IsLoggedInToRemote(const FString& RemoteUrl) const
+{
+	int32 ReturnCode = -1;
+	FString StdOut, StdErr;
+	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	const FString Args = FString::Printf(TEXT("whoami --server \"%s\""), *RemoteUrl);
+
+	FPlatformProcess::ExecProcess(
+		*ForgeExePath, *Args,
+		&ReturnCode, &StdOut, &StdErr, *ProjectDir);
+
+	// `forge whoami` exits 0 even when anonymous and prints "Not logged in".
+	// Treat any non-zero exit (bad URL, network error, etc.) as "not logged
+	// in" so we err on the side of showing the login prompt.
+	if (ReturnCode != 0)
+	{
+		return false;
+	}
+	return !StdOut.Contains(TEXT("Not logged in"));
+}
+
+void FForgeSourceControlProvider::LaunchLoginShell(const FString& RemoteUrl) const
+{
+#if PLATFORM_WINDOWS
+	// We go through `cmd /c start cmd /k ...` so the new console is a real
+	// top-level window (UE's CreateProc otherwise gives us a DETACHED_PROCESS
+	// with no console, which is useless for an interactive prompt). The
+	// inner `/k` keeps the window open after login finishes so the user can
+	// read the "Logged in as…" / PAT-created output before closing.
+	const FString Inner = FString::Printf(
+		TEXT("\"\"%s\" login --server \"%s\"\""),
+		*ForgeExePath, *RemoteUrl);
+	const FString CmdLine = FString::Printf(
+		TEXT("/c start \"Forge Login\" cmd /k %s"),
+		*Inner);
+
+	FProcHandle Proc = FPlatformProcess::CreateProc(
+		TEXT("cmd.exe"), *CmdLine,
+		/*bLaunchDetached=*/true,
+		/*bLaunchHidden=*/true,
+		/*bLaunchReallyHidden=*/true,
+		nullptr, 0, nullptr, nullptr, nullptr);
+	if (Proc.IsValid())
+	{
+		FPlatformProcess::CloseProc(Proc);
+	}
+#else
+	// Plugin is Windows-only right now; no-op elsewhere.
+	(void)RemoteUrl;
+#endif
 }
 
 #undef LOCTEXT_NAMESPACE
