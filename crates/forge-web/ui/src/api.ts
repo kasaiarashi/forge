@@ -195,6 +195,21 @@ export interface PullRequestListResponse {
   closed_count: number;
 }
 
+/**
+ * Endpoints that we expect to be unauthenticated. A 401 from these is
+ * informational (e.g. `me()` returning null when logged out) and should NOT
+ * trigger an automatic redirect to /login. Everything else, on 401, hard-
+ * navigates to /login because the user is no longer authenticated and the
+ * page they're on can't render without data.
+ */
+const PUBLIC_AUTH_PATHS = new Set([
+  '/api/auth/login',
+  '/api/auth/me',
+  '/api/auth/initialized',
+  '/api/auth/bootstrap',
+  '/api/auth/logout',
+]);
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     credentials: 'same-origin',
@@ -202,6 +217,18 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     ...options,
   });
   if (!res.ok) {
+    // 401 on a normal data endpoint means the session expired or was
+    // revoked. Hard-redirect to /login so the user is never stranded on a
+    // page rendering "401: invalid or expired session" as a flash error.
+    // Skip the redirect for the auth endpoints themselves so the login form
+    // and the AuthContext.refresh() probe can still surface the error
+    // through their own catch handlers.
+    if (res.status === 401 && !PUBLIC_AUTH_PATHS.has(url) && typeof window !== 'undefined') {
+      // Avoid an infinite redirect loop if we're already on /login.
+      if (window.location.pathname !== '/login') {
+        window.location.assign('/login');
+      }
+    }
     const text = await res.text().catch(() => '');
     throw new Error(`${res.status}: ${text || res.statusText}`);
   }
