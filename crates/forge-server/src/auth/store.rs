@@ -164,12 +164,16 @@ pub trait UserStore: Send + Sync {
 
     // ACLs
     fn get_repo_role(&self, repo: &str, user_id: i64) -> Result<Option<RepoRole>>;
+    /// Grant or update a repo role. `granted_by` is the user id that's
+    /// recording the grant for audit purposes; pass `None` for grants that
+    /// originate from the operator-side `forge-server repo grant` CLI (where
+    /// there is no authenticated caller).
     fn set_repo_role(
         &self,
         repo: &str,
         user_id: i64,
         role: RepoRole,
-        granted_by: i64,
+        granted_by: Option<i64>,
     ) -> Result<()>;
     fn revoke_repo_role(&self, repo: &str, user_id: i64) -> Result<bool>;
     fn list_repo_members(&self, repo: &str) -> Result<Vec<(User, RepoRole)>>;
@@ -636,7 +640,7 @@ impl UserStore for SqliteUserStore {
         repo: &str,
         user_id: i64,
         role: RepoRole,
-        granted_by: i64,
+        granted_by: Option<i64>,
     ) -> Result<()> {
         let conn = self.db.conn()?;
         conn.execute(

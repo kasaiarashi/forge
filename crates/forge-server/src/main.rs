@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 mod auth;
+mod cli_admin;
 mod config;
 mod services;
 mod storage;
@@ -45,12 +46,68 @@ enum Commands {
     Init,
     /// Start the server (default)
     Serve,
+    /// Manage users
+    User {
+        #[command(subcommand)]
+        action: UserAction,
+    },
+    /// Manage per-repository access control
+    Repo {
+        #[command(subcommand)]
+        action: RepoAction,
+    },
     /// Check for updates and self-update the server
     Update {
         /// Only check for updates without installing
         #[arg(long)]
         check: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum UserAction {
+    /// Create a new user (interactive password prompt unless --password is given)
+    Add {
+        username: String,
+        /// Email address (prompted if omitted)
+        #[arg(long)]
+        email: Option<String>,
+        /// Display name (defaults to username)
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Make this user a server admin
+        #[arg(long)]
+        admin: bool,
+        /// Set the password directly without prompting (avoid in shared shells)
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// List all users
+    List,
+    /// Delete a user (cascades to their sessions, PATs, and ACL grants)
+    Delete { username: String },
+    /// Reset a user's password
+    ResetPassword {
+        username: String,
+        /// Set the password directly without prompting (avoid in shared shells)
+        #[arg(long)]
+        password: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepoAction {
+    /// Grant a user a role on a repo (read | write | admin)
+    Grant {
+        repo: String,
+        username: String,
+        /// One of: read, write, admin
+        role: String,
+    },
+    /// Revoke a user's role on a repo
+    Revoke { repo: String, username: String },
+    /// List the users that have an explicit grant on a repo
+    ListMembers { repo: String },
 }
 
 #[tokio::main]
@@ -73,8 +130,49 @@ async fn main() -> Result<()> {
             }
             std::fs::write(path, ServerConfig::generate_default())?;
             println!("Generated default config: {}", path.display());
-            println!("\nEdit it to configure storage paths, then run:");
-            println!("  forge-server serve");
+            println!("\nNext steps:");
+            println!("  1. Create the first admin:  forge-server user add --admin <username>");
+            println!("  2. Start the server:        forge-server serve");
+            return Ok(());
+        }
+        Some(Commands::User { ref action }) => {
+            let config = load_config_for_admin(&cli)?;
+            match action {
+                UserAction::Add {
+                    username,
+                    email,
+                    display_name,
+                    admin,
+                    password,
+                } => cli_admin::user_add(
+                    &config,
+                    username,
+                    email.as_deref(),
+                    display_name.as_deref(),
+                    *admin,
+                    password.as_deref(),
+                )?,
+                UserAction::List => cli_admin::user_list(&config)?,
+                UserAction::Delete { username } => cli_admin::user_delete(&config, username)?,
+                UserAction::ResetPassword { username, password } => {
+                    cli_admin::user_reset_password(&config, username, password.as_deref())?
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Repo { ref action }) => {
+            let config = load_config_for_admin(&cli)?;
+            match action {
+                RepoAction::Grant {
+                    repo,
+                    username,
+                    role,
+                } => cli_admin::repo_grant(&config, repo, username, role)?,
+                RepoAction::Revoke { repo, username } => {
+                    cli_admin::repo_revoke(&config, repo, username)?
+                }
+                RepoAction::ListMembers { repo } => cli_admin::repo_list_members(&config, repo)?,
+            }
             return Ok(());
         }
         _ => {}
@@ -146,4 +244,20 @@ async fn main() -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Load the server config the same way `serve` does, applying any global
+/// `--storage` override. Used by the `user` and `repo` admin subcommands so
+/// they hit the same database the running server would.
+fn load_config_for_admin(cli: &Cli) -> Result<ServerConfig> {
+    let config_path = std::path::Path::new(&cli.config);
+    let mut config = if config_path.exists() {
+        ServerConfig::load(config_path)?
+    } else {
+        ServerConfig::default()
+    };
+    if let Some(ref storage) = cli.storage {
+        config.storage.base_path = storage.into();
+    }
+    Ok(config)
 }

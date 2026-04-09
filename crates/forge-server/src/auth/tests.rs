@@ -325,7 +325,7 @@ fn set_and_get_repo_role() {
     let alice = make_user(&store, "alice", true);
     let bob = make_user(&store, "bob", false);
     store
-        .set_repo_role("game-data", bob.id, RepoRole::Read, alice.id)
+        .set_repo_role("game-data", bob.id, RepoRole::Read, Some(alice.id))
         .unwrap();
     assert_eq!(
         store.get_repo_role("game-data", bob.id).unwrap(),
@@ -339,10 +339,10 @@ fn set_repo_role_overwrites_existing() {
     let alice = make_user(&store, "alice", true);
     let bob = make_user(&store, "bob", false);
     store
-        .set_repo_role("game-data", bob.id, RepoRole::Read, alice.id)
+        .set_repo_role("game-data", bob.id, RepoRole::Read, Some(alice.id))
         .unwrap();
     store
-        .set_repo_role("game-data", bob.id, RepoRole::Admin, alice.id)
+        .set_repo_role("game-data", bob.id, RepoRole::Admin, Some(alice.id))
         .unwrap();
     assert_eq!(
         store.get_repo_role("game-data", bob.id).unwrap(),
@@ -356,7 +356,7 @@ fn revoke_repo_role() {
     let alice = make_user(&store, "alice", true);
     let bob = make_user(&store, "bob", false);
     store
-        .set_repo_role("game-data", bob.id, RepoRole::Write, alice.id)
+        .set_repo_role("game-data", bob.id, RepoRole::Write, Some(alice.id))
         .unwrap();
     assert!(store.revoke_repo_role("game-data", bob.id).unwrap());
     assert!(store.get_repo_role("game-data", bob.id).unwrap().is_none());
@@ -370,10 +370,10 @@ fn list_repo_members_returns_user_and_role() {
     let bob = make_user(&store, "bob", false);
     let carol = make_user(&store, "carol", false);
     store
-        .set_repo_role("game-data", bob.id, RepoRole::Write, alice.id)
+        .set_repo_role("game-data", bob.id, RepoRole::Write, Some(alice.id))
         .unwrap();
     store
-        .set_repo_role("game-data", carol.id, RepoRole::Admin, alice.id)
+        .set_repo_role("game-data", carol.id, RepoRole::Admin, Some(alice.id))
         .unwrap();
     let members = store.list_repo_members("game-data").unwrap();
     let by_user: std::collections::HashMap<_, _> = members
@@ -409,7 +409,7 @@ fn deleting_user_cascades_to_sessions_pats_and_acls() {
         .create_pat(bob.id, "ci", &[Scope::RepoRead], None)
         .unwrap();
     store
-        .set_repo_role("game-data", bob.id, RepoRole::Write, alice.id)
+        .set_repo_role("game-data", bob.id, RepoRole::Write, Some(alice.id))
         .unwrap();
 
     // MetadataDb::open enables PRAGMA foreign_keys = ON, so the
