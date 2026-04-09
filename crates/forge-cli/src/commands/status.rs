@@ -47,12 +47,11 @@ fn fetch_locks(ws: &Workspace) -> Vec<(String, String)> {
     };
 
     rt.block_on(async {
-        use forge_proto::forge::forge_service_client::ForgeServiceClient;
         use forge_proto::forge::*;
 
         // Timeout the entire lock fetch to avoid slowing down status.
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            let mut client = ForgeServiceClient::connect(server_url).await?;
+            let mut client = crate::client::connect_forge(&server_url).await?;
 
             let repo = if config.repo.is_empty() {
                 "default".into()

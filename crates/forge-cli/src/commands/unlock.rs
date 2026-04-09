@@ -3,7 +3,6 @@
 
 use anyhow::{bail, Result};
 use forge_core::workspace::Workspace;
-use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
 use serde_json::json;
 
@@ -21,7 +20,7 @@ pub fn run(path: String, force: bool, json: bool) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut client = ForgeServiceClient::connect(server_url).await?;
+        let mut client = crate::client::connect_forge(&server_url).await?;
 
         let resp = client
             .release_lock(UnlockRequest {

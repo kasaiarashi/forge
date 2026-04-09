@@ -32,3 +32,5 @@ similar.workspace = true
 indicatif.workspace = true
 self-replace.workspace = true
 minus = { version = "5", features = ["static_output"] }
+keyring = "2"
+rpassword = "7"

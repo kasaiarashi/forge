@@ -1,4 +1,6 @@
+mod client;
 mod commands;
+mod credentials;
 mod pager;
 
 use clap::{Parser, Subcommand};
@@ -309,6 +311,36 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+
+    /// Authenticate against a forge server and store the credential
+    Login {
+        /// Server URL (defaults to current workspace's remote)
+        #[arg(long)]
+        server: Option<String>,
+        /// Skip the password prompt and use this PAT directly
+        #[arg(long)]
+        token: Option<String>,
+        /// Username (skips the interactive prompt; use with --password)
+        #[arg(long, short = 'u')]
+        username: Option<String>,
+        /// Password (skips the interactive prompt; avoid in shared shells)
+        #[arg(long, short = 'p')]
+        password: Option<String>,
+    },
+
+    /// Forget the stored credential for a server (and revoke its session)
+    Logout {
+        /// Server URL (defaults to current workspace's remote)
+        #[arg(long)]
+        server: Option<String>,
+    },
+
+    /// Show the authenticated user for a forge server
+    Whoami {
+        /// Server URL (defaults to current workspace's remote)
+        #[arg(long)]
+        server: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -350,6 +382,9 @@ fn main() -> anyhow::Result<()> {
         Commands::AssetInfo { path } => commands::asset_info::run(path, cli.json)?,
         Commands::Gc { dry_run } => commands::gc::run(dry_run)?,
         Commands::Update { check } => commands::update::run(check, cli.json)?,
+        Commands::Login { server, token, username, password } => commands::login::run(server, token, username, password)?,
+        Commands::Logout { server } => commands::logout::run(server)?,
+        Commands::Whoami { server } => commands::whoami::run(server)?,
     }
 
     Ok(())

@@ -4,7 +4,6 @@
 use anyhow::{bail, Result};
 use forge_core::hash::ForgeHash;
 use forge_core::workspace::Workspace;
-use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
@@ -35,7 +34,7 @@ pub fn run(force: bool) -> Result<()> {
 }
 
 async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_name: &str, force: bool) -> Result<()> {
-    let mut client = ForgeServiceClient::connect(server_url.to_string()).await?;
+    let mut client = crate::client::connect_forge(server_url).await?;
 
     // Get current branch and its tip.
     let branch = ws

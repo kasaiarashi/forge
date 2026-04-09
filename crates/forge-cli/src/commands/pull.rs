@@ -6,7 +6,6 @@ use forge_core::diff::flatten_tree;
 use forge_core::hash::ForgeHash;
 use forge_core::index::{Index, IndexEntry};
 use forge_core::workspace::Workspace;
-use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -38,7 +37,7 @@ pub fn run_with_workspace(ws: &Workspace) -> Result<()> {
 }
 
 async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result<()> {
-    let mut client = ForgeServiceClient::connect(server_url.to_string()).await?;
+    let mut client = crate::client::connect_forge(server_url).await?;
 
     let branch = ws
         .current_branch()?
