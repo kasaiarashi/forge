@@ -23,10 +23,6 @@ pub struct ServerConfig {
     /// Actions/workflow engine settings.
     #[serde(default)]
     pub actions: ActionsSection,
-
-    /// Authentication settings.
-    #[serde(default)]
-    pub auth: AuthSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,23 +63,6 @@ pub struct RepoConfig {
 
     /// Optional description.
     pub description: Option<String>,
-}
-
-/// Authentication settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthSection {
-    /// Enable authentication (default: false for backward compatibility).
-    #[serde(default)]
-    pub enabled: bool,
-    /// List of valid bearer tokens.
-    #[serde(default)]
-    pub tokens: Vec<String>,
-}
-
-impl Default for AuthSection {
-    fn default() -> Self {
-        Self { enabled: false, tokens: vec![] }
-    }
 }
 
 /// Actions/workflow engine settings.
@@ -167,7 +146,6 @@ impl Default for ServerConfig {
             storage: StorageSection::default(),
             repos: std::collections::HashMap::new(),
             actions: ActionsSection::default(),
-            auth: AuthSection::default(),
         }
     }
 }
@@ -222,14 +200,9 @@ db_path = "forge.db"
 # path = "E:/large-hdd/art-assets"
 # description = "Art asset repository (large storage)"
 
-[auth]
-# Enable token-based authentication (default: false).
-# When disabled, all requests are accepted without authentication.
-enabled = false
-
-# List of valid bearer tokens. Clients send these via the
-# "Authorization: Bearer <token>" gRPC metadata header.
-# tokens = ["secret-token-1", "secret-token-2"]
+# Authentication is always on. Create users with:
+#   forge-server user add --admin <username>
+# or via the web setup wizard at /setup on first run.
 "#
         .to_string()
     }

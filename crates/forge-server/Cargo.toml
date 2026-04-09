@@ -28,3 +28,8 @@ globset.workspace = true
 walkdir.workspace = true
 indicatif.workspace = true
 self-replace.workspace = true
+argon2 = "0.5"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile.workspace = true

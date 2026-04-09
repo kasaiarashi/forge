@@ -29,12 +29,21 @@ impl MetadataDb {
         conn.pragma_update(None, "journal_mode", "WAL")
             .with_context(|| "Failed to enable WAL mode")?;
 
+        // Enforce foreign-key constraints. SQLite leaves this off per
+        // connection by default; the auth tables (sessions / pats /
+        // repo_acls) rely on ON DELETE CASCADE to clean up after a user
+        // is deleted, so this must be on.
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .with_context(|| "Failed to enable foreign_keys pragma")?;
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS repos (
                 name TEXT PRIMARY KEY,
                 description TEXT NOT NULL DEFAULT '',
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private'
+                    CHECK(visibility IN ('private','public'))
             );
             CREATE TABLE IF NOT EXISTS refs (
                 repo TEXT NOT NULL,
@@ -51,6 +60,51 @@ impl MetadataDb {
                 reason TEXT,
                 PRIMARY KEY (repo, path)
             );
+            CREATE TABLE IF NOT EXISTS users (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                username        TEXT    NOT NULL UNIQUE,
+                email           TEXT    NOT NULL UNIQUE,
+                display_name    TEXT    NOT NULL,
+                password_hash   TEXT,
+                is_server_admin INTEGER NOT NULL DEFAULT 0,
+                created_at      INTEGER NOT NULL,
+                last_login_at   INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash   TEXT    NOT NULL UNIQUE,
+                token_prefix TEXT    NOT NULL,
+                user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at   INTEGER NOT NULL,
+                last_used_at INTEGER NOT NULL,
+                expires_at   INTEGER NOT NULL,
+                user_agent   TEXT,
+                ip           TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_prefix ON sessions(token_prefix);
+            CREATE TABLE IF NOT EXISTS personal_access_tokens (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                name         TEXT    NOT NULL,
+                token_hash   TEXT    NOT NULL UNIQUE,
+                token_prefix TEXT    NOT NULL,
+                user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                scopes       TEXT    NOT NULL,
+                created_at   INTEGER NOT NULL,
+                last_used_at INTEGER,
+                expires_at   INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_pats_user ON personal_access_tokens(user_id);
+            CREATE INDEX IF NOT EXISTS idx_pats_prefix ON personal_access_tokens(token_prefix);
+            CREATE TABLE IF NOT EXISTS repo_acls (
+                repo       TEXT    NOT NULL,
+                user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role       TEXT    NOT NULL CHECK(role IN ('read','write','admin')),
+                granted_at INTEGER NOT NULL,
+                granted_by INTEGER REFERENCES users(id),
+                PRIMARY KEY (repo, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_repo_acls_user ON repo_acls(user_id);
             ",
         )?;
 

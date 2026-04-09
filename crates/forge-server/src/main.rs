@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
 // Licensed under the MIT License.
 
+mod auth;
 mod config;
 mod services;
 mod storage;
@@ -132,17 +133,15 @@ async fn main() -> Result<()> {
 
     let max_msg = config.server.max_message_size as usize;
 
-    let auth_interceptor = services::auth::make_auth_interceptor(
-        config.auth.enabled,
-        config.auth.tokens.clone(),
-    );
-
     let svc = ForgeServiceServer::new(service)
         .max_decoding_message_size(max_msg)
         .max_encoding_message_size(max_msg);
 
+    // TODO(auth phase 3): wrap `svc` with the new auth interceptor that consults
+    // forge_server::auth::SqliteUserStore. Phase 1 only adds the schema + store;
+    // until phase 3 wires the interceptor, the gRPC service is unauthenticated.
     Server::builder()
-        .add_service(tonic::service::interceptor::InterceptedService::new(svc, auth_interceptor))
+        .add_service(svc)
         .serve(addr)
         .await?;
 
