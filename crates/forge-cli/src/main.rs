@@ -51,13 +51,17 @@ enum Commands {
 
     /// Commit current changes
     Commit {
-        /// Commit message
+        /// Commit message (optional with --amend; reuses prior message if omitted)
         #[arg(short, long)]
-        message: String,
+        message: Option<String>,
 
         /// Commit all changed files (skip explicit staging)
         #[arg(short, long)]
         all: bool,
+
+        /// Replace the tip commit instead of creating a new one
+        #[arg(long)]
+        amend: bool,
     },
 
     /// Show working directory status
@@ -418,7 +422,7 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init => commands::init::run()?,
         Commands::Add { paths } => commands::add::run(paths)?,
-        Commands::Commit { message, all } => commands::snapshot::run(message, all, cli.json)?,
+        Commands::Commit { message, all, amend } => commands::snapshot::run(message, all, amend, cli.json)?,
         Commands::Status => commands::status::run(cli.json)?,
         Commands::Diff { commit, staged, stat, extract, no_pager, paths } => commands::diff::run(commit, staged, stat, extract, paths, no_pager, cli.json)?,
         Commands::Log { count, file, oneline, all, no_pager } => commands::log::run(count, file, oneline, all, no_pager, cli.json)?,
