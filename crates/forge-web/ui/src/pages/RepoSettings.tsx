@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import {
   TextInput,
   Button,
@@ -16,7 +17,7 @@ import type { RepoInfo, Branch } from '../api';
 import api, { copyToClipboard } from '../api';
 
 export default function RepoSettings() {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
   const navigate = useNavigate();
 
   const [, setRepoInfo] = useState<RepoInfo | null>(null);

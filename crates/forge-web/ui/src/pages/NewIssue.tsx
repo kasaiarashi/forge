@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { TextInput, Button, FormControl, Flash } from '@primer/react';
 import RepoHeader from '../components/RepoHeader';
 import api from '../api';
 
 export default function NewIssue() {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');

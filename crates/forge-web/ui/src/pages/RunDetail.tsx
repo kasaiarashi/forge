@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Flash, Spinner, Label } from '@primer/react';
 import {
   CheckCircleIcon,
@@ -88,7 +89,8 @@ function deriveJobStatus(steps: { status: string }[]): string {
 }
 
 export default function RunDetail() {
-  const { repo, runId } = useParams<{ repo: string; runId: string }>();
+  const repo = useRepoParam();
+  const { runId } = useParams<{ runId: string }>();
   const [data, setData] = useState<RunDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

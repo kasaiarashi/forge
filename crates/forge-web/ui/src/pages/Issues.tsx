@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { TextInput, Button, Label, Spinner, Flash } from '@primer/react';
 import {
   IssueOpenedIcon,
@@ -30,7 +31,7 @@ function timeAgo(epoch: number): string {
 }
 
 export default function Issues() {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('open');
   const [issues, setIssues] = useState<IssueInfo[]>([]);

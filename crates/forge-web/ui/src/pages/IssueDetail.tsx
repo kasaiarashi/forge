@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Spinner, Flash, Label } from '@primer/react';
 import { IssueOpenedIcon, IssueClosedIcon } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
@@ -24,7 +25,8 @@ function timeAgo(epoch: number): string {
 }
 
 export default function IssueDetail() {
-  const { repo = '', id = '' } = useParams();
+  const repo = useRepoParam();
+  const { id = '' } = useParams<{ id?: string }>();
   const issueId = parseInt(id, 10);
   
   const [issue, setIssue] = useState<IssueInfo | null>(null);

@@ -54,6 +54,8 @@ async fn login_with_token(server_url: &str, token: String) -> Result<()> {
     let cred = Credential {
         user: String::new(),
         token: token.clone(),
+        display_name: String::new(),
+        email: String::new(),
     };
     credentials::save(server_url, &cred)?;
 
@@ -73,10 +75,14 @@ async fn login_with_token(server_url: &str, token: String) -> Result<()> {
         .user
         .ok_or_else(|| anyhow!("server returned no user info"))?;
 
-    // Re-save with the username from WhoAmI so the listing UX is nicer.
+    // Re-save with the full identity from WhoAmI so subsequent commands like
+    // `forge commit` can fall back to display_name + email when the
+    // workspace's user.* fields are unset.
     let cred = Credential {
         user: user.username.clone(),
         token,
+        display_name: user.display_name.clone(),
+        email: user.email.clone(),
     };
     let backend = credentials::save(server_url, &cred)?;
     println!("Logged in to {} as {}", server_url, user.username);
@@ -137,6 +143,8 @@ async fn login_interactive(
     let session_cred = Credential {
         user: user.username.clone(),
         token: session_token,
+        display_name: user.display_name.clone(),
+        email: user.email.clone(),
     };
     credentials::save(server_url, &session_cred)?;
     let mut auth = client::connect_auth(server_url).await?;
@@ -158,6 +166,8 @@ async fn login_interactive(
     let cred = Credential {
         user: user.username.clone(),
         token: pat_resp.plaintext_token,
+        display_name: user.display_name.clone(),
+        email: user.email.clone(),
     };
     let backend = credentials::save(server_url, &cred)?;
 

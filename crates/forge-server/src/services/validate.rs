@@ -3,24 +3,55 @@
 
 use tonic::Status;
 
-/// Validate a repository name.
-pub fn repo_name(name: &str) -> Result<(), Status> {
-    if name.is_empty() || name.len() > 128 {
-        return Err(Status::invalid_argument("repo name must be 1-128 characters"));
+/// Validate a single repo path segment (owner OR name half).
+fn repo_segment(seg: &str, label: &str) -> Result<(), Status> {
+    if seg.is_empty() || seg.len() > 64 {
+        return Err(Status::invalid_argument(format!(
+            "{label} must be 1-64 characters"
+        )));
     }
-    if name.contains("..") || name.contains('/') || name.contains('\\') {
-        return Err(Status::invalid_argument(
-            "repo name cannot contain '..', '/' or '\\'",
-        ));
+    if seg.contains("..") || seg.contains('\\') {
+        return Err(Status::invalid_argument(format!(
+            "{label} cannot contain '..' or '\\'"
+        )));
     }
-    if !name
+    if seg.starts_with('.') {
+        return Err(Status::invalid_argument(format!(
+            "{label} cannot start with '.'"
+        )));
+    }
+    if !seg
         .chars()
         .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
     {
+        return Err(Status::invalid_argument(format!(
+            "{label} must be alphanumeric, hyphens, underscores, or dots"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a repository identifier in `<owner>/<name>` form. The
+/// gRPC layer normalizes bare `<name>` callers to this form first by
+/// prepending the authenticated caller's username (see
+/// [`crate::services::grpc::ForgeGrpcService::resolve_repo_path`]), so
+/// by the time this function runs the input always has the slash.
+pub fn repo_name(name: &str) -> Result<(), Status> {
+    if name.is_empty() || name.len() > 128 {
+        return Err(Status::invalid_argument("repo path must be 1-128 characters"));
+    }
+    let mut parts = name.splitn(2, '/');
+    let owner = parts.next().unwrap_or("");
+    let repo = parts.next().ok_or_else(|| {
+        Status::invalid_argument("repo path must be in '<owner>/<name>' form")
+    })?;
+    if repo.contains('/') {
         return Err(Status::invalid_argument(
-            "repo name must be alphanumeric, hyphens, underscores, or dots",
+            "repo path must contain exactly one '/' separator",
         ));
     }
+    repo_segment(owner, "owner")?;
+    repo_segment(repo, "repo name")?;
     Ok(())
 }
 

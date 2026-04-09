@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import {
   Breadcrumbs,
   ActionMenu,
@@ -44,7 +45,8 @@ function timeAgo(epoch: number): string {
 }
 
 export default function RepoTree() {
-  const { repo = '', branch, '*': pathStr = '' } = useParams();
+  const repo = useRepoParam();
+  const { branch, '*': pathStr = '' } = useParams<{ branch?: string; '*'?: string }>();
   const path = pathStr || '';
   const navigate = useNavigate();
 

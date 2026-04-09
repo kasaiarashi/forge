@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { TextInput, Button, Label, Spinner, Flash } from '@primer/react';
 import {
   GitPullRequestIcon,
@@ -48,7 +49,7 @@ function prIconColor(status: string): string {
 }
 
 export default function PullRequests() {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('open');
   const [prs, setPrs] = useState<PullRequestInfo[]>([]);

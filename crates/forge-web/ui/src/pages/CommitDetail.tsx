@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import {
   Spinner,
   Flash,
@@ -271,7 +272,8 @@ function FileDiffView({ repo, commitHash, parentHash, file }: FileDiffViewProps)
 }
 
 export default function CommitDetail() {
-  const { repo = '', hash = '' } = useParams();
+  const repo = useRepoParam();
+  const { hash = '' } = useParams<{ hash?: string }>();
   const [commit, setCommit] = useState<CommitDetailType | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

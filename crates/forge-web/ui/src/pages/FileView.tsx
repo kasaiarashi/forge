@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import {
   Breadcrumbs,
   Button,
@@ -80,7 +81,8 @@ function formatSize(bytes: number): string {
 }
 
 export default function FileView() {
-  const { repo = '', branch = 'main', '*': filePath = '' } = useParams();
+  const repo = useRepoParam();
+  const { branch = 'main', '*': filePath = '' } = useParams<{ branch?: string; '*'?: string }>();
   const { resolvedMode } = useTheme();
   const [file, setFile] = useState<FileContent | null>(null);
   const [loading, setLoading] = useState(true);

@@ -2,10 +2,12 @@ use anyhow::{bail, Result};
 use chrono::Utc;
 use forge_core::hash::ForgeHash;
 use forge_core::index::{Index, IndexEntry};
-use forge_core::object::snapshot::Snapshot;
+use forge_core::object::snapshot::{Author, Snapshot};
 use forge_core::object::tree::{EntryKind, Tree, TreeEntry};
-use forge_core::workspace::{HeadRef, Workspace};
+use forge_core::workspace::{HeadRef, Workspace, WorkspaceConfig};
 use std::collections::BTreeMap;
+
+use crate::credentials;
 
 pub fn run(message: String, all: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -55,10 +57,11 @@ pub fn run(message: String, all: bool, json: bool) -> Result<()> {
     };
 
     let config = ws.config()?;
+    let author = resolve_commit_author(&config);
     let snapshot = Snapshot {
         tree: tree_hash,
         parents,
-        author: config.user.clone(),
+        author,
         message: message.clone(),
         timestamp: Utc::now(),
         metadata: Default::default(),
@@ -279,4 +282,35 @@ fn subtree_matches(prev_tree: &Tree, current_entries: &BTreeMap<String, &IndexEn
         .collect();
 
     prev_dir_names == current_dir_names
+}
+
+/// Resolve the commit author.
+///
+/// Priority is:
+///
+/// 1. Stored credential for the workspace's default remote (set by
+///    `forge login` from the WhoAmI response). The PAT's identity is the
+///    canonical "who is committing here" — overriding whatever the OS user
+///    happens to be — so a logged-in machine always commits as the
+///    authenticated forge user, not the local Windows username.
+/// 2. Workspace `user.name` / `user.email` from `.forge/config.json`. This
+///    is what `forge init` pre-fills from `whoami` and is the offline /
+///    not-logged-in fallback.
+fn resolve_commit_author(config: &WorkspaceConfig) -> Author {
+    let mut author = config.user.clone();
+    if let Some(server_url) = config.default_remote_url() {
+        if let Ok(Some(cred)) = credentials::load(server_url) {
+            // Credential wins when set. display_name is preferred over the
+            // raw username for the human-readable name field.
+            if !cred.display_name.is_empty() {
+                author.name = cred.display_name;
+            } else if !cred.user.is_empty() {
+                author.name = cred.user;
+            }
+            if !cred.email.is_empty() {
+                author.email = cred.email;
+            }
+        }
+    }
+    author
 }

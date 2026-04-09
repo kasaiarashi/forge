@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Flash, Spinner, TextInput, Checkbox, FormControl } from '@primer/react';
 import api from '../api';
 
@@ -18,7 +19,8 @@ jobs:
 `;
 
 export default function WorkflowEdit() {
-  const { repo, id } = useParams<{ repo: string; id?: string }>();
+  const repo = useRepoParam();
+  const { id } = useParams<{ id?: string }>();
   const navigate = useNavigate();
   const isNew = !id || id === 'new';
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import {
   Spinner,
   Flash,
@@ -54,7 +55,8 @@ function groupByDate(commits: CommitSummary[]): Map<string, CommitSummary[]> {
 }
 
 export default function Commits() {
-  const { repo = '', branch = 'main' } = useParams();
+  const repo = useRepoParam();
+  const { branch = 'main' } = useParams<{ branch?: string }>();
   const navigate = useNavigate();
   const [commitList, setCommitList] = useState<CommitList | null>(null);
   const [branches, setBranches] = useState<Branch[]>([]);

@@ -26,10 +26,20 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// One server's stored credential.
+///
+/// `display_name` and `email` are populated from the WhoAmI response on
+/// `forge login` so commands like `forge commit` can fall back to them when
+/// the workspace's local `user.name` / `user.email` are unset. They're
+/// `#[serde(default)]` so older credentials files without these fields keep
+/// loading without re-login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credential {
     pub user: String,
     pub token: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub email: String,
 }
 
 const KEYRING_SERVICE: &str = "forge-vcs";
@@ -84,6 +94,8 @@ fn env_credential(
     Some(Credential {
         user: user.unwrap_or_default(),
         token,
+        display_name: String::new(),
+        email: String::new(),
     })
 }
 
@@ -113,12 +125,21 @@ pub fn delete(server_url: &str) -> Result<()> {
 fn load_from_keychain(server_url: &str) -> Option<Credential> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, server_url).ok()?;
     let raw = entry.get_password().ok()?;
-    // Stored as `<user>\0<token>` so we can recover both fields without
-    // serializing JSON inside the keychain blob.
+    // New encoding: JSON-serialized Credential. Falls back to the legacy
+    // `<user>\0<token>` two-field format if a credential was written before
+    // the display_name / email fields existed.
+    if let Ok(cred) = serde_json::from_str::<Credential>(&raw) {
+        return Some(cred);
+    }
     let mut parts = raw.splitn(2, '\0');
     let user = parts.next()?.to_string();
     let token = parts.next()?.to_string();
-    Some(Credential { user, token })
+    Some(Credential {
+        user,
+        token,
+        display_name: String::new(),
+        email: String::new(),
+    })
 }
 
 fn save_to_keychain(server_url: &str, cred: &Credential) -> bool {
@@ -126,7 +147,10 @@ fn save_to_keychain(server_url: &str, cred: &Credential) -> bool {
         Ok(e) => e,
         Err(_) => return false,
     };
-    let blob = format!("{}\0{}", cred.user, cred.token);
+    let blob = match serde_json::to_string(cred) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
     entry.set_password(&blob).is_ok()
 }
 
@@ -249,6 +273,8 @@ mod tests {
         let cred = Credential {
             user: "alice".into(),
             token: "fpat_dummy".into(),
+            display_name: "Alice".into(),
+            email: "alice@example.com".into(),
         };
         let backend = save(&url, &cred).unwrap();
         let _ = backend; // we don't care which one — both are valid

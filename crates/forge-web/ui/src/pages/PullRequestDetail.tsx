@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Spinner, Flash, Label } from '@primer/react';
 import { GitPullRequestIcon, GitMergeIcon, GitPullRequestClosedIcon } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
@@ -40,7 +41,8 @@ function prIconColor(status: string): string {
 }
 
 export default function PullRequestDetail() {
-  const { repo = '', id = '' } = useParams();
+  const repo = useRepoParam();
+  const { id = '' } = useParams<{ id?: string }>();
   const prId = parseInt(id, 10);
   
   const [pr, setPr] = useState<PullRequestInfo | null>(null);

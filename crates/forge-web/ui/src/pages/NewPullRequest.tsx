@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { TextInput, Button, Flash, ActionMenu, ActionList, Spinner, Avatar } from '@primer/react';
 import { GitPullRequestIcon, GitCommitIcon, CheckIcon, ArrowLeftIcon, MarkdownIcon, FileIcon, PersonIcon, GearIcon } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
@@ -7,7 +8,7 @@ import api from '../api';
 import type { Branch, CommitSummary } from '../api';
 
 export default function NewPullRequest() {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
   const navigate = useNavigate();
 
   const [branches, setBranches] = useState<Branch[]>([]);

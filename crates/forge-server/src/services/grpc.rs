@@ -13,7 +13,6 @@ use forge_proto::forge::*;
 
 use crate::auth::authorize::{
     require_authenticated, require_repo_admin, require_repo_read, require_repo_write,
-    require_server_admin,
 };
 use crate::auth::interceptor::caller_of;
 use crate::auth::UserStore;
@@ -31,11 +30,35 @@ pub struct ForgeGrpcService {
     pub user_store: Arc<dyn UserStore>,
 }
 
-/// Normalize and validate repo name: empty string defaults to "default".
-fn repo_name(repo: &str) -> Result<&str, Status> {
-    let name = if repo.is_empty() { "default" } else { repo };
-    super::validate::repo_name(name)?;
-    Ok(name)
+/// Normalize a repo identifier into the canonical `<owner>/<name>` form
+/// and validate it.
+///
+/// - `"alice/forge"` → returned as-is after validation.
+/// - `"forge"` → if the caller is authenticated, returns `"<caller_username>/forge"`.
+///   Anonymous callers cannot use the bare form (we have nothing to prepend).
+/// - `""` → `InvalidArgument`.
+///
+/// The CLI's existing workspace config field `repo = "forge"` therefore keeps
+/// working without flag changes — the server fills in the owner from the
+/// authenticated PAT/session.
+fn resolve_repo(repo: &str, caller: &crate::auth::Caller) -> Result<String, Status> {
+    if repo.is_empty() {
+        return Err(Status::invalid_argument("repo must not be empty"));
+    }
+    let full = if repo.contains('/') {
+        repo.to_string()
+    } else {
+        match caller.username() {
+            Some(u) => format!("{u}/{repo}"),
+            None => {
+                return Err(Status::unauthenticated(
+                    "anonymous callers must use the full '<owner>/<name>' form",
+                ));
+            }
+        }
+    };
+    super::validate::repo_name(&full)?;
+    Ok(full)
 }
 
 impl ForgeGrpcService {
@@ -69,13 +92,13 @@ impl ForgeService for ForgeGrpcService {
         {
             // Read repo from the first chunk.
             if store.is_none() {
-                let repo = repo_name(&chunk.repo)?;
+                let repo = resolve_repo(&chunk.repo, &caller)?;
                 // Authz happens once, on the first chunk (after we know the repo).
-                require_repo_write(&caller, &self.user_store, repo)?;
+                require_repo_write(&caller, &self.user_store, &repo)?;
                 // Auto-register repo if it doesn't exist.
-                self.db.create_repo(repo, "")
+                self.db.create_repo(&repo, "")
                     .map_err(|e| Status::internal(format!("failed to register repo: {}", e)))?;
-                store = Some(self.fs.repo_store(repo));
+                store = Some(self.fs.repo_store(&repo));
             }
 
             if current_hash.as_ref() != Some(&chunk.hash) {
@@ -141,7 +164,7 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<Self::PullObjectsStream>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?.to_string();
+        let repo = resolve_repo(&req.repo, &caller)?;
         // TODO(phase 6): pass real `public` flag from repos.visibility.
         require_repo_read(&caller, &self.user_store, &repo, self.db.is_repo_public(&repo))?;
 
@@ -207,7 +230,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<HasObjectsResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let store = self.fs.repo_store(repo);
         let mut has = Vec::with_capacity(req.hashes.len());
@@ -230,7 +254,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<GetRefsResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
 
         let all_refs = self
@@ -252,7 +277,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<UpdateRefResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         super::validate::ref_name(&req.ref_name)?;
         require_repo_write(&caller, &self.user_store, repo)?;
 
@@ -290,7 +316,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<LockResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         super::validate::path(&req.path)?;
         require_repo_write(&caller, &self.user_store, repo)?;
 
@@ -323,7 +350,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<UnlockResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         super::validate::path(&req.path)?;
         require_repo_write(&caller, &self.user_store, repo)?;
 
@@ -359,7 +387,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<ListLocksResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
 
         let locks = self
@@ -387,7 +416,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<VerifyLocksResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
 
         // Get all locks for the requested paths.
@@ -496,7 +526,9 @@ impl ForgeService for ForgeGrpcService {
         request: Request<CreateRepoRequest>,
     ) -> Result<Response<CreateRepoResponse>, Status> {
         let caller = caller_of(&request);
-        require_server_admin(&caller)?;
+        // Any logged-in user can create repos in their own namespace.
+        // Server admins can create in any namespace.
+        let auth = crate::auth::authorize::require_authenticated(&caller)?;
         let req = request.into_inner();
 
         if req.name.is_empty() {
@@ -506,21 +538,40 @@ impl ForgeService for ForgeGrpcService {
             }));
         }
 
-        // Create the repo record in the database.
+        // Resolve `<owner>/<name>` (auto-prepends caller's username on bare names).
+        let repo = match resolve_repo(&req.name, &caller) {
+            Ok(r) => r,
+            Err(s) => {
+                return Ok(Response::new(CreateRepoResponse {
+                    success: false,
+                    error: s.message().to_string(),
+                }));
+            }
+        };
+
+        // Owner-half check: a non-admin user cannot create a repo in someone
+        // else's namespace.
+        let owner = repo.split('/').next().unwrap_or("");
+        if owner != auth.username && !auth.is_server_admin {
+            return Err(Status::permission_denied(format!(
+                "cannot create '{repo}' in another user's namespace"
+            )));
+        }
+
         let created = self
             .db
-            .create_repo(&req.name, &req.description)
+            .create_repo(&repo, &req.description)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         if !created {
             return Ok(Response::new(CreateRepoResponse {
                 success: false,
-                error: format!("repo '{}' already exists", req.name),
+                error: format!("repo '{repo}' already exists"),
             }));
         }
 
         // Ensure the repo's objects directory exists.
-        let _store = self.fs.repo_store(&req.name);
+        let _store = self.fs.repo_store(&repo);
 
         Ok(Response::new(CreateRepoResponse {
             success: true,
@@ -541,15 +592,37 @@ impl ForgeService for ForgeGrpcService {
                 error: "repo name cannot be empty".into(),
             }));
         }
-        require_repo_admin(&caller, &self.user_store, &req.name)?;
+        // Resolve `<owner>/<name>` and authz the admin role on the resolved path.
+        let repo = match resolve_repo(&req.name, &caller) {
+            Ok(r) => r,
+            Err(s) => {
+                return Ok(Response::new(UpdateRepoResponse {
+                    success: false,
+                    error: s.message().to_string(),
+                }));
+            }
+        };
+        require_repo_admin(&caller, &self.user_store, &repo)?;
+
+        // For renames, the new name must also be in the same namespace
+        // (or no namespace, in which case we keep the original owner).
+        let new_name = if req.new_name.is_empty() {
+            String::new()
+        } else if req.new_name.contains('/') {
+            req.new_name.clone()
+        } else {
+            // bare name → keep the original owner
+            let owner = repo.split('/').next().unwrap_or("");
+            format!("{owner}/{}", req.new_name)
+        };
 
         // Update the database record.
-        match self.db.update_repo(&req.name, &req.new_name, &req.description) {
+        match self.db.update_repo(&repo, &new_name, &req.description) {
             Ok(true) => {}
             Ok(false) => {
                 return Ok(Response::new(UpdateRepoResponse {
                     success: false,
-                    error: format!("repo '{}' not found", req.name),
+                    error: format!("repo '{repo}' not found"),
                 }));
             }
             Err(e) => {
@@ -560,15 +633,10 @@ impl ForgeService for ForgeGrpcService {
             }
         }
 
-        // Apply visibility change if provided. Empty string = no change so
-        // existing callers don't break. Use the post-rename name (effective
-        // name) so it works alongside a rename in the same call.
+        // Apply visibility change if provided. Use the post-rename effective
+        // name so it works alongside a rename in the same call.
         if !req.visibility.is_empty() {
-            let effective = if req.new_name.is_empty() {
-                req.name.clone()
-            } else {
-                req.new_name.clone()
-            };
+            let effective = if new_name.is_empty() { repo.clone() } else { new_name.clone() };
             if let Err(e) = self.db.set_repo_visibility(&effective, &req.visibility) {
                 return Ok(Response::new(UpdateRepoResponse {
                     success: false,
@@ -578,8 +646,8 @@ impl ForgeService for ForgeGrpcService {
         }
 
         // If renamed, also rename the filesystem directory.
-        if !req.new_name.is_empty() && req.new_name != req.name {
-            if let Err(e) = self.fs.rename_repo(&req.name, &req.new_name) {
+        if !new_name.is_empty() && new_name != repo {
+            if let Err(e) = self.fs.rename_repo(&repo, &new_name) {
                 return Ok(Response::new(UpdateRepoResponse {
                     success: false,
                     error: format!("db updated but fs rename failed: {}", e),
@@ -599,30 +667,38 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<DeleteRepoResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        require_repo_admin(&caller, &self.user_store, &req.name)?;
-
         if req.name.is_empty() {
             return Ok(Response::new(DeleteRepoResponse {
                 success: false,
                 error: "repo name cannot be empty".into(),
             }));
         }
+        let repo = match resolve_repo(&req.name, &caller) {
+            Ok(r) => r,
+            Err(s) => {
+                return Ok(Response::new(DeleteRepoResponse {
+                    success: false,
+                    error: s.message().to_string(),
+                }));
+            }
+        };
+        require_repo_admin(&caller, &self.user_store, &repo)?;
 
         // Delete from the database.
         let deleted = self
             .db
-            .delete_repo(&req.name)
+            .delete_repo(&repo)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         if !deleted {
             return Ok(Response::new(DeleteRepoResponse {
                 success: false,
-                error: format!("repo '{}' not found", req.name),
+                error: format!("repo '{repo}' not found"),
             }));
         }
 
         // Delete from the filesystem.
-        if let Err(e) = self.fs.delete_repo(&req.name) {
+        if let Err(e) = self.fs.delete_repo(&repo) {
             return Ok(Response::new(DeleteRepoResponse {
                 success: false,
                 error: format!("db deleted but fs cleanup failed: {}", e),
@@ -645,7 +721,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<ListCommitsResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let os = self.object_store(repo);
 
@@ -697,7 +774,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<GetTreeEntriesResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let os = self.object_store(repo);
 
@@ -773,7 +851,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<GetFileContentResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let os = self.object_store(repo);
 
@@ -836,7 +915,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<GetCommitDetailResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let os = self.object_store(repo);
 
@@ -943,7 +1023,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<ListWorkflowsResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let workflows = self.db.list_workflows(repo)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -960,7 +1041,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<CreateWorkflowResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_admin(&caller, &self.user_store, repo)?;
         // Validate YAML before saving.
         if let Err(e) = crate::services::actions::yaml::WorkflowDef::parse(&req.yaml) {
@@ -1068,7 +1150,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<ListWorkflowRunsResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (runs, total) = self.db.list_runs(repo, req.workflow_id, req.limit, req.offset)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -1172,7 +1255,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<ListReleasesResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let releases = self.db.list_releases(repo)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -1234,7 +1318,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<ListIssuesResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (issues, total, open_count, closed_count) = self.db
             .list_issues(repo, &req.status, req.limit, req.offset)
@@ -1261,7 +1346,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<CreateIssueResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_write(&caller, &self.user_store, repo)?;
         let labels = req.labels.join(",");
         let id = self.db.create_issue(repo, &req.title, &req.body, &req.author, &labels)
@@ -1297,7 +1383,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<ListPullRequestsResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let (prs, total, open_count, closed_count) = self.db
             .list_pull_requests(repo, &req.status, req.limit, req.offset)
@@ -1325,7 +1412,8 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<CreatePullRequestResponse>, Status> {
         let caller = caller_of(&request);
         let req = request.into_inner();
-        let repo = repo_name(&req.repo)?;
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
         require_repo_write(&caller, &self.user_store, repo)?;
         let labels = req.labels.join(",");
         let id = self.db.create_pull_request(

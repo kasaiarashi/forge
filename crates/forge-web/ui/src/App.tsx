@@ -30,30 +30,30 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/admin" element={<Admin />} />
         
-        <Route path="/:repo" element={<RepoTree />} />
-        <Route path="/:repo/tree/:branch" element={<RepoTree />} />
-        <Route path="/:repo/tree/:branch/*" element={<RepoTree />} />
-        <Route path="/:repo/blob/:branch/*" element={<FileView />} />
-        <Route path="/:repo/commits/:branch" element={<Commits />} />
-        <Route path="/:repo/commit/:hash" element={<CommitDetail />} />
-        <Route path="/:repo/locks" element={<Locks />} />
-        <Route path="/:repo/settings" element={<RepoSettings />} />
-        
-        <Route path="/:repo/actions" element={<Workflows />} />
-        <Route path="/:repo/actions/new" element={<WorkflowEdit />} />
-        <Route path="/:repo/actions/:id/edit" element={<WorkflowEdit />} />
-        <Route path="/:repo/actions/:id/runs" element={<WorkflowRuns />} />
-        <Route path="/:repo/actions/runs/:runId" element={<RunDetail />} />
-        <Route path="/:repo/releases" element={<Releases />} />
+        {/* User-namespaced repo routes: /<owner>/<repo>/... */}
+        <Route path="/:owner/:repo" element={<RepoTree />} />
+        <Route path="/:owner/:repo/tree/:branch" element={<RepoTree />} />
+        <Route path="/:owner/:repo/tree/:branch/*" element={<RepoTree />} />
+        <Route path="/:owner/:repo/blob/:branch/*" element={<FileView />} />
+        <Route path="/:owner/:repo/commits/:branch" element={<Commits />} />
+        <Route path="/:owner/:repo/commit/:hash" element={<CommitDetail />} />
+        <Route path="/:owner/:repo/locks" element={<Locks />} />
+        <Route path="/:owner/:repo/settings" element={<RepoSettings />} />
 
-        {/* New Dummy Tabs */}
-        <Route path="/:repo/issues" element={<Issues />} />
-        <Route path="/:repo/issues/new" element={<NewIssue />} />
-        <Route path="/:repo/issues/:id" element={<IssueDetail />} />
-        
-        <Route path="/:repo/pulls" element={<PullRequests />} />
-        <Route path="/:repo/pulls/new" element={<NewPullRequest />} />
-        <Route path="/:repo/pulls/:id" element={<PullRequestDetail />} />
+        <Route path="/:owner/:repo/actions" element={<Workflows />} />
+        <Route path="/:owner/:repo/actions/new" element={<WorkflowEdit />} />
+        <Route path="/:owner/:repo/actions/:id/edit" element={<WorkflowEdit />} />
+        <Route path="/:owner/:repo/actions/:id/runs" element={<WorkflowRuns />} />
+        <Route path="/:owner/:repo/actions/runs/:runId" element={<RunDetail />} />
+        <Route path="/:owner/:repo/releases" element={<Releases />} />
+
+        <Route path="/:owner/:repo/issues" element={<Issues />} />
+        <Route path="/:owner/:repo/issues/new" element={<NewIssue />} />
+        <Route path="/:owner/:repo/issues/:id" element={<IssueDetail />} />
+
+        <Route path="/:owner/:repo/pulls" element={<PullRequests />} />
+        <Route path="/:owner/:repo/pulls/new" element={<NewPullRequest />} />
+        <Route path="/:owner/:repo/pulls/:id" element={<PullRequestDetail />} />
       </Routes>
     </Layout>
   );
