@@ -40,3 +40,4 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc
 webpki-roots = "0.26"
 sha2 = "0.10"
 dirs = "5"
+x509-parser = "0.16"

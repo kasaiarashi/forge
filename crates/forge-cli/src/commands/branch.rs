@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use forge_core::workspace::Workspace;
+use forge_core::workspace::{HeadRef, Workspace};
 
 pub fn run(name: Option<String>, delete: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -47,6 +47,22 @@ pub fn run(name: Option<String>, delete: bool, json: bool) -> Result<()> {
             let head = ws.head_snapshot()?;
             ws.set_branch_tip(&name, &head)?;
             println!("Created branch '{}' at {}", name, head.short());
+
+            // In detached HEAD, `forge branch` only creates the ref —
+            // it does NOT switch to it. Without the hint, users hit a
+            // nasty footgun: their next commit lands on (advanced)
+            // detached HEAD and the freshly-created branch stays at
+            // the old position. Flag it explicitly.
+            if matches!(ws.head()?, HeadRef::Detached(_)) {
+                println!();
+                println!(
+                    "note: HEAD is still detached — new commits will NOT land on '{name}' yet."
+                );
+                println!("      To start committing to '{name}', run:");
+                println!("          forge switch {name}");
+                println!("      Or combine both steps next time with:");
+                println!("          forge switch -c {name}");
+            }
         }
     }
 

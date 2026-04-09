@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
 // Licensed under the MIT License.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use forge_core::object::snapshot::Author;
 use forge_core::workspace::Workspace;
 
@@ -19,8 +19,33 @@ use forge_core::workspace::Workspace;
 ///
 /// Backward compat: if the URL has no `/owner/name` path (e.g.
 /// `http://localhost:9876`) then the explicit `--repo` flag is required.
+///
+/// ## Resumable clone
+///
+/// Game projects can be hundreds of gigabytes; a failed pull halfway
+/// through a fresh clone used to leave an orphan `.forge/` directory that
+/// blocked any retry. Now the command **resumes** instead:
+///
+///   * If the target directory is empty → init a new workspace + pull.
+///   * If the target already has `.forge/` AND it points at the same
+///     `server_url` + `repo_name` we're cloning → skip init, run pull
+///     against the existing workspace. Any objects already downloaded are
+///     kept, and `pull` fetches only what's still missing.
+///   * If the target has `.forge/` pointing at a *different* remote →
+///     abort with a clear diagnostic so we don't silently corrupt an
+///     unrelated workspace.
+///   * If the target has non-forge files → abort as before.
+///
+/// The pull step itself is NOT wrapped in cleanup. Partial downloads stay
+/// on disk so the next `forge clone <same-url>` picks up exactly where
+/// the previous run failed.
 pub fn run(url: String, path: Option<String>, repo: Option<String>) -> Result<()> {
     let (server_url, repo_from_url) = parse_clone_url(&url)?;
+
+    // Stash the server URL so if the clone-time pull fails with an auth
+    // error, the pretty-error handler's "Login now?" prompt pre-fills the
+    // URL instead of asking the user to re-type what they already passed.
+    crate::set_server_url_hint(&server_url);
 
     // Resolve the repo identifier. URL path wins over --repo if both present
     // (the URL is the more idiomatic way; --repo is the legacy escape hatch).
@@ -44,40 +69,125 @@ pub fn run(url: String, path: Option<String>, repo: Option<String>) -> Result<()
     let dir_name = path.unwrap_or(default_dir);
 
     let target = std::env::current_dir()?.join(&dir_name);
-    if target.exists() && std::fs::read_dir(&target)?.next().is_some() {
+
+    // Decide between fresh clone and resume based on what's already at
+    // the target.
+    let ws = match resolve_target(&target, &server_url, &repo_name)? {
+        TargetState::FreshOrEmpty => {
+            std::fs::create_dir_all(&target)?;
+            println!("Cloning into '{}'...", target.display());
+            init_workspace(&target, &server_url, &repo_name)?
+        }
+        TargetState::ResumeExisting(ws) => {
+            println!(
+                "Resuming clone into '{}' (existing workspace, remote matches)...",
+                target.display()
+            );
+            ws
+        }
+    };
+
+    // Pull using the workspace we just created/resumed (not cwd). Any
+    // failure here is left on disk — next `forge clone <same-url>` will
+    // take the ResumeExisting path and finish what we started.
+    super::pull::run_with_workspace(&ws)?;
+
+    println!("Clone complete.");
+    Ok(())
+}
+
+/// What the target directory currently looks like.
+enum TargetState {
+    /// The directory doesn't exist, or exists but is empty. Caller should
+    /// create it (if needed) and initialize a fresh workspace.
+    FreshOrEmpty,
+    /// The directory already holds a forge workspace whose remote and
+    /// repo match the ones we were asked to clone. Caller should skip
+    /// the init step and run pull against the returned workspace.
+    ResumeExisting(Workspace),
+}
+
+fn resolve_target(target: &std::path::Path, server_url: &str, repo_name: &str) -> Result<TargetState> {
+    if !target.exists() {
+        return Ok(TargetState::FreshOrEmpty);
+    }
+
+    let forge_dir = target.join(".forge");
+    if forge_dir.is_dir() {
+        // Existing workspace. Resume only if the remote lines up with
+        // what we were asked to clone — never silently adopt an unrelated
+        // workspace under the same path.
+        let ws = Workspace::discover(target)
+            .with_context(|| format!("opening existing workspace at {}", target.display()))?;
+        let cfg = ws
+            .config()
+            .with_context(|| format!("reading config for {}", target.display()))?;
+
+        let existing_remote = cfg
+            .default_remote_url()
+            .ok_or_else(|| {
+                anyhow!(
+                    "existing .forge at {} has no remote configured — delete it \
+                     or use a different target path",
+                    target.display()
+                )
+            })?;
+
+        if existing_remote != server_url || cfg.repo != repo_name {
+            bail!(
+                "destination path '{}' is a different forge workspace \
+                 (existing remote: {} / repo: {}; requested: {} / {}). \
+                 Delete it or choose a different target to start a fresh clone.",
+                target.display(),
+                existing_remote,
+                cfg.repo,
+                server_url,
+                repo_name
+            );
+        }
+
+        return Ok(TargetState::ResumeExisting(ws));
+    }
+
+    // Directory exists but isn't a forge workspace. Only proceed if it's
+    // completely empty — we don't want to scribble on top of whatever
+    // the user has there.
+    if std::fs::read_dir(target)?.next().is_some() {
         bail!(
             "destination path '{}' already exists and is not empty",
-            dir_name
+            target.display()
         );
     }
-    std::fs::create_dir_all(&target)?;
+    Ok(TargetState::FreshOrEmpty)
+}
 
-    println!("Cloning into '{}'...", target.display());
-
-    // Initialize workspace.
+/// Create a fresh workspace at `target` and seed its config with the
+/// clone URL + repo name. Extracted so the resume path doesn't duplicate
+/// it.
+fn init_workspace(
+    target: &std::path::Path,
+    server_url: &str,
+    repo_name: &str,
+) -> Result<Workspace> {
     let author = Author {
         name: whoami::fallible::realname().unwrap_or_else(|_| "Unknown".into()),
         email: String::new(),
     };
-    let ws = Workspace::init(&target, author)?;
+    let ws = Workspace::init(target, author)?;
 
-    // Configure remote and repo name (the bare server URL, no /owner/name).
     let mut config = ws.config()?;
-    config.add_remote("origin".into(), server_url)?;
-    config.repo = repo_name;
+    config.add_remote("origin".into(), server_url.to_string())?;
+    config.repo = repo_name.to_string();
     ws.save_config(&config)?;
 
-    // Write default .forgeignore.
+    // Write default .forgeignore (only if the template didn't already
+    // leave one).
     let ignore_path = target.join(".forgeignore");
     if !ignore_path.exists() {
         std::fs::write(&ignore_path, forge_ignore::ForgeIgnore::default_content())?;
     }
 
-    // Pull using the workspace we just created (not cwd).
-    super::pull::run_with_workspace(&ws)?;
-
-    println!("Clone complete.");
-    Ok(())
+    Ok(ws)
 }
 
 /// Split a `forge clone` URL into the bare server URL and an optional

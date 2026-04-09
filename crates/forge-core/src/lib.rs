@@ -1,3 +1,4 @@
+pub mod ca_publish;
 pub mod hash;
 pub mod chunk;
 pub mod compress;

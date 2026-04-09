@@ -28,11 +28,12 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
+use x509_parser::prelude::*;
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -81,7 +82,7 @@ pub async fn ensure_trusted(server_url: &str, auto_yes: bool) -> Result<()> {
     let leaf = chain.first().unwrap();
     let anchor = chain.last().unwrap();
 
-    print_fingerprint_prompt(server_url, leaf, anchor);
+    print_cert_details(server_url, leaf, anchor);
 
     if auto_yes {
         eprintln!("Auto-trusting (non-interactive or --yes).");
@@ -91,14 +92,41 @@ pub async fn ensure_trusted(server_url: &str, auto_yes: bool) -> Result<()> {
              --yes to accept the fingerprint automatically, or run \
              `forge trust {server_url}` first."
         );
-    } else {
-        if !prompt_yes_no("Trust this certificate and continue? [y/N] ")? {
-            bail!("trust declined; aborting");
-        }
+    } else if !prompt_yes_no("Trust this certificate and continue? [y/N] ")? {
+        bail!("trust declined; aborting");
     }
 
     write_pin(server_url, anchor)?;
-    println!("Pinned to {}.", pin_path(server_url)?.display());
+    let pin = pin_path(server_url)?;
+    println!("Pinned to {}.", pin.display());
+
+    // Ask whether to also push this CA into the OS trust store so
+    // browsers, curl, and other system tools stop warning about it. The
+    // prompt is skipped for `--yes` / non-TTY runs because installing
+    // into a machine-wide store is something we don't want to do silently
+    // from an automated script.
+    if !auto_yes && io::stdin().is_terminal() {
+        let default_install = is_ca_anchor(anchor);
+        let prompt = if default_install {
+            "Also install this certificate into your OS trust store so other apps trust it? [Y/n] "
+        } else {
+            "Also install this certificate into your OS trust store so other apps trust it? [y/N] "
+        };
+        if prompt_yes_no_default(prompt, default_install)? {
+            match install_into_os_trust_store(&pin) {
+                Ok(msg) => println!("{msg}"),
+                Err(e) => {
+                    eprintln!("Could not install into OS trust store: {e:#}");
+                    eprintln!(
+                        "The pin at {} is enough for the forge CLI itself — this is \
+                         only a convenience for browsers / curl / other tools.",
+                        pin.display()
+                    );
+                }
+            }
+        }
+    }
+
     println!();
     Ok(())
 }
@@ -122,36 +150,260 @@ pub fn sha256_fingerprint(der: &[u8]) -> String {
 
 // ── Internals ────────────────────────────────────────────────────────────────
 
-fn print_fingerprint_prompt(url: &str, leaf: &[u8], anchor: &[u8]) {
+/// Render the peer chain as a short operator-readable report: subject /
+/// issuer DN parts (CN, O, OU), validity window, and SHA-256 fingerprints
+/// for both the leaf and the anchor. Parse failures degrade gracefully —
+/// we still show the raw fingerprints so the operator can always verify
+/// out-of-band.
+fn print_cert_details(url: &str, leaf: &[u8], anchor: &[u8]) {
     let leaf_fp = sha256_fingerprint(leaf);
     let anchor_fp = sha256_fingerprint(anchor);
+
     println!();
     println!(
         "This is the first time connecting to {url} and the server's"
     );
     println!("certificate isn't in your system trust store.");
     println!();
-    println!("  Leaf SHA-256:   {leaf_fp}");
-    if leaf_fp != anchor_fp {
-        println!("  Anchor SHA-256: {anchor_fp}");
+
+    // Always show the anchor (what we're going to pin) first, so the
+    // operator compares the right fingerprint against the server log.
+    println!("  \x1b[1mCertificate Authority (trust anchor)\x1b[0m");
+    if let Some(info) = parse_cert_info(anchor) {
+        print_info_block(&info, 4);
+    } else {
+        println!("    (could not parse certificate — showing fingerprint only)");
     }
+    println!("    SHA-256:    {anchor_fp}");
     println!();
+
+    if leaf_fp != anchor_fp {
+        println!("  \x1b[1mLeaf certificate (what the server presented)\x1b[0m");
+        if let Some(info) = parse_cert_info(leaf) {
+            print_info_block(&info, 4);
+        }
+        println!("    SHA-256:    {leaf_fp}");
+        println!();
+    }
+
     println!(
-        "Compare this against the fingerprint the server operator printed"
+        "Compare the CA SHA-256 above against the fingerprint the server operator"
     );
-    println!("on startup (look for 'TLS CA fingerprint' in the forge-server logs)");
+    println!("printed on startup (look for 'TLS CA fingerprint' in the forge-server logs)");
     println!("before accepting.");
     println!();
 }
 
+/// Minimal cert summary we pull out for display.
+struct CertInfo {
+    subject: String,
+    issuer: String,
+    not_before: String,
+    not_after: String,
+}
+
+fn parse_cert_info(der: &[u8]) -> Option<CertInfo> {
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    Some(CertInfo {
+        subject: render_name(cert.subject()),
+        issuer: render_name(cert.issuer()),
+        not_before: cert.validity().not_before.to_string(),
+        not_after: cert.validity().not_after.to_string(),
+    })
+}
+
+/// Render an X.500 Name as `CN=Foo, O=Bar, OU=Baz`. Skips blank RDNs
+/// and is resilient to certs that omit common fields.
+fn render_name(name: &X509Name<'_>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for rdn in name.iter() {
+        for attr in rdn.iter() {
+            let label = match attr.attr_type().to_string().as_str() {
+                "2.5.4.3" => "CN",
+                "2.5.4.10" => "O",
+                "2.5.4.11" => "OU",
+                "2.5.4.6" => "C",
+                "2.5.4.7" => "L",
+                "2.5.4.8" => "ST",
+                _ => continue,
+            };
+            if let Ok(val) = attr.as_str() {
+                parts.push(format!("{label}={val}"));
+            }
+        }
+    }
+    if parts.is_empty() {
+        "(empty)".into()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn print_info_block(info: &CertInfo, indent: usize) {
+    let pad = " ".repeat(indent);
+    println!("{pad}Subject:    {}", info.subject);
+    println!("{pad}Issuer:     {}", info.issuer);
+    println!("{pad}Valid from: {}", info.not_before);
+    println!("{pad}Valid to:   {}", info.not_after);
+}
+
+/// Heuristic: treat an anchor as a CA worth installing machine-wide if
+/// it has the CA basic constraint set. Leaf-only pins fall back to a
+/// `[y/N]` default because installing a leaf into Root is almost never
+/// what the user wants.
+fn is_ca_anchor(der: &[u8]) -> bool {
+    match X509Certificate::from_der(der) {
+        Ok((_, cert)) => cert
+            .basic_constraints()
+            .ok()
+            .flatten()
+            .map(|ext| ext.value.ca)
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 fn prompt_yes_no(prompt: &str) -> Result<bool> {
+    prompt_yes_no_default(prompt, false)
+}
+
+fn prompt_yes_no_default(prompt: &str, default_yes: bool) -> Result<bool> {
     print!("{prompt}");
     io::stdout().flush().ok();
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
-    Ok(matches!(
-        line.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
+    let trimmed = line.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Ok(default_yes);
+    }
+    Ok(matches!(trimmed.as_str(), "y" | "yes"))
+}
+
+// ── OS trust store install ──────────────────────────────────────────────
+
+/// Install the pinned PEM into the OS-level trust store. Platform-
+/// specific. Returns a human-readable success message on success.
+fn install_into_os_trust_store(pem_path: &Path) -> Result<String> {
+    #[cfg(windows)]
+    {
+        install_windows(pem_path)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        install_macos(pem_path)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        install_linux(pem_path)
+    }
+}
+
+/// Detect whether the current process is running with an elevated
+/// administrator token. Failure to probe is treated as "not elevated",
+/// which is the safer default — we'll re-launch via UAC.
+#[cfg(windows)]
+fn is_elevated() -> bool {
+    use std::process::Command;
+    // `net session` returns exit 0 only for members of the Administrators
+    // group running with an elevated token. It's a well-known idiom and
+    // avoids pulling a whole Win32 crate just to read TOKEN_ELEVATION.
+    Command::new("net")
+        .args(["session"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn install_windows(pem_path: &Path) -> Result<String> {
+    use std::process::Command;
+    let path_str = pem_path.to_string_lossy().to_string();
+
+    if is_elevated() {
+        let out = Command::new("certutil")
+            .args(["-addstore", "-f", "Root", &path_str])
+            .output()
+            .context("running certutil")?;
+        if out.status.success() {
+            return Ok(format!(
+                "Installed into Windows LocalMachine\\Root (machine-wide)."
+            ));
+        }
+        bail!(
+            "certutil exited with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    // Non-elevated: re-launch certutil via PowerShell's `Start-Process
+    // -Verb RunAs`, which pops the UAC consent dialog. `-Wait` blocks
+    // until the child exits so we know whether the install succeeded.
+    println!("Requesting administrator elevation (you'll see a UAC prompt)...");
+
+    // Escape single quotes in the path (rare but possible).
+    let ps_path = path_str.replace('\'', "''");
+    let ps = format!(
+        "try {{ $p = Start-Process -FilePath 'certutil.exe' \
+         -ArgumentList @('-addstore','-f','Root','{ps_path}') \
+         -Verb RunAs -Wait -PassThru -WindowStyle Hidden; \
+         exit $p.ExitCode }} catch {{ exit 1 }}"
+    );
+
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .status()
+        .context("launching elevated powershell")?;
+
+    if status.success() {
+        Ok("Installed into Windows LocalMachine\\Root (machine-wide).".into())
+    } else {
+        bail!(
+            "elevated certutil was cancelled or failed (exit {}). You can \
+             re-run from an Administrator PowerShell: \
+             `certutil -addstore -f Root \"{path_str}\"`",
+            status.code().unwrap_or(-1)
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos(pem_path: &Path) -> Result<String> {
+    use std::process::Command;
+    let out = Command::new("security")
+        .args([
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+        ])
+        .arg(pem_path)
+        .output()
+        .context("running /usr/bin/security")?;
+    if out.status.success() {
+        Ok("Installed into /Library/Keychains/System.keychain (machine-wide).".into())
+    } else {
+        bail!(
+            "security exited with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn install_linux(pem_path: &Path) -> Result<String> {
+    // The portable Linux recipe — copy into /usr/local/share/ca-certificates
+    // and run update-ca-certificates — needs root. Rather than trying to
+    // shell out to sudo from here (which would surprise users), we print
+    // the one-liner they should run.
+    let p = pem_path.display();
+    Ok(format!(
+        "To trust this CA system-wide on Linux, run:\n  \
+         sudo cp {p} /usr/local/share/ca-certificates/forge-vcs-ca.crt && \
+         sudo update-ca-certificates"
     ))
 }
 

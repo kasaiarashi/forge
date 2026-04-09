@@ -1237,6 +1237,7 @@ dependencies = [
  "walkdir",
  "webpki-roots 0.26.11",
  "whoami",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1324,6 +1325,7 @@ dependencies = [
  "axum-server",
  "chrono",
  "clap 4.6.0",
+ "forge-core",
  "forge-proto",
  "hex",
  "if-addrs",

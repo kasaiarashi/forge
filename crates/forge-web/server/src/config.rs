@@ -57,6 +57,15 @@ pub struct WebConfig {
     /// Request-rate limits applied to `/api/auth/*`. Absent = defaults.
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+
+    /// If set (and TLS is enabled), spawn a sibling listener on this port
+    /// that 308-redirects every request to the HTTPS URL. Bound on the
+    /// same interface as `listen`, so a config like
+    /// `listen = "0.0.0.0:3000"` + `http_redirect_port = 80` gives you
+    /// `http://host/...` → `https://host:3000/...` out of the box.
+    /// Absent = no redirect listener.
+    #[serde(default)]
+    pub http_redirect_port: Option<u16>,
 }
 
 /// TLS settings for the HTTPS listener.
@@ -172,6 +181,7 @@ impl Default for Config {
                 secure_cookies: false,
                 tls: TlsConfig::default(),
                 rate_limit: RateLimitConfig::default(),
+                http_redirect_port: None,
             },
             server: ServerConfig {
                 grpc_url: default_grpc_url(),

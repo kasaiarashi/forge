@@ -16,8 +16,13 @@
 #include "Serialization/JsonSerializer.h"
 #include "HAL/PlatformProcess.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "Widgets/Notifications/SNotificationList.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Framework/Notifications/NotificationManager.h"
 
 #define LOCTEXT_NAMESPACE "ForgeSourceControl"
 
@@ -407,8 +412,16 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 {
 	FForgeSourceControlProvider* MutableThis = const_cast<FForgeSourceControlProvider*>(this);
 
-	return SNew(SVerticalBox)
-		+ SVerticalBox::Slot()
+	// Pre-fill user name from the OS so the common case ("accept defaults")
+	// actually works without typing anything.
+	TSharedRef<FString> RemoteUrlRef = MakeShared<FString>();
+	TSharedRef<FString> UserNameRef = MakeShared<FString>(FPlatformProcess::UserName());
+	TSharedRef<FString> UserEmailRef = MakeShared<FString>();
+
+	TSharedRef<SVerticalBox> Root = SNew(SVerticalBox);
+
+	// ── Forge executable path (always shown) ────────────────────────────────
+	Root->AddSlot()
 		.AutoHeight()
 		.Padding(2.0f)
 		[
@@ -431,6 +444,115 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 				})
 			]
 		];
+
+	// ── Init section: only shown when no workspace has been detected ────────
+	if (!bIsAvailable)
+	{
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 8.0f, 2.0f, 2.0f)
+			[
+				SNew(SSeparator)
+			];
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("InitHeader", "No Forge workspace detected for this project."))
+				.AutoWrapText(true)
+			];
+
+		auto MakeRow = [](const FText& Label, TSharedRef<FString> Target, const FText& Hint)
+		{
+			return SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+				[
+					SNew(SBox)
+					.WidthOverride(110.0f)
+					[
+						SNew(STextBlock).Text(Label)
+					]
+				]
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				[
+					SNew(SEditableTextBox)
+					.Text(FText::FromString(*Target))
+					.HintText(Hint)
+					.OnTextChanged_Lambda([Target](const FText& NewText)
+					{
+						*Target = NewText.ToString();
+					})
+				];
+		};
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 4.0f)
+			[
+				MakeRow(
+					LOCTEXT("UserNameLabel", "User Name:"),
+					UserNameRef,
+					LOCTEXT("UserNameHint", "Your display name"))
+			];
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 4.0f)
+			[
+				MakeRow(
+					LOCTEXT("UserEmailLabel", "User Email:"),
+					UserEmailRef,
+					LOCTEXT("UserEmailHint", "you@example.com (optional)"))
+			];
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 4.0f)
+			[
+				MakeRow(
+					LOCTEXT("RemoteUrlLabel", "Remote URL:"),
+					RemoteUrlRef,
+					LOCTEXT("RemoteUrlHint", "https://server/owner/repo (optional)"))
+			];
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 8.0f)
+			.HAlign(HAlign_Left)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("InitButton", "Initialize Project with Forge"))
+				.ToolTipText(LOCTEXT("InitButtonTooltip",
+					"Creates a .forge workspace in the project directory, sets your user info, "
+					"and (if provided) adds an 'origin' remote."))
+				.OnClicked_Lambda([MutableThis, RemoteUrlRef, UserNameRef, UserEmailRef]()
+				{
+					FText Error;
+					const bool bOk = MutableThis->InitializeWorkspace(
+						*RemoteUrlRef, *UserNameRef, *UserEmailRef, Error);
+
+					FNotificationInfo Info(bOk
+						? LOCTEXT("InitOk", "Forge workspace initialized.")
+						: FText::Format(LOCTEXT("InitFailFmt", "Forge init failed: {0}"), Error));
+					Info.ExpireDuration = bOk ? 4.0f : 8.0f;
+					FSlateNotificationManager::Get().AddNotification(Info);
+
+					if (bOk)
+					{
+						MutableThis->RefreshStatusAsync();
+					}
+					return FReply::Handled();
+				})
+			];
+	}
+
+	return Root;
 }
 
 // ── CLI execution (thread-safe) ─────────────────────────────────────────────
@@ -485,6 +607,97 @@ bool FForgeSourceControlProvider::RunForgeCommandRaw(const FString& Args) const
 		return false;
 	}
 
+	return true;
+}
+
+bool FForgeSourceControlProvider::RunForgeCommandInDir(
+	const FString& Args, const FString& Dir, FString& OutStdErr) const
+{
+	int32 ReturnCode = -1;
+	FString StdOut;
+
+	UE_LOG(LogSourceControl, Log, TEXT("Forge: (cwd=%s) forge %s"), *Dir, *Args);
+
+	FPlatformProcess::ExecProcess(
+		*ForgeExePath, *Args,
+		&ReturnCode, &StdOut, &OutStdErr, *Dir);
+
+	if (ReturnCode != 0)
+	{
+		UE_LOG(LogSourceControl, Warning, TEXT("Forge: exit %d: forge %s\n%s"),
+			ReturnCode, *Args, *OutStdErr);
+		return false;
+	}
+	return true;
+}
+
+// ── Workspace bootstrap ─────────────────────────────────────────────────────
+
+bool FForgeSourceControlProvider::InitializeWorkspace(
+	const FString& RemoteUrl,
+	const FString& UserName,
+	const FString& UserEmail,
+	FText& OutError)
+{
+	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	if (!FPaths::DirectoryExists(ProjectDir))
+	{
+		OutError = LOCTEXT("InitErrNoDir", "Project directory does not exist.");
+		return false;
+	}
+
+	// Block re-init if a .forge dir is already present — the CLI would error
+	// anyway, but a clear message up-front is friendlier than surfacing stderr.
+	if (FPaths::DirectoryExists(ProjectDir / TEXT(".forge")))
+	{
+		OutError = LOCTEXT("InitErrAlreadyInit", "This project already has a .forge workspace.");
+		return false;
+	}
+
+	FString StdErr;
+
+	// 1. forge init
+	if (!RunForgeCommandInDir(TEXT("init"), ProjectDir, StdErr))
+	{
+		OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("forge init failed") : StdErr);
+		return false;
+	}
+
+	// 2. user.name / user.email — only set if non-empty so we don't overwrite
+	//    the CLI's whoami-derived default with a blank string.
+	if (!UserName.IsEmpty())
+	{
+		const FString Args = FString::Printf(TEXT("config set user.name \"%s\""), *UserName);
+		if (!RunForgeCommandInDir(Args, ProjectDir, StdErr))
+		{
+			OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("failed to set user.name") : StdErr);
+			return false;
+		}
+	}
+	if (!UserEmail.IsEmpty())
+	{
+		const FString Args = FString::Printf(TEXT("config set user.email \"%s\""), *UserEmail);
+		if (!RunForgeCommandInDir(Args, ProjectDir, StdErr))
+		{
+			OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("failed to set user.email") : StdErr);
+			return false;
+		}
+	}
+
+	// 3. remote add origin — optional; skip entirely if user didn't provide one.
+	if (!RemoteUrl.IsEmpty())
+	{
+		const FString Args = FString::Printf(TEXT("remote add origin \"%s\""), *RemoteUrl);
+		if (!RunForgeCommandInDir(Args, ProjectDir, StdErr))
+		{
+			OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("failed to add remote") : StdErr);
+			return false;
+		}
+	}
+
+	// Re-run Init() so WorkspaceRoot / CurrentUserName / bIsAvailable pick up
+	// the freshly-created .forge without an editor restart.
+	Init(false);
 	return true;
 }
 

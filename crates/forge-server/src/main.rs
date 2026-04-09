@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 mod auth;
+#[cfg(windows)]
+mod cert_install;
 mod cli_admin;
 mod config;
 #[cfg(windows)]
@@ -408,6 +410,31 @@ pub(crate) async fn serve_inner(
             }
             tls_autogen::ensure(&paths, &sans)
                 .context("auto-generating TLS certificates")?;
+        }
+
+        // On Windows, push the CA into the system trust store so clients
+        // using the OS root set (forge-web's gRPC channel, browsers, curl)
+        // stop tripping on our self-signed chain. No-op elsewhere.
+        #[cfg(windows)]
+        cert_install::ensure_ca_trusted(&paths.ca_cert);
+
+        // Publish the full cert bundle (CA + leaf + key) to a well-known
+        // shared path. Two things fall out of this:
+        //
+        //   1. forge-web's gRPC client auto-discovers the CA and pins it
+        //      as its sole TLS trust root — no OS-trust-store dance.
+        //   2. forge-web's HTTPS listener reuses the SAME leaf + key for
+        //      serving browsers, so there's one cert to trust instead of
+        //      two separate CAs.
+        //
+        // See `forge_core::ca_publish` for the target-dir fallback chain
+        // and the security caveat around key readability.
+        if paths.ca_cert.exists() && paths.leaf_cert.exists() && paths.leaf_key.exists() {
+            let _ = forge_core::ca_publish::publish_bundle(
+                &paths.ca_cert,
+                &paths.leaf_cert,
+                &paths.leaf_key,
+            );
         }
 
         let cert_pem = std::fs::read(&paths.leaf_cert)

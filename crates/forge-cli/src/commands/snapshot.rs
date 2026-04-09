@@ -69,9 +69,21 @@ pub fn run(message: String, all: bool, json: bool) -> Result<()> {
 
     let snap_hash = ws.object_store.put_snapshot(&snapshot)?;
 
-    // Update branch ref.
-    if let HeadRef::Branch(branch) = ws.head()? {
-        ws.set_branch_tip(&branch, &snap_hash)?;
+    // Advance HEAD to the new snapshot.
+    //
+    //  * Branch HEAD: update the branch tip. HEAD is "ref: refs/heads/X",
+    //    so moving the branch tip implicitly moves HEAD with it.
+    //  * Detached HEAD: rewrite HEAD itself so the new commit is
+    //    reachable. Without this, the snapshot would go into the object
+    //    store but nothing would reference it — a silent data-loss bug
+    //    that orphans every commit made while detached.
+    match ws.head()? {
+        HeadRef::Branch(branch) => {
+            ws.set_branch_tip(&branch, &snap_hash)?;
+        }
+        HeadRef::Detached(_) => {
+            ws.set_head(&HeadRef::Detached(snap_hash))?;
+        }
     }
 
     // Remove deleted entries (ZERO hash) and clear staged flags.

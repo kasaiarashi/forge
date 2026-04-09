@@ -357,6 +357,7 @@ pub(crate) async fn serve_inner(
     let tls_cfg = cfg.web.tls.clone();
     let tls_enabled = tls_cfg.enabled;
     let rate_limit = cfg.web.rate_limit.clone();
+    let http_redirect_port = cfg.web.http_redirect_port;
     // Secure cookie attribute: on when forge-web terminates TLS itself OR
     // when the operator explicitly opted in via `secure_cookies = true`. A
     // loopback plaintext dev server is the only scenario where this should
@@ -624,17 +625,48 @@ pub(crate) async fn serve_inner(
 
     if tls_enabled {
         let tls = tls_cfg;
-        // Resolve cert/key paths, with auto-generate fallback under
-        // ./forge-web-certs/ if the operator didn't provide paths.
-        let cert_base = std::path::Path::new("./forge-web-certs");
-        let defaults = tls_autogen::TlsPaths::under(cert_base);
-        let paths = tls_autogen::TlsPaths {
-            ca_cert: defaults.ca_cert.clone(),
-            ca_key: defaults.ca_key.clone(),
-            leaf_cert: tls.cert_path.clone().unwrap_or(defaults.leaf_cert),
-            leaf_key: tls.key_path.clone().unwrap_or(defaults.leaf_key),
+
+        // Prefer forge-server's published bundle over generating our
+        // own. Rationale: when both processes run co-located, there's no
+        // reason to have two distinct self-signed CAs — one trust root
+        // is simpler for operators, easier for browsers, and eliminates
+        // the "which cert am I looking at?" confusion. The bundle path
+        // is only taken when the operator hasn't pinned an explicit
+        // cert_path/key_path, so manual overrides still win.
+        let shared = if tls.cert_path.is_none() && tls.key_path.is_none() {
+            forge_core::ca_publish::discover_bundle()
+        } else {
+            None
         };
-        if tls.auto_generate {
+
+        let paths = if let Some(ref b) = shared {
+            tracing::info!(
+                "Using forge-server's published cert bundle from {}",
+                b.dir.display()
+            );
+            tls_autogen::TlsPaths {
+                ca_cert: b.ca_cert.clone(),
+                ca_key: b.dir.join("ca.key"), // Not used in this path — bundle has no ca.key.
+                leaf_cert: b.leaf_cert.clone(),
+                leaf_key: b.leaf_key.clone(),
+            }
+        } else {
+            // Fallback: resolve cert/key paths with auto-generate under
+            // ./forge-web-certs/ if the operator didn't provide paths.
+            let cert_base = std::path::Path::new("./forge-web-certs");
+            let defaults = tls_autogen::TlsPaths::under(cert_base);
+            tls_autogen::TlsPaths {
+                ca_cert: defaults.ca_cert.clone(),
+                ca_key: defaults.ca_key.clone(),
+                leaf_cert: tls.cert_path.clone().unwrap_or(defaults.leaf_cert),
+                leaf_key: tls.key_path.clone().unwrap_or(defaults.leaf_key),
+            }
+        };
+
+        // Auto-generate only when we're managing our own cert dir —
+        // reusing forge-server's bundle means forge-server owns the
+        // rotation lifecycle and we should never touch those files.
+        if tls.auto_generate && shared.is_none() {
             let mut sans = tls.hostnames.clone();
             let listen_ip = addr.ip();
             if listen_ip.is_unspecified() {
@@ -659,12 +691,19 @@ pub(crate) async fn serve_inner(
 
         tracing::info!("forge-web listening on https://{addr}");
         if let Some(fp) = tls_autogen::cert_fingerprint(&paths.ca_cert) {
-            tracing::warn!(
-                "\n*** forge-web CA fingerprint (SHA-256):\n***   {fp}\n\
-                 *** Import {} into your OS trust store to remove the \
-                 browser warning.",
-                paths.ca_cert.display()
-            );
+            if shared.is_some() {
+                tracing::info!(
+                    "forge-web sharing forge-server CA (SHA-256 {})",
+                    fp
+                );
+            } else {
+                tracing::warn!(
+                    "\n*** forge-web CA fingerprint (SHA-256):\n***   {fp}\n\
+                     *** Import {} into your OS trust store to remove the \
+                     browser warning.",
+                    paths.ca_cert.display()
+                );
+            }
         }
 
         let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
@@ -679,6 +718,30 @@ pub(crate) async fn serve_inner(
                 paths.leaf_key
             )
         })?;
+
+        // Optional sibling listener that 308-redirects every HTTP request
+        // to the matching HTTPS URL. Spawned under the same graceful
+        // shutdown handle as the main HTTPS server so Ctrl+C tears both
+        // down cleanly.
+        if let Some(http_port) = http_redirect_port {
+            let redirect_addr =
+                std::net::SocketAddr::new(addr.ip(), http_port);
+            let https_port = addr.port();
+            let redirect_handle = handle.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    run_http_redirect(redirect_addr, https_port, redirect_handle).await
+                {
+                    tracing::warn!(
+                        "HTTP→HTTPS redirect listener on {redirect_addr} exited: {e}"
+                    );
+                }
+            });
+            tracing::info!(
+                "HTTP→HTTPS redirect listening on http://{redirect_addr}"
+            );
+        }
+
         axum_server::bind_rustls(addr, rustls)
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
@@ -692,6 +755,61 @@ pub(crate) async fn serve_inner(
     }
 
     tracing::info!("forge-web stopped cleanly");
+    Ok(())
+}
+
+/// Minimal HTTP listener that 308-redirects every request to the
+/// corresponding HTTPS URL on `https_port`. Bound via `axum_server::bind`
+/// so it shares the same graceful shutdown handle as the main HTTPS
+/// listener.
+///
+/// Hostname is taken from the incoming `Host` header — we can't use
+/// `listen_addr` because we want `http://example.com/x` to redirect to
+/// `https://example.com:<port>/x`, not `https://<bind-ip>:<port>/x`.
+/// If the request has no `Host` header (unusual for HTTP/1.1 but legal
+/// for some automated probes) we fall back to the listen address.
+async fn run_http_redirect(
+    addr: std::net::SocketAddr,
+    https_port: u16,
+    handle: axum_server::Handle,
+) -> anyhow::Result<()> {
+    use axum::extract::{Host, OriginalUri};
+    use axum::response::Redirect;
+
+    let fallback_host = addr.ip().to_string();
+    let redirect = move |host: Option<Host>, OriginalUri(uri): OriginalUri| {
+        let fallback = fallback_host.clone();
+        async move {
+            // Strip any port the client sent in the Host header — the
+            // incoming port is the HTTP port, which we need to rewrite.
+            let host_no_port = host
+                .map(|Host(h)| h.split(':').next().unwrap_or("").to_string())
+                .filter(|h| !h.is_empty())
+                .unwrap_or(fallback);
+
+            // Preserve path + query exactly.
+            let path_and_query = uri
+                .path_and_query()
+                .map(|p| p.as_str())
+                .unwrap_or("/");
+
+            // Omit the explicit port on the canonical HTTPS port (443)
+            // so browsers show clean URLs.
+            let target = if https_port == 443 {
+                format!("https://{host_no_port}{path_and_query}")
+            } else {
+                format!("https://{host_no_port}:{https_port}{path_and_query}")
+            };
+            Redirect::permanent(&target)
+        }
+    };
+
+    let app: Router = Router::new().fallback(redirect);
+
+    axum_server::bind(addr)
+        .handle(handle)
+        .serve(app.into_make_service())
+        .await?;
     Ok(())
 }
 

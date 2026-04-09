@@ -103,6 +103,26 @@ public:
 	bool RunForgeCommand(const FString& Args, TSharedPtr<FJsonObject>& OutResult) const;
 	bool RunForgeCommandRaw(const FString& Args) const;
 
+	/**
+	 * Run the CLI in an explicit working directory. Needed for workspace
+	 * bootstrap (forge init, config set, remote add) which must execute in the
+	 * project dir before `WorkspaceRoot` is known.
+	 */
+	bool RunForgeCommandInDir(const FString& Args, const FString& Dir, FString& OutStdErr) const;
+
+	/**
+	 * Bootstrap a Forge workspace in the current project dir.
+	 *
+	 * Runs `forge init`, sets user.name/email, and (if RemoteUrl is non-empty)
+	 * registers an `origin` remote. On success, re-runs Init() so IsAvailable()
+	 * flips to true without an editor restart.
+	 */
+	bool InitializeWorkspace(
+		const FString& RemoteUrl,
+		const FString& UserName,
+		const FString& UserEmail,
+		FText& OutError);
+
 	const FString& GetWorkspaceRoot() const { return WorkspaceRoot; }
 	const FString& GetCurrentUserName() const { return CurrentUserName; }
 

@@ -6,6 +6,26 @@ mod tofu;
 mod url_resolver;
 
 use clap::{Parser, Subcommand};
+use std::cell::RefCell;
+
+// Thread-local "current command server URL hint". Commands that know the
+// target server up-front (`forge clone <url>`) stash it here so that if
+// auth fails mid-execution, `offer_login` prompts with the correct URL
+// instead of asking the user to re-type it.
+thread_local! {
+    static SERVER_URL_HINT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Set the current command's server URL hint. Called by commands that
+/// carry an explicit URL argument (e.g. `clone`).
+pub(crate) fn set_server_url_hint(url: impl Into<String>) {
+    SERVER_URL_HINT.with(|h| *h.borrow_mut() = Some(url.into()));
+}
+
+/// Read the hint. `None` when no command stashed one.
+fn server_url_hint() -> Option<String> {
+    SERVER_URL_HINT.with(|h| h.borrow().clone())
+}
 
 #[derive(Parser)]
 #[command(name = "forge", about = "Version control for Unreal Engine", version)]
@@ -60,6 +80,10 @@ enum Commands {
         /// Extract two versions to temp files (for external diff tools / UE editor)
         #[arg(long)]
         extract: bool,
+
+        /// Disable the pager and write output directly to stdout
+        #[arg(long)]
+        no_pager: bool,
 
         /// File paths to restrict diff to
         paths: Vec<String>,
@@ -165,10 +189,17 @@ enum Commands {
         delete: bool,
     },
 
-    /// Switch to a branch
+    /// Switch to a branch (optionally creating it first)
     Switch {
         /// Branch name
         name: String,
+
+        /// Create <name> at current HEAD before switching. Like
+        /// `git switch -c <name>` or `git checkout -b <name>` — the
+        /// canonical way to promote a detached HEAD into a branch you
+        /// can commit onto.
+        #[arg(short = 'c', long = "create")]
+        create: bool,
     },
 
     /// Manage .forgeignore patterns
@@ -386,7 +417,7 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Add { paths } => commands::add::run(paths)?,
         Commands::Commit { message, all } => commands::snapshot::run(message, all, cli.json)?,
         Commands::Status => commands::status::run(cli.json)?,
-        Commands::Diff { commit, staged, stat, extract, paths } => commands::diff::run(commit, staged, stat, extract, paths, cli.json)?,
+        Commands::Diff { commit, staged, stat, extract, no_pager, paths } => commands::diff::run(commit, staged, stat, extract, paths, no_pager, cli.json)?,
         Commands::Log { count, file, oneline, all, no_pager } => commands::log::run(count, file, oneline, all, no_pager, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
@@ -397,7 +428,7 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Unstage { paths } => commands::unstage::run(paths)?,
         Commands::Restore { staged, source, paths } => commands::restore::run(staged, source, paths)?,
         Commands::Branch { name, delete } => commands::branch::run(name, delete, cli.json)?,
-        Commands::Switch { name } => commands::switch::run(name)?,
+        Commands::Switch { name, create } => commands::switch::run_with_create(name, create)?,
         Commands::Ignore { patterns } => commands::ignore::run(patterns)?,
         Commands::Remote { action, args } => commands::remote::run(action, args)?,
         Commands::Config { key, value } => commands::config_cmd::run(key, value)?,
@@ -501,13 +532,18 @@ fn find_tonic_status(err: &anyhow::Error) -> Option<&tonic::Status> {
 fn offer_login() {
     use std::io::{IsTerminal, Write};
 
-    // Try to discover the workspace's default remote so the suggestion is
-    // ready-to-paste with the correct --server.
-    let server = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| forge_core::workspace::Workspace::discover(&cwd).ok())
-        .and_then(|ws| ws.config().ok())
-        .and_then(|c| c.default_remote_url().map(str::to_string));
+    // Resolution order for the --server URL we'll pre-fill:
+    //   1. Hint stashed by the running command (e.g. `forge clone <url>`
+    //      sets this before the workspace even exists).
+    //   2. Default remote from a discovered workspace under cwd.
+    let server = server_url_hint()
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| forge_core::workspace::Workspace::discover(&cwd).ok())
+                .and_then(|ws| ws.config().ok())
+                .and_then(|c| c.default_remote_url().map(str::to_string))
+        });
 
     let suggestion = match &server {
         Some(s) => format!("forge login --server {s}"),

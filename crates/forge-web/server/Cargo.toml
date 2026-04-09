@@ -6,6 +6,7 @@ authors = ["Krishna Teja <krishna18developer@gmail.com>"]
 
 [dependencies]
 forge-proto = { path = "../../forge-proto" }
+forge-core = { path = "../../forge-core" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12", features = ["tls", "tls-roots"] }
