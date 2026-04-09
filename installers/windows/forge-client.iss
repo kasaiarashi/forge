@@ -13,7 +13,7 @@
   #define PluginDir "..\..\plugin\ForgeSourceControl\Plugins\ForgeSourceControl"
 #endif
 
-#define FabMarketplaceURL "https://www.fab.com/listings/forge-source-control"
+#define FabMarketplaceURL "https://www.fab.com/listings/7cd90180-8c2f-4b64-a772-2f010cec0105"
 
 [Setup]
 AppName=Forge VCS
