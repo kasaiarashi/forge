@@ -24,7 +24,9 @@
 //! Phases 2/3/4 add the CLI subcommands, the gRPC interceptor, the per-handler
 //! authorization helpers, and the client wiring.
 
+pub mod authorize;
 pub mod caller;
+pub mod interceptor;
 pub mod password;
 pub mod store;
 pub mod tokens;

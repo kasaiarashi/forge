@@ -1,6 +1,171 @@
 syntax = "proto3";
 package forge;
 
+// ============================================================
+// AuthService — identity, sessions, PATs, ACLs, server bootstrap
+// ============================================================
+//
+// The CLI and the web UI both consume this. Sessions back the web UI's
+// HttpOnly cookie; PATs are what the CLI stores in ~/.forge/credentials.
+// All authz checks live on the server side and are enforced by the gRPC
+// auth interceptor + per-handler require_* helpers in forge-server.
+
+service AuthService {
+    // Identity
+    rpc Login(LoginRequest) returns (LoginResponse);
+    rpc Logout(LogoutRequest) returns (LogoutResponse);
+    rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+
+    // Personal Access Tokens (caller acts on themself)
+    rpc CreatePersonalAccessToken(CreatePatRequest) returns (CreatePatResponse);
+    rpc ListPersonalAccessTokens(ListPatsRequest) returns (ListPatsResponse);
+    rpc RevokePersonalAccessToken(RevokePatRequest) returns (RevokePatResponse);
+
+    // Sessions (caller acts on themself)
+    rpc ListMySessions(ListSessionsRequest) returns (ListSessionsResponse);
+    rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
+
+    // User admin (server admin only)
+    rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+    rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+    rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+    // Repo ACLs (repo admin or server admin)
+    rpc GrantRepoRole(GrantRepoRoleRequest) returns (GrantRepoRoleResponse);
+    rpc RevokeRepoRole(RevokeRepoRoleRequest) returns (RevokeRepoRoleResponse);
+    rpc ListRepoMembers(ListRepoMembersRequest) returns (ListRepoMembersResponse);
+
+    // Server bootstrap (unauthenticated; rejects after first user exists)
+    rpc IsServerInitialized(IsServerInitializedRequest) returns (IsServerInitializedResponse);
+    rpc BootstrapAdmin(BootstrapAdminRequest) returns (BootstrapAdminResponse);
+}
+
+message UserInfo {
+    int64  id = 1;
+    string username = 2;
+    string email = 3;
+    string display_name = 4;
+    bool   is_server_admin = 5;
+    int64  created_at = 6;
+    int64  last_login_at = 7; // 0 if never
+}
+
+message SessionInfo {
+    int64  id = 1;
+    int64  user_id = 2;
+    int64  created_at = 3;
+    int64  last_used_at = 4;
+    int64  expires_at = 5;
+    string user_agent = 6;
+    string ip = 7;
+}
+
+message PatInfo {
+    int64  id = 1;
+    string name = 2;
+    int64  user_id = 3;
+    repeated string scopes = 4;
+    int64  created_at = 5;
+    int64  last_used_at = 6;
+    int64  expires_at = 7; // 0 = never
+}
+
+message LoginRequest {
+    string username = 1;
+    string password = 2;
+    string user_agent = 3; // optional, set by web UI
+    string ip = 4;          // optional, set by web UI
+}
+
+message LoginResponse {
+    string session_token = 1; // plaintext session token, set as HttpOnly cookie
+    UserInfo user = 2;
+    int64 expires_at = 3;
+}
+
+message LogoutRequest {} // session token comes from auth header
+
+message LogoutResponse { bool success = 1; }
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+    bool authenticated = 1;
+    UserInfo user = 2;
+    repeated string scopes = 3; // active scopes for this credential
+}
+
+message CreatePatRequest {
+    string name = 1;
+    repeated string scopes = 2;        // e.g. ["repo:read","repo:write"]
+    int64  expires_at = 3;             // 0 = never
+}
+
+message CreatePatResponse {
+    string plaintext_token = 1; // shown ONCE — never persisted as plaintext
+    PatInfo pat = 2;
+}
+
+message ListPatsRequest {}
+message ListPatsResponse { repeated PatInfo pats = 1; }
+
+message RevokePatRequest { int64 id = 1; }
+message RevokePatResponse { bool success = 1; }
+
+message ListSessionsRequest {}
+message ListSessionsResponse { repeated SessionInfo sessions = 1; }
+
+message RevokeSessionRequest { int64 id = 1; }
+message RevokeSessionResponse { bool success = 1; }
+
+message CreateUserRequest {
+    string username = 1;
+    string email = 2;
+    string display_name = 3;
+    string password = 4;
+    bool   is_server_admin = 5;
+}
+message CreateUserResponse { UserInfo user = 1; }
+
+message ListUsersRequest {}
+message ListUsersResponse { repeated UserInfo users = 1; }
+
+message DeleteUserRequest { int64 id = 1; }
+message DeleteUserResponse { bool success = 1; }
+
+message GrantRepoRoleRequest {
+    string repo = 1;
+    int64  user_id = 2;
+    string role = 3; // "read" | "write" | "admin"
+}
+message GrantRepoRoleResponse { bool success = 1; }
+
+message RevokeRepoRoleRequest {
+    string repo = 1;
+    int64  user_id = 2;
+}
+message RevokeRepoRoleResponse { bool success = 1; }
+
+message ListRepoMembersRequest { string repo = 1; }
+message ListRepoMembersResponse {
+    repeated RepoMember members = 1;
+}
+message RepoMember {
+    UserInfo user = 1;
+    string role = 2;
+}
+
+message IsServerInitializedRequest {}
+message IsServerInitializedResponse { bool initialized = 1; }
+
+message BootstrapAdminRequest {
+    string username = 1;
+    string email = 2;
+    string display_name = 3;
+    string password = 4;
+}
+message BootstrapAdminResponse { UserInfo user = 1; }
+
 service ForgeService {
     // Object transfer (scoped to repo)
     rpc PushObjects(stream ObjectChunk) returns (PushResponse);

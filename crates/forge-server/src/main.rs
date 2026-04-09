@@ -16,7 +16,9 @@ use tonic::transport::Server;
 use tracing::info;
 
 use config::ServerConfig;
+use forge_proto::forge::auth_service_server::AuthServiceServer;
 use forge_proto::forge::forge_service_server::ForgeServiceServer;
+use services::auth_service::ForgeAuthService;
 use services::grpc::ForgeGrpcService;
 use storage::db::MetadataDb;
 use storage::fs::FsStorage;
@@ -231,15 +233,27 @@ async fn main() -> Result<()> {
 
     let max_msg = config.server.max_message_size as usize;
 
-    let svc = ForgeServiceServer::new(service)
+    // Build the shared user store + auth interceptor.
+    let user_store: Arc<dyn auth::UserStore> =
+        Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
+    let interceptor = auth::interceptor::make_interceptor(Arc::clone(&user_store));
+
+    let forge_svc = ForgeServiceServer::new(service)
         .max_decoding_message_size(max_msg)
         .max_encoding_message_size(max_msg);
+    let auth_svc = AuthServiceServer::new(ForgeAuthService {
+        store: Arc::clone(&user_store),
+    });
 
-    // TODO(auth phase 3): wrap `svc` with the new auth interceptor that consults
-    // forge_server::auth::SqliteUserStore. Phase 1 only adds the schema + store;
-    // until phase 3 wires the interceptor, the gRPC service is unauthenticated.
     Server::builder()
-        .add_service(svc)
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            forge_svc,
+            interceptor.clone(),
+        ))
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            auth_svc,
+            interceptor,
+        ))
         .serve(addr)
         .await?;
 
