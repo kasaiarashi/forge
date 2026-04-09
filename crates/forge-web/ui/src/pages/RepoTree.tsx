@@ -53,6 +53,9 @@ export default function RepoTree() {
   const [activeBranch, setActiveBranch] = useState(branch || '');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // True if the repo exists but has zero branches (no commits pushed yet).
+  // We render the quickstart instructions instead of trying to load a tree.
+  const [isEmpty, setIsEmpty] = useState(false);
   const [latestCommit, setLatestCommit] = useState<CommitSummary | null>(null);
   const [commitCount, setCommitCount] = useState(0);
   const [repoInfo, setRepoInfo] = useState<RepoInfo | null>(null);
@@ -75,6 +78,7 @@ export default function RepoTree() {
   useEffect(() => {
     setLoading(true);
     setError('');
+    setIsEmpty(false);
 
     const loadData = async () => {
       try {
@@ -85,6 +89,14 @@ export default function RepoTree() {
         setBranches(br);
         const ri = repos.find(r => r.name === repo) || null;
         setRepoInfo(ri);
+
+        // Empty repo: no branches yet → show the quickstart instructions
+        // instead of trying to load a tree from a branch that doesn't exist.
+        if (br.length === 0) {
+          setIsEmpty(true);
+          setLoading(false);
+          return;
+        }
 
         const resolvedBranch = branch || (br.find(b => b.name === 'main') || br[0])?.name || 'main';
         setActiveBranch(resolvedBranch);
@@ -137,6 +149,72 @@ export default function RepoTree() {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: '48px 0' }}>
         <Spinner size="large" />
+      </div>
+    );
+  }
+
+  if (isEmpty) {
+    // Quickstart instructions for an empty repo. Same shape as the
+    // "Quick setup for {repo}" card in Dashboard.tsx so refresh / direct
+    // navigation feels consistent.
+    const quickstartInit = [
+      'forge init',
+      `forge config repo ${repo}`,
+      'forge config user.name "Your Name"',
+      `forge remote add origin ${cloneUrl}`,
+      'forge add .',
+      'forge commit -m "Initial commit"',
+      'forge push',
+    ];
+    const quickstartPush = [
+      `forge config repo ${repo}`,
+      `forge remote add origin ${cloneUrl}`,
+      'forge push',
+    ];
+    return (
+      <div>
+        <RepoHeader repo={repo} currentTab="code" activeBranch="main" />
+        <div className="forge-card" style={{ marginTop: '16px' }}>
+          <div className="forge-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <CodeIcon size={16} />
+            <span style={{ fontWeight: 600 }}>Quick setup — {repo} is empty</span>
+          </div>
+          <div style={{ padding: '16px' }}>
+            <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 16px 0' }}>
+              Get started by creating a new file or pushing an existing repo from the command line.
+            </p>
+
+            <div style={{ marginBottom: '16px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--fg-muted)', marginBottom: '4px' }}>
+                Quick setup — clone URL
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <TextInput value={`forge clone ${cloneUrl}`} readOnly block monospace size="small" />
+                <Button leadingVisual={CopyIcon} size="small" onClick={copyCloneUrl}>
+                  {cloneCopied ? 'Copied!' : 'Copy'}
+                </Button>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--fg-muted)', marginBottom: '4px' }}>
+                …or create a new repository on the command line
+              </div>
+              <pre style={{ background: 'var(--bg-canvas-inset)', padding: '12px', borderRadius: '6px', fontSize: '12px', overflow: 'auto', margin: 0 }}>
+{quickstartInit.join('\n')}
+              </pre>
+            </div>
+
+            <div>
+              <div style={{ fontSize: '12px', color: 'var(--fg-muted)', marginBottom: '4px' }}>
+                …or push an existing repository
+              </div>
+              <pre style={{ background: 'var(--bg-canvas-inset)', padding: '12px', borderRadius: '6px', fontSize: '12px', overflow: 'auto', margin: 0 }}>
+{quickstartPush.join('\n')}
+              </pre>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }

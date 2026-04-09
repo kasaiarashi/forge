@@ -1102,6 +1102,12 @@ pub async fn language_stats(
 // ---------------------------------------------------------------------------
 
 /// Resolve a branch name to its HEAD commit hash via GetRefs.
+///
+/// "Not found" cases (empty repo, missing commit, missing branch) are
+/// returned as `tonic::Status::not_found` so the smart `internal_error`
+/// mapper translates them to HTTP 404 — letting the SPA distinguish
+/// "this repo has no commits yet, show quickstart" from "the server is
+/// broken, show a flash error".
 async fn resolve_branch(
     grpc: &crate::grpc_client::ForgeGrpcClient,
     repo: &str,
@@ -1133,7 +1139,9 @@ async fn resolve_branch(
                 }
             }
         }
-        anyhow::bail!("commit '{}' not found", branch);
+        return Err(
+            tonic::Status::not_found(format!("commit '{branch}' not found")).into(),
+        );
     }
 
     let refs_resp = grpc.get_refs(repo).await?;
@@ -1148,5 +1156,5 @@ async fn resolve_branch(
         }
     }
 
-    anyhow::bail!("branch '{}' not found", branch)
+    Err(tonic::Status::not_found(format!("branch '{branch}' not found")).into())
 }
