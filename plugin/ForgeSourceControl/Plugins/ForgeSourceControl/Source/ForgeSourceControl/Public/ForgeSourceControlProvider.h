@@ -103,6 +103,26 @@ public:
 	bool RunForgeCommand(const FString& Args, TSharedPtr<FJsonObject>& OutResult) const;
 	bool RunForgeCommandRaw(const FString& Args) const;
 
+	/**
+	 * Run the CLI in an explicit working directory. Needed for workspace
+	 * bootstrap (forge init, remote add) which must execute in the project
+	 * dir before `WorkspaceRoot` is known.
+	 */
+	bool RunForgeCommandInDir(const FString& Args, const FString& Dir, FString& OutStdErr) const;
+
+	/**
+	 * Bootstrap a Forge workspace in the current project dir.
+	 *
+	 * Runs `forge init` and (if RemoteUrl is non-empty) registers an `origin`
+	 * remote. Identity (user.name / user.email) is intentionally NOT set here:
+	 * `forge login` writes those back into the workspace config once the user
+	 * authenticates. If a remote URL was provided and there is no existing
+	 * credential for that server, this pops an interactive `forge login`
+	 * terminal so the user can complete setup. On success, re-runs Init() so
+	 * IsAvailable() flips to true without an editor restart.
+	 */
+	bool InitializeWorkspace(const FString& RemoteUrl, FText& OutError);
+
 	const FString& GetWorkspaceRoot() const { return WorkspaceRoot; }
 	const FString& GetCurrentUserName() const { return CurrentUserName; }
 
@@ -110,6 +130,12 @@ private:
 	TSharedPtr<IForgeWorker, ESPMode::ThreadSafe> CreateWorker(const FName& InOperationName) const;
 	ECommandResult::Type IssueCommand(FForgeSourceControlCommand& InCommand);
 	ECommandResult::Type ExecuteSynchronousCommand(FForgeSourceControlCommand& InCommand, const FText& Task);
+
+	/** Returns true if `forge whoami --server <url>` reports an authenticated user. */
+	bool IsLoggedInToRemote(const FString& RemoteUrl) const;
+
+	/** Pop an interactive console window running `forge login --server <url>`. */
+	void LaunchLoginShell(const FString& RemoteUrl) const;
 
 	TMap<FName, FGetForgeWorker> WorkersMap;
 	TArray<FForgeSourceControlCommand*> CommandQueue;

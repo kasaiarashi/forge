@@ -101,7 +101,12 @@ pub fn ensure(paths: &TlsPaths, san_list: &[String]) -> Result<()> {
     let mut leaf_params = CertificateParams::default();
     leaf_params.distinguished_name = {
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "forge-server");
+        dn.push(DnType::CommonName, "Forge VCS Server");
+        dn.push(DnType::OrganizationName, "Forge VCS");
+        dn.push(
+            DnType::OrganizationalUnitName,
+            "Krishna Teja Mekala",
+        );
         dn
     };
     leaf_params.is_ca = IsCa::NoCa;
@@ -157,8 +162,16 @@ pub fn ensure(paths: &TlsPaths, san_list: &[String]) -> Result<()> {
 fn mint_ca(paths: &TlsPaths) -> Result<(String, KeyPair)> {
     let mut params = CertificateParams::default();
     params.distinguished_name = {
+        // Rich DN — browsers, certutil, and `forge trust` all display
+        // these fields, so the user sees "Forge VCS" instead of an
+        // anonymous "forge-server local CA" when inspecting the cert.
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "forge-server local CA");
+        dn.push(DnType::CommonName, "Forge VCS Local CA");
+        dn.push(DnType::OrganizationName, "Forge VCS");
+        dn.push(
+            DnType::OrganizationalUnitName,
+            "Krishna Teja Mekala",
+        );
         dn
     };
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);

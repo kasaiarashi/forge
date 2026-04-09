@@ -24,6 +24,7 @@ import {
 import type { RepoInfo } from '../api';
 import api, { repoPath,  copyToClipboard } from '../api';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
 
 function CopyableCodeBlock({ lines, label }: { lines: string[]; label: string }) {
   const [copied, setCopied] = useState(false);
@@ -75,6 +76,7 @@ export default function Dashboard() {
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('');
   const { user } = useAuth();
+  const { resolvedMode } = useTheme();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
@@ -141,6 +143,52 @@ export default function Dashboard() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1280px', margin: '0 auto' }}>
+      {/* Dashboard hero — 128x128 brand mark + welcome line. Sits above
+          the sidebar+feed grid so it's the first thing every logged-in
+          visitor sees, without inflating the global navbar height. */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '24px',
+          padding: '24px 8px 16px 8px',
+          marginBottom: '8px',
+          borderBottom: '1px solid var(--border-muted)',
+        }}
+      >
+        <img
+          src={resolvedMode === 'night' ? '/forge-logo-dark.svg' : '/forge-logo.svg'}
+          alt="Forge VCS"
+          width={128}
+          height={128}
+          style={{ display: 'block', flexShrink: 0 }}
+        />
+        <div>
+          <h1
+            style={{
+              fontSize: '28px',
+              fontWeight: 600,
+              color: 'var(--fg-default)',
+              margin: '0 0 6px 0',
+              lineHeight: 1.2,
+            }}
+          >
+            {user?.username ? `Welcome back, ${user.username}.` : 'Welcome to Forge VCS'}
+          </h1>
+          <p
+            style={{
+              fontSize: '14px',
+              color: 'var(--fg-muted)',
+              margin: 0,
+              lineHeight: 1.5,
+            }}
+          >
+            Binary-first version control for game development. Pick a
+            repository on the left or create a new one to get started.
+          </p>
+        </div>
+      </div>
+
       <div style={{ display: 'flex', gap: '32px' }}>
       
       {/* Left Sidebar: Repositories */}

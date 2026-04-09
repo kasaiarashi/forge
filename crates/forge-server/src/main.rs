@@ -2,8 +2,12 @@
 // Licensed under the MIT License.
 
 mod auth;
+#[cfg(windows)]
+mod cert_install;
 mod cli_admin;
 mod config;
+#[cfg(windows)]
+mod service;
 mod services;
 mod storage;
 mod tls_autogen;
@@ -39,6 +43,13 @@ struct Cli {
     #[arg(short, long, global = true)]
     storage: Option<String>,
 
+    /// Internal: hand off to the Windows Service Control Manager instead
+    /// of running interactively. The installer-registered service has
+    /// this flag baked into the binPath; users should never set it by
+    /// hand. Hidden from `--help` to keep the surface area sane.
+    #[arg(long, hide = true, global = true)]
+    as_service: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -65,6 +76,26 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+    /// Manage the Windows service (Windows only).
+    #[cfg(windows)]
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[cfg(windows)]
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Register forge-server with the Windows Service Control Manager
+    /// and configure it to start automatically on boot.
+    Install,
+    /// Stop and remove the forge-server Windows service.
+    Uninstall,
+    /// Start the installed service.
+    Start,
+    /// Stop the running service.
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -113,8 +144,11 @@ enum RepoAction {
     ListMembers { repo: String },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+// main is intentionally synchronous. The serve path builds its own Tokio
+// runtime via [`run_serve`]; the Windows service path builds a separate
+// runtime inside `service::run_under_scm`. Nesting `#[tokio::main]` would
+// prevent the SCM dispatch from spinning up its own runtime cleanly.
+fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     // Select a rustls crypto provider up-front. Both aws-lc-rs (via tonic's
@@ -186,27 +220,101 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        #[cfg(windows)]
+        Some(Commands::Service { ref action }) => {
+            handle_service_command(action)?;
+            return Ok(());
+        }
         _ => {}
     }
 
-    // Load config file; auto-create default if it doesn't exist.
+    // Default action: serve. Load + apply CLI overrides, then dispatch
+    // either to the SCM (if `--as-service`) or to a one-shot interactive
+    // serve loop with Ctrl-C shutdown.
+    let config = load_serve_config(&cli)?;
+
+    #[cfg(windows)]
+    {
+        if cli.as_service {
+            // The SCM launches every service process with
+            // `cwd = C:\Windows\System32`, not the binary's directory.
+            // That breaks any relative path in the config
+            // (`static_dir = "./ui"`, `base_path = "./forge-data"`, the
+            // TLS `cert_path`, etc.) because they end up resolving
+            // against System32 where nothing lives. Pin cwd to the
+            // binary's parent directory so the service mode matches the
+            // interactive "cd to install dir and run the exe" case.
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    if let Err(e) = std::env::set_current_dir(dir) {
+                        warn!(
+                            error = %e,
+                            "failed to set cwd to {} before service dispatch",
+                            dir.display()
+                        );
+                    } else {
+                        info!(
+                            "service mode: cwd pinned to {}",
+                            dir.display()
+                        );
+                    }
+                }
+            }
+
+            // Hand control to the SCM. The dispatcher blocks until the
+            // service stops. If we're not actually running under the SCM
+            // (someone typed `--as-service` by hand), the dispatcher
+            // returns ERROR_FAILED_SERVICE_CONTROLLER_CONNECT which we
+            // surface as a clear error.
+            return service::run_under_scm(service::ServicePayload { config });
+        }
+    }
+
+    // Interactive run: build a runtime here, plumb Ctrl-C as the shutdown
+    // signal so a regular console user can stop the server with ^C and we
+    // still get a graceful tonic shutdown.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime")?;
+    rt.block_on(serve_inner(config, async {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Ctrl-C received, shutting down");
+    }))
+}
+
+/// Load the TOML config + apply `--listen` / `--storage` overrides. Used
+/// by both the interactive and service-mode serve paths so the SCM-driven
+/// startup picks up exactly the same config layering as a `serve` from a
+/// console.
+fn load_serve_config(cli: &Cli) -> Result<ServerConfig> {
     let config_path = std::path::Path::new(&cli.config);
     if !config_path.exists() {
         std::fs::write(config_path, ServerConfig::generate_default())?;
         info!("Created default config: {}", config_path.display());
     }
     let mut config = ServerConfig::load(config_path)?;
-
-    // CLI overrides.
-    if let Some(listen) = cli.listen {
-        config.server.listen = listen;
+    if let Some(ref listen) = cli.listen {
+        config.server.listen = listen.clone();
     }
-    if let Some(storage) = cli.storage {
+    if let Some(ref storage) = cli.storage {
         config.storage.base_path = storage.into();
     }
+    Ok(config)
+}
 
-    // Ensure base directories exist.
-    let base = &config.storage.base_path;
+/// Run the gRPC server until `shutdown` resolves. Extracted from the
+/// inline body of `main` so the Windows service path
+/// (`service::run_under_scm` -> `service::run_service`) can call it with
+/// an SCM-driven shutdown future, while the console path passes
+/// `ctrl_c().await`.
+pub(crate) async fn serve_inner(
+    mut config: ServerConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    // Take ownership of base_path early so we can rebind it after moving
+    // sections of `config` into the gRPC service.
+    let base = config.storage.base_path.clone();
     std::fs::create_dir_all(base.join("repos"))?;
 
     let db_path = config.resolved_db_path();
@@ -215,7 +323,6 @@ async fn main() -> Result<()> {
     // Bootstrap token: generated on first start (no users yet), written to
     // `<base_path>/.bootstrap_token`, and required on the BootstrapAdmin RPC.
     // Once the first admin is created we delete the file and stop enforcing.
-    // Anything that already has at least one user skips this entirely.
     let bootstrap_token_path = base.join(".bootstrap_token");
     let bootstrap_token = ensure_bootstrap_token(Arc::clone(&db), &bootstrap_token_path)?;
 
@@ -226,13 +333,9 @@ async fn main() -> Result<()> {
         .collect();
     let fs = Arc::new(FsStorage::new(base.join("repos"), repo_overrides));
 
-    // Start workflow engine if actions are enabled.
-    //
-    // WARNING: the actions engine runs user-supplied shell commands on this
-    // host as the forge-server process user. Operators must opt in via
-    // `actions.enabled = true` AND should deploy forge-server behind process
-    // isolation (container, unprivileged user, or dedicated VM). We log the
-    // opt-in loudly so it can't happen by accident.
+    // Workflow engine is opt-in. See [actions] in forge-server.toml; the
+    // post-audit default is OFF because steps run shell commands as the
+    // forge-server process user.
     let workflow_engine = if config.actions.enabled {
         warn!(
             "*** Actions engine ENABLED — workflow steps will execute as shell \
@@ -246,12 +349,10 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Build the shared user store first so the gRPC service and the auth
-    // interceptor / AuthService all share one Arc<dyn UserStore>.
     let user_store: Arc<dyn auth::UserStore> =
         Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
 
-    let service = ForgeGrpcService {
+    let grpc_service = ForgeGrpcService {
         fs: Arc::clone(&fs),
         db: Arc::clone(&db),
         start_time: std::time::Instant::now(),
@@ -260,28 +361,24 @@ async fn main() -> Result<()> {
     };
 
     let addr: std::net::SocketAddr = config.server.listen.parse()?;
-    let scheme = if config.server.tls.is_some() { "https" } else { "http" };
+    let tls_enabled = config.server.tls.enabled;
+    let scheme = if tls_enabled { "https" } else { "http" };
     info!("Forge server listening on {scheme}://{}", addr);
     info!("Storage: {}", base.display());
     info!("Database: {}", db_path.display());
 
-    if config.server.tls.is_none() {
-        let is_loopback = addr.ip().is_loopback();
-        if !is_loopback {
-            warn!(
-                "forge-server is listening on {addr} WITHOUT TLS. Passwords, \
-                 PATs, and assets will traverse the network in plaintext. \
-                 Configure [server.tls] or bind to 127.0.0.1."
-            );
-        }
+    if !tls_enabled && !addr.ip().is_loopback() {
+        warn!(
+            "forge-server is listening on {addr} WITHOUT TLS. Passwords, \
+             PATs, and assets will traverse the network in plaintext. \
+             Set [server.tls] enabled = true (the default) or bind to 127.0.0.1."
+        );
     }
 
     let max_msg = config.server.max_message_size as usize;
-
-    // The interceptor reuses the same store the gRPC service holds.
     let interceptor = auth::interceptor::make_interceptor(Arc::clone(&user_store));
 
-    let forge_svc = ForgeServiceServer::new(service)
+    let forge_svc = ForgeServiceServer::new(grpc_service)
         .max_decoding_message_size(max_msg)
         .max_encoding_message_size(max_msg);
     let auth_svc = AuthServiceServer::new(ForgeAuthService {
@@ -291,18 +388,12 @@ async fn main() -> Result<()> {
     });
 
     let mut builder = Server::builder();
-    if let Some(tls) = &config.server.tls {
-        // Resolve cert/key paths, defaulting to <base>/certs/server.{crt,key}.
-        let paths = resolve_tls_paths(tls, base);
+    if config.server.tls.enabled {
+        let tls = std::mem::take(&mut config.server.tls);
+        let paths = resolve_tls_paths(&tls, &base);
 
-        // If auto_generate is on and the files aren't there yet, mint them.
         if tls.auto_generate {
             let mut sans = tls.hostnames.clone();
-            // Include the listen-address host automatically. When the
-            // operator binds to 0.0.0.0 / :: (the default), that sentinel
-            // is useless in a SAN — enumerate every non-loopback interface
-            // IP on the host instead, so clients on the LAN can connect
-            // without extra config.
             let listen_ip = addr.ip();
             if listen_ip.is_unspecified() {
                 for local in local_non_loopback_ips() {
@@ -321,6 +412,31 @@ async fn main() -> Result<()> {
                 .context("auto-generating TLS certificates")?;
         }
 
+        // On Windows, push the CA into the system trust store so clients
+        // using the OS root set (forge-web's gRPC channel, browsers, curl)
+        // stop tripping on our self-signed chain. No-op elsewhere.
+        #[cfg(windows)]
+        cert_install::ensure_ca_trusted(&paths.ca_cert);
+
+        // Publish the full cert bundle (CA + leaf + key) to a well-known
+        // shared path. Two things fall out of this:
+        //
+        //   1. forge-web's gRPC client auto-discovers the CA and pins it
+        //      as its sole TLS trust root — no OS-trust-store dance.
+        //   2. forge-web's HTTPS listener reuses the SAME leaf + key for
+        //      serving browsers, so there's one cert to trust instead of
+        //      two separate CAs.
+        //
+        // See `forge_core::ca_publish` for the target-dir fallback chain
+        // and the security caveat around key readability.
+        if paths.ca_cert.exists() && paths.leaf_cert.exists() && paths.leaf_key.exists() {
+            let _ = forge_core::ca_publish::publish_bundle(
+                &paths.ca_cert,
+                &paths.leaf_cert,
+                &paths.leaf_key,
+            );
+        }
+
         let cert_pem = std::fs::read(&paths.leaf_cert)
             .with_context(|| format!("failed to read TLS cert {}", paths.leaf_cert.display()))?;
         let key_pem = std::fs::read(&paths.leaf_key)
@@ -331,17 +447,15 @@ async fn main() -> Result<()> {
             .context("tls_config failed")?;
         info!("TLS enabled: cert={}", paths.leaf_cert.display());
 
-        // If a CA exists (auto-gen did or will maintain one), log its
-        // fingerprint so the operator can verify it on client machines
-        // after running `forge trust`.
         if paths.ca_cert.exists() {
             if let Some(fp) = tls_autogen::cert_fingerprint(&paths.ca_cert) {
                 warn!(
                     "\n*** TLS CA fingerprint (SHA-256):\n***   {fp}\n\
-                     *** Clients should run `forge trust https://<host>:9876` \
+                     *** Clients should run `forge login --server https://<host>:{port}` \
                      and verify this fingerprint matches before accepting.\n\
-                     *** CA cert file: {}",
-                    paths.ca_cert.display()
+                     *** CA cert file: {ca}",
+                    port = addr.port(),
+                    ca = paths.ca_cert.display()
                 );
             }
         }
@@ -356,10 +470,48 @@ async fn main() -> Result<()> {
             auth_svc,
             interceptor,
         ))
-        .serve(addr)
+        .serve_with_shutdown(addr, shutdown)
         .await?;
 
+    info!("Forge server stopped cleanly");
     Ok(())
+}
+
+/// `forge-server service install/uninstall/start/stop` dispatcher.
+#[cfg(windows)]
+fn handle_service_command(action: &ServiceAction) -> Result<()> {
+    match action {
+        ServiceAction::Install => {
+            // Resolve absolute paths so the binPath survives a working
+            // directory change between install time and SCM start time.
+            let bin = std::env::current_exe().context("locate forge-server.exe")?;
+            let cfg_path = std::path::Path::new(&Cli::parse().config).to_path_buf();
+            let cfg_abs = if cfg_path.is_absolute() {
+                cfg_path
+            } else {
+                std::env::current_dir()?.join(cfg_path)
+            };
+            service::install(bin, cfg_abs)?;
+            println!("Forge VCS Server installed as a Windows service.");
+            println!("It will start automatically on boot. Run `forge-server service start` to start it now.");
+            Ok(())
+        }
+        ServiceAction::Uninstall => {
+            service::uninstall()?;
+            println!("Forge VCS Server service removed.");
+            Ok(())
+        }
+        ServiceAction::Start => {
+            service::start()?;
+            println!("Forge VCS Server service started.");
+            Ok(())
+        }
+        ServiceAction::Stop => {
+            service::stop()?;
+            println!("Forge VCS Server service stopped.");
+            Ok(())
+        }
+    }
 }
 
 /// Ensure a bootstrap token exists for a fresh install. When the users table

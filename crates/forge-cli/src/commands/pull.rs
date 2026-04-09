@@ -5,11 +5,24 @@ use anyhow::Result;
 use forge_core::diff::flatten_tree;
 use forge_core::hash::ForgeHash;
 use forge_core::index::{Index, IndexEntry};
+use forge_core::object::ObjectType;
 use forge_core::workspace::Workspace;
+use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::time::SystemTime;
+use tonic::service::interceptor::InterceptedService;
+use tonic::transport::Channel;
+
+use crate::client::AuthInterceptor;
+
+/// Type alias for the authenticated forge gRPC client. Used by both pull
+/// and fetch — saves spelling out the full nested generic in every
+/// signature.
+pub(super) type AuthedForgeClient =
+    ForgeServiceClient<InterceptedService<Channel, AuthInterceptor>>;
 
 pub fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -68,8 +81,45 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
         return Ok(());
     }
 
-    // Request all objects from the remote tip that we don't have locally.
-    let mut want = vec![remote_tip_bytes.clone()];
+    let received = fetch_objects_to_tip(ws, &mut client, repo_name, &remote_tip_bytes).await?;
+    println!("Receiving objects: {} done.", received);
+
+    // Fast-forward local branch.
+    let old_tip = local_tip.short();
+    ws.set_branch_tip(&branch, &remote_tip)?;
+    println!("   {}..{} {} -> {}", old_tip, remote_tip.short(), branch, branch);
+
+    // Checkout working tree from the new tip.
+    checkout_tree(ws, &remote_tip)?;
+
+    Ok(())
+}
+
+/// BFS-walk the dependency graph from `tip_bytes` down to leaf chunks,
+/// fetching anything missing from the server in batches. Shared by `pull`
+/// and `fetch` — both need exactly this behavior, just with different
+/// follow-up actions (pull advances HEAD + checks out; fetch updates
+/// remote-tracking refs only).
+///
+/// We walk children of *every* visited object — both those we just fetched
+/// AND those already on disk from a prior run. The already-on-disk case is
+/// the resumable-clone fix: a previous attempt typically leaves the
+/// snapshot, trees, and chunked-blob manifests written, but dies partway
+/// through fetching the actual chunks. If we only walked children of
+/// newly-fetched objects, resume would see "tip already present, nothing
+/// to do", terminate immediately, and then crash in checkout with "failed
+/// to reassemble chunked blob".
+///
+/// Returns the count of objects newly received from the server (zero when
+/// the local store already had everything).
+pub(super) async fn fetch_objects_to_tip(
+    ws: &Workspace,
+    client: &mut AuthedForgeClient,
+    repo_name: &str,
+    tip_bytes: &[u8],
+) -> Result<u64> {
+    let mut want: Vec<Vec<u8>> = vec![tip_bytes.to_vec()];
+    let mut visited: HashSet<ForgeHash> = HashSet::new();
     let mut received = 0u64;
     let mut total_discovered = 0u64;
 
@@ -83,41 +133,52 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
     );
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    loop {
-        if want.is_empty() {
-            break;
+    while !want.is_empty() {
+        // Dedup the queue against the visited set. Anything we've already
+        // walked (from disk or wire) does not get processed twice — that's
+        // how the BFS terminates.
+        let mut to_visit: Vec<ForgeHash> = Vec::with_capacity(want.len());
+        for h in want.drain(..) {
+            if let Ok(fh) = ForgeHash::from_hex(&hex::encode(&h)) {
+                if visited.insert(fh) {
+                    to_visit.push(fh);
+                }
+            }
         }
 
-        let need: Vec<Vec<u8>> = want
-            .iter()
-            .filter(|h| {
-                let hex = hex::encode(h);
-                ForgeHash::from_hex(&hex)
-                    .map(|fh| !ws.object_store.has(&fh))
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect();
-
-        if need.is_empty() {
-            break;
+        if to_visit.is_empty() {
+            continue;
         }
 
-        total_discovered += need.len() as u64;
+        // Split into "already on disk" and "missing". Both groups need
+        // their children walked into `want`; only the missing group is
+        // actually fetched from the server.
+        let (missing, present): (Vec<ForgeHash>, Vec<ForgeHash>) = to_visit
+            .into_iter()
+            .partition(|fh| !ws.object_store.has(fh));
+
+        // Walk children of objects already on disk — the resume-clone fix.
+        for fh in &present {
+            walk_object_children(ws, fh, &mut want);
+        }
+
+        if missing.is_empty() {
+            continue;
+        }
+
+        total_discovered += missing.len() as u64;
         pb.set_length(total_discovered);
 
         const BATCH_SIZE: usize = 5000;
-        let batches: Vec<Vec<Vec<u8>>> = need
-            .chunks(BATCH_SIZE)
-            .map(|c| c.to_vec())
-            .collect();
+        for batch_chunk in missing.chunks(BATCH_SIZE) {
+            let batch_bytes: Vec<Vec<u8>> = batch_chunk
+                .iter()
+                .map(|fh| fh.as_bytes().to_vec())
+                .collect();
 
-        want.clear();
-
-        for batch in batches {
             let mut stream = client
                 .pull_objects(PullRequest {
-                    want_hashes: batch,
+                    want_hashes: batch_bytes,
                     repo: repo_name.to_string(),
                 })
                 .await?
@@ -155,26 +216,10 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
                     received += 1;
                     pb.set_position(received);
 
-                    if let Ok(snapshot) = ws.object_store.get_snapshot(&forge_hash) {
-                        want.push(snapshot.tree.as_bytes().to_vec());
-                        for parent in &snapshot.parents {
-                            if !parent.is_zero() {
-                                want.push(parent.as_bytes().to_vec());
-                            }
-                        }
-                    }
-
-                    if let Ok(tree) = ws.object_store.get_tree(&forge_hash) {
-                        for entry in &tree.entries {
-                            want.push(entry.hash.as_bytes().to_vec());
-                        }
-                    }
-
-                    if let Ok(chunked) = ws.object_store.get_chunked_blob(&forge_hash) {
-                        for chunk_ref in &chunked.chunks {
-                            want.push(chunk_ref.hash.as_bytes().to_vec());
-                        }
-                    }
+                    // Walk newly-fetched object's children — same helper
+                    // as the already-on-disk path so the two cases stay in
+                    // sync.
+                    walk_object_children(ws, &forge_hash, &mut want);
 
                     current_data.clear();
                     current_hash = None;
@@ -184,17 +229,47 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
     }
 
     pb.finish_and_clear();
-    println!("Receiving objects: {} done.", received);
+    Ok(received)
+}
 
-    // Fast-forward local branch.
-    let old_tip = local_tip.short();
-    ws.set_branch_tip(&branch, &remote_tip)?;
-    println!("   {}..{} {} -> {}", old_tip, remote_tip.short(), branch, branch);
-
-    // Checkout working tree from the new tip.
-    checkout_tree(ws, &remote_tip)?;
-
-    Ok(())
+/// Push the children of `hash` (referenced object hashes) onto `want` so the
+/// pull BFS keeps walking. Dispatch is by the 1-byte type tag stored at the
+/// start of typed objects (Snapshot/Tree/ChunkedBlob); raw blobs and chunks
+/// are leaves and contribute nothing. Errors during read/parse are silently
+/// swallowed — a corrupt object on disk gets caught later by `read_file`
+/// during checkout, where the error message is more useful to the user.
+fn walk_object_children(ws: &Workspace, hash: &ForgeHash, want: &mut Vec<Vec<u8>>) {
+    let data = match ws.object_store.chunks.get(hash) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    if data.is_empty() {
+        return;
+    }
+    let tag = data[0];
+    if tag == ObjectType::Snapshot as u8 {
+        if let Ok(snap) = ws.object_store.get_snapshot(hash) {
+            want.push(snap.tree.as_bytes().to_vec());
+            for parent in &snap.parents {
+                if !parent.is_zero() {
+                    want.push(parent.as_bytes().to_vec());
+                }
+            }
+        }
+    } else if tag == ObjectType::Tree as u8 {
+        if let Ok(tree) = ws.object_store.get_tree(hash) {
+            for entry in &tree.entries {
+                want.push(entry.hash.as_bytes().to_vec());
+            }
+        }
+    } else if tag == ObjectType::ChunkedBlob as u8 {
+        if let Ok(chunked) = ws.object_store.get_chunked_blob(hash) {
+            for chunk_ref in &chunked.chunks {
+                want.push(chunk_ref.hash.as_bytes().to_vec());
+            }
+        }
+    }
+    // ObjectType::Blob (tag=1) and raw chunk bytes are leaves — no children.
 }
 
 /// Write the commit's tree contents into the working directory and update the index.

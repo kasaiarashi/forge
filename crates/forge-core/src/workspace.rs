@@ -381,6 +381,102 @@ impl Workspace {
         }
     }
 
+    // ── Remote-tracking refs ────────────────────────────────────────────────
+    //
+    // Mirrors `refs/heads/<branch>` but stored under
+    // `refs/remotes/<remote>/<branch>`. Written by `forge fetch`, read by
+    // `forge switch` (DWIM fallback) and the future `branch -a` listing.
+    // We deliberately reuse `BranchNotFound` instead of adding a new error
+    // variant — same shape, same caller behavior.
+
+    /// Read the snapshot hash that a remote-tracking ref points at.
+    pub fn get_remote_ref(&self, remote: &str, branch: &str) -> Result<ForgeHash, ForgeError> {
+        let ref_path = self
+            .forge_dir()
+            .join("refs")
+            .join("remotes")
+            .join(remote)
+            .join(branch);
+        if !ref_path.exists() {
+            return Err(ForgeError::BranchNotFound(format!("{}/{}", remote, branch)));
+        }
+        let content = std::fs::read_to_string(&ref_path)?;
+        ForgeHash::from_hex(content.trim())
+    }
+
+    /// Write/update a remote-tracking ref (atomic write).
+    pub fn set_remote_ref(
+        &self,
+        remote: &str,
+        branch: &str,
+        hash: &ForgeHash,
+    ) -> Result<(), ForgeError> {
+        let ref_path = self
+            .forge_dir()
+            .join("refs")
+            .join("remotes")
+            .join(remote)
+            .join(branch);
+        if let Some(parent) = ref_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        atomic_write(&ref_path, hash.to_hex().as_bytes())?;
+        Ok(())
+    }
+
+    /// List all remote-tracking refs for a given remote (supports nested
+    /// names like `feature/foo`). Returns `(branch_name, tip_hash)` pairs.
+    pub fn list_remote_refs(&self, remote: &str) -> Result<Vec<(String, ForgeHash)>, ForgeError> {
+        let dir = self.forge_dir().join("refs").join("remotes").join(remote);
+        let mut out = Vec::new();
+        if !dir.exists() {
+            return Ok(out);
+        }
+        let mut names = Vec::new();
+        Self::collect_branches(&dir, "", &mut names)?;
+        for name in names {
+            if let Ok(hash) = self.get_remote_ref(remote, &name) {
+                out.push((name, hash));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// Enumerate every remote-tracking ref on disk, regardless of what
+    /// `config.json` thinks the configured remotes are. Returns
+    /// `(remote_name, branch_name, tip_hash)` triples sorted by remote
+    /// then by branch. `branch -a` uses this so it shows what's really
+    /// there, matching `git branch -a`'s "scan refs/remotes/" semantics.
+    pub fn list_all_remote_refs(&self) -> Result<Vec<(String, String, ForgeHash)>, ForgeError> {
+        let dir = self.forge_dir().join("refs").join("remotes");
+        let mut out = Vec::new();
+        if !dir.exists() {
+            return Ok(out);
+        }
+        // The first level under refs/remotes is the remote name; below
+        // that is the branch tree (which can be nested).
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let remote = match entry.file_name().to_str() {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let mut names = Vec::new();
+            Self::collect_branches(&entry.path(), "", &mut names)?;
+            for name in names {
+                if let Ok(hash) = self.get_remote_ref(&remote, &name) {
+                    out.push((remote.clone(), name, hash));
+                }
+            }
+        }
+        out.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+        Ok(out)
+    }
+
     /// Load workspace config.
     pub fn config(&self) -> Result<WorkspaceConfig, ForgeError> {
         let config_path = self.forge_dir().join("config.json");

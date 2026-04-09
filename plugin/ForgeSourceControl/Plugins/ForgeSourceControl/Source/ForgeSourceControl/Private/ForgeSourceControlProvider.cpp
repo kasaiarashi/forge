@@ -16,8 +16,13 @@
 #include "Serialization/JsonSerializer.h"
 #include "HAL/PlatformProcess.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "Widgets/Notifications/SNotificationList.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Framework/Notifications/NotificationManager.h"
 
 #define LOCTEXT_NAMESPACE "ForgeSourceControl"
 
@@ -407,8 +412,14 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 {
 	FForgeSourceControlProvider* MutableThis = const_cast<FForgeSourceControlProvider*>(this);
 
-	return SNew(SVerticalBox)
-		+ SVerticalBox::Slot()
+	// Identity (user.name / user.email) is pulled from `forge login`, so the
+	// init form only needs the remote URL.
+	TSharedRef<FString> RemoteUrlRef = MakeShared<FString>();
+
+	TSharedRef<SVerticalBox> Root = SNew(SVerticalBox);
+
+	// ── Forge executable path (always shown) ────────────────────────────────
+	Root->AddSlot()
 		.AutoHeight()
 		.Padding(2.0f)
 		[
@@ -431,6 +442,97 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 				})
 			]
 		];
+
+	// ── Init section: only shown when no workspace has been detected ────────
+	if (!bIsAvailable)
+	{
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 8.0f, 2.0f, 2.0f)
+			[
+				SNew(SSeparator)
+			];
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("InitHeader", "No Forge workspace detected for this project."))
+				.AutoWrapText(true)
+			];
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 4.0f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+				[
+					SNew(SBox)
+					.WidthOverride(110.0f)
+					[
+						SNew(STextBlock).Text(LOCTEXT("RemoteUrlLabel", "Remote URL:"))
+					]
+				]
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				[
+					SNew(SEditableTextBox)
+					.Text(FText::FromString(*RemoteUrlRef))
+					.HintText(LOCTEXT("RemoteUrlHint", "https://server/owner/repo (optional)"))
+					.OnTextChanged_Lambda([RemoteUrlRef](const FText& NewText)
+					{
+						*RemoteUrlRef = NewText.ToString();
+					})
+				]
+			];
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 4.0f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("InitIdentityHint",
+					"Your name and email will be taken from 'forge login' — "
+					"a terminal will open to sign you in if needed."))
+				.AutoWrapText(true)
+			];
+
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(2.0f, 8.0f)
+			.HAlign(HAlign_Left)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("InitButton", "Initialize Project with Forge"))
+				.ToolTipText(LOCTEXT("InitButtonTooltip",
+					"Creates a .forge workspace in the project directory and (if provided) "
+					"adds an 'origin' remote. Identity is pulled from 'forge login'."))
+				.OnClicked_Lambda([MutableThis, RemoteUrlRef]()
+				{
+					FText Error;
+					const bool bOk = MutableThis->InitializeWorkspace(*RemoteUrlRef, Error);
+
+					FNotificationInfo Info(bOk
+						? LOCTEXT("InitOk", "Forge workspace initialized.")
+						: FText::Format(LOCTEXT("InitFailFmt", "Forge init failed: {0}"), Error));
+					Info.ExpireDuration = bOk ? 4.0f : 8.0f;
+					FSlateNotificationManager::Get().AddNotification(Info);
+
+					if (bOk)
+					{
+						MutableThis->RefreshStatusAsync();
+					}
+					return FReply::Handled();
+				})
+			];
+	}
+
+	return Root;
 }
 
 // ── CLI execution (thread-safe) ─────────────────────────────────────────────
@@ -486,6 +588,137 @@ bool FForgeSourceControlProvider::RunForgeCommandRaw(const FString& Args) const
 	}
 
 	return true;
+}
+
+bool FForgeSourceControlProvider::RunForgeCommandInDir(
+	const FString& Args, const FString& Dir, FString& OutStdErr) const
+{
+	int32 ReturnCode = -1;
+	FString StdOut;
+
+	UE_LOG(LogSourceControl, Log, TEXT("Forge: (cwd=%s) forge %s"), *Dir, *Args);
+
+	FPlatformProcess::ExecProcess(
+		*ForgeExePath, *Args,
+		&ReturnCode, &StdOut, &OutStdErr, *Dir);
+
+	if (ReturnCode != 0)
+	{
+		UE_LOG(LogSourceControl, Warning, TEXT("Forge: exit %d: forge %s\n%s"),
+			ReturnCode, *Args, *OutStdErr);
+		return false;
+	}
+	return true;
+}
+
+// ── Workspace bootstrap ─────────────────────────────────────────────────────
+
+bool FForgeSourceControlProvider::InitializeWorkspace(
+	const FString& RemoteUrl,
+	FText& OutError)
+{
+	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	if (!FPaths::DirectoryExists(ProjectDir))
+	{
+		OutError = LOCTEXT("InitErrNoDir", "Project directory does not exist.");
+		return false;
+	}
+
+	// Block re-init if a .forge dir is already present — the CLI would error
+	// anyway, but a clear message up-front is friendlier than surfacing stderr.
+	if (FPaths::DirectoryExists(ProjectDir / TEXT(".forge")))
+	{
+		OutError = LOCTEXT("InitErrAlreadyInit", "This project already has a .forge workspace.");
+		return false;
+	}
+
+	FString StdErr;
+
+	// 1. forge init. Identity (user.name / user.email) is deliberately NOT
+	//    set here — `forge login` writes those into the workspace config once
+	//    the user authenticates, so any values we set would just be clobbered.
+	if (!RunForgeCommandInDir(TEXT("init"), ProjectDir, StdErr))
+	{
+		OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("forge init failed") : StdErr);
+		return false;
+	}
+
+	// 2. remote add origin — optional; skip entirely if user didn't provide one.
+	if (!RemoteUrl.IsEmpty())
+	{
+		const FString Args = FString::Printf(TEXT("remote add origin \"%s\""), *RemoteUrl);
+		if (!RunForgeCommandInDir(Args, ProjectDir, StdErr))
+		{
+			OutError = FText::FromString(StdErr.IsEmpty() ? TEXT("failed to add remote") : StdErr);
+			return false;
+		}
+
+		// 3. If there's no stored credential for this remote yet, pop an
+		//    interactive terminal so the user can `forge login`. `forge login`
+		//    will then write user.name / user.email back into the workspace
+		//    config, which is why we added the remote first.
+		if (!IsLoggedInToRemote(RemoteUrl))
+		{
+			LaunchLoginShell(RemoteUrl);
+		}
+	}
+
+	// Re-run Init() so WorkspaceRoot / CurrentUserName / bIsAvailable pick up
+	// the freshly-created .forge without an editor restart.
+	Init(false);
+	return true;
+}
+
+bool FForgeSourceControlProvider::IsLoggedInToRemote(const FString& RemoteUrl) const
+{
+	int32 ReturnCode = -1;
+	FString StdOut, StdErr;
+	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	const FString Args = FString::Printf(TEXT("whoami --server \"%s\""), *RemoteUrl);
+
+	FPlatformProcess::ExecProcess(
+		*ForgeExePath, *Args,
+		&ReturnCode, &StdOut, &StdErr, *ProjectDir);
+
+	// `forge whoami` exits 0 even when anonymous and prints "Not logged in".
+	// Treat any non-zero exit (bad URL, network error, etc.) as "not logged
+	// in" so we err on the side of showing the login prompt.
+	if (ReturnCode != 0)
+	{
+		return false;
+	}
+	return !StdOut.Contains(TEXT("Not logged in"));
+}
+
+void FForgeSourceControlProvider::LaunchLoginShell(const FString& RemoteUrl) const
+{
+#if PLATFORM_WINDOWS
+	// We go through `cmd /c start cmd /k ...` so the new console is a real
+	// top-level window (UE's CreateProc otherwise gives us a DETACHED_PROCESS
+	// with no console, which is useless for an interactive prompt). The
+	// inner `/k` keeps the window open after login finishes so the user can
+	// read the "Logged in as…" / PAT-created output before closing.
+	const FString Inner = FString::Printf(
+		TEXT("\"\"%s\" login --server \"%s\"\""),
+		*ForgeExePath, *RemoteUrl);
+	const FString CmdLine = FString::Printf(
+		TEXT("/c start \"Forge Login\" cmd /k %s"),
+		*Inner);
+
+	FProcHandle Proc = FPlatformProcess::CreateProc(
+		TEXT("cmd.exe"), *CmdLine,
+		/*bLaunchDetached=*/true,
+		/*bLaunchHidden=*/true,
+		/*bLaunchReallyHidden=*/true,
+		nullptr, 0, nullptr, nullptr, nullptr);
+	if (Proc.IsValid())
+	{
+		FPlatformProcess::CloseProc(Proc);
+	}
+#else
+	// Plugin is Windows-only right now; no-op elsewhere.
+	(void)RemoteUrl;
+#endif
 }
 
 #undef LOCTEXT_NAMESPACE

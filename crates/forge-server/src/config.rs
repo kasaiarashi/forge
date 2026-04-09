@@ -41,26 +41,37 @@ pub struct ServerSection {
     #[serde(default)]
     pub workers: usize,
 
-    /// Optional TLS configuration. When present, the gRPC server terminates
-    /// TLS using rustls; when absent, it speaks plaintext h2c and should
-    /// only be bound to loopback.
+    /// TLS configuration. **TLS is on by default.** Even if the operator's
+    /// config file is missing the `[server.tls]` section entirely,
+    /// `TlsConfig::default()` produces `enabled = true` + `auto_generate
+    /// = true`, so a fresh `./forge-server` start mints a local CA + leaf
+    /// and serves HTTPS without any extra configuration. Set
+    /// `[server.tls] enabled = false` explicitly to opt into plaintext.
     #[serde(default)]
-    pub tls: Option<TlsConfig>,
+    pub tls: TlsConfig,
 }
 
 /// TLS settings for the gRPC server.
 ///
 /// Two modes:
 /// - **Manual**: supply `cert_path` and `key_path` pointing at real PEM
-///   files (e.g. from an ACME client).
-/// - **Auto-generate**: set `auto_generate = true` and leave `cert_path`
-///   and `key_path` at their defaults. On first start, forge-server mints
+///   files (e.g. from an ACME client). Leave `auto_generate = false`.
+/// - **Auto-generate** (the default): set `auto_generate = true` and leave
+///   `cert_path` and `key_path` unset. On first start, forge-server mints
 ///   a local CA and a leaf certificate covering `hostnames` + loopback,
 ///   writes them under `<base_path>/certs/`, and reuses them on every
-///   subsequent start. Use `forge trust` from client machines to pin the
-///   CA.
+///   subsequent start. Clients pin the CA via `forge login`'s trust-on-
+///   first-use prompt.
+///
+/// To opt out of TLS entirely (loopback dev only), set
+/// `[server.tls] enabled = false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
+    /// Master switch. Default true. Set false for plaintext h2c (only
+    /// safe on loopback).
+    #[serde(default = "default_tls_enabled")]
+    pub enabled: bool,
+
     /// PEM-encoded certificate chain (leaf first). Defaults to
     /// `<base_path>/certs/server.crt`.
     #[serde(default)]
@@ -72,15 +83,36 @@ pub struct TlsConfig {
     pub key_path: Option<PathBuf>,
 
     /// When true, generate a CA + leaf on first start if the files don't
-    /// exist yet. When false, missing files are a startup error.
-    #[serde(default)]
+    /// exist yet. **Default true.** When false, missing files are a
+    /// startup error.
+    #[serde(default = "default_tls_autogen")]
     pub auto_generate: bool,
 
     /// DNS names / IP addresses to encode into the leaf cert's
-    /// `subjectAltName` extension. `localhost`, `127.0.0.1`, and `::1` are
-    /// always added implicitly. Ignored when `auto_generate` is false.
+    /// `subjectAltName` extension. `localhost`, `127.0.0.1`, `::1`, and
+    /// every non-loopback interface IP are always added implicitly.
+    /// Ignored when `auto_generate` is false.
     #[serde(default)]
     pub hostnames: Vec<String>,
+}
+
+fn default_tls_enabled() -> bool {
+    true
+}
+fn default_tls_autogen() -> bool {
+    true
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_tls_enabled(),
+            cert_path: None,
+            key_path: None,
+            auto_generate: default_tls_autogen(),
+            hostnames: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +201,10 @@ impl Default for ServerSection {
             listen: default_listen(),
             max_message_size: default_max_upload(),
             workers: 0,
-            tls: None,
+            // TLS-on-by-default. The auto-gen path mints a CA + leaf
+            // under <base_path>/certs/ on first start; no operator
+            // intervention required.
+            tls: TlsConfig::default(),
         }
     }
 }

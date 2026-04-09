@@ -37,9 +37,38 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
     let mut client = crate::client::connect_forge(server_url).await?;
 
     // Get current branch and its tip.
-    let branch = ws
-        .current_branch()?
-        .ok_or_else(|| anyhow::anyhow!("HEAD is detached; switch to a branch first"))?;
+    let branch = match ws.current_branch()? {
+        Some(b) => b,
+        None => {
+            // Detached HEAD. Build a recovery hint: if new commits have
+            // been made in this state, the user needs to promote them to
+            // a branch or they'll eventually be garbage-collected.
+            let head = ws.head_snapshot()?;
+            let mut msg = String::from(
+                "HEAD is detached; push needs a branch to target.\n",
+            );
+            if !head.is_zero() {
+                msg.push_str(&format!(
+                    "\nCurrent commit: {}\n",
+                    head.short()
+                ));
+                msg.push_str(
+                    "\nTo save any commits you made in detached mode and push them:\n\
+                     \n    forge branch <new-name>     # create a branch at this commit\n\
+                     \x20   forge switch <new-name>\n\
+                     \x20   forge push\n\
+                     \n\
+                     If you just want to go back to an existing branch (discarding \
+                     anything committed in detached mode), run `forge switch <branch>`.",
+                );
+            } else {
+                msg.push_str(
+                    "\nSwitch to a branch first:  forge switch <branch>",
+                );
+            }
+            bail!("{msg}");
+        }
+    };
     let local_tip = ws.get_branch_tip(&branch)?;
     let ref_name = format!("refs/heads/{}", branch);
 

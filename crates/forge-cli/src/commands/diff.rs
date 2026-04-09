@@ -1,3 +1,4 @@
+use crate::pager;
 use anyhow::{bail, Result};
 use forge_core::diff::{diff_maps, flatten_tree, DiffEntry};
 use forge_core::hash::ForgeHash;
@@ -5,9 +6,18 @@ use forge_core::index::Index;
 use forge_core::workspace::Workspace;
 use similar::ChangeTag;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::time::SystemTime;
 
-pub fn run(commit: Option<String>, staged: bool, stat: bool, extract: bool, paths: Vec<String>, json: bool) -> Result<()> {
+pub fn run(
+    commit: Option<String>,
+    staged: bool,
+    stat: bool,
+    extract: bool,
+    paths: Vec<String>,
+    no_pager: bool,
+    json: bool,
+) -> Result<()> {
     if staged && commit.is_some() {
         bail!("Cannot use --staged with --commit");
     }
@@ -29,15 +39,22 @@ pub fn run(commit: Option<String>, staged: bool, stat: bool, extract: bool, path
         diff_unstaged(&ws, &index, &filter)?
     };
 
+    // --extract writes temp files and prints their paths; not useful to page.
     if extract {
         print_extract(&file_diffs)?;
-    } else if json {
-        print_json(&file_diffs)?;
-    } else if stat {
-        print_stat(&file_diffs);
-    } else {
-        print_colored(&file_diffs);
+        return Ok(());
     }
+
+    let mut buffer = String::new();
+    if json {
+        format_json(&file_diffs, &mut buffer)?;
+    } else if stat {
+        format_stat(&file_diffs, &mut buffer);
+    } else {
+        format_colored(&file_diffs, &mut buffer);
+    }
+
+    pager::show(buffer, no_pager, json);
 
     Ok(())
 }
@@ -300,7 +317,7 @@ fn build_file_map(
     }
 }
 
-fn print_colored(diffs: &[FileDiff]) {
+fn format_colored(diffs: &[FileDiff], out: &mut String) {
     // Collect companion .uexp data for UE asset diffs.
     let uexp_map: HashMap<String, &[u8]> = diffs
         .iter()
@@ -337,11 +354,12 @@ fn print_colored(diffs: &[FileDiff]) {
                     &diff.new_content,
                     new_uexp,
                 ) {
-                    print!("{}", output);
+                    out.push_str(&output);
                     continue;
                 }
             }
-            println!(
+            let _ = writeln!(
+                out,
                 "Binary files a/{} and b/{} differ",
                 diff.path, diff.path
             );
@@ -359,22 +377,23 @@ fn print_colored(diffs: &[FileDiff]) {
         }
 
         // File header.
-        println!(
+        let _ = writeln!(
+            out,
             "\x1b[1mdiff --forge a/{} b/{}\x1b[0m",
             diff.path, diff.path
         );
         match diff.status {
             "added" => {
-                println!("\x1b[1m--- /dev/null\x1b[0m");
-                println!("\x1b[1m+++ b/{}\x1b[0m", diff.path);
+                let _ = writeln!(out, "\x1b[1m--- /dev/null\x1b[0m");
+                let _ = writeln!(out, "\x1b[1m+++ b/{}\x1b[0m", diff.path);
             }
             "deleted" => {
-                println!("\x1b[1m--- a/{}\x1b[0m", diff.path);
-                println!("\x1b[1m+++ /dev/null\x1b[0m");
+                let _ = writeln!(out, "\x1b[1m--- a/{}\x1b[0m", diff.path);
+                let _ = writeln!(out, "\x1b[1m+++ /dev/null\x1b[0m");
             }
             _ => {
-                println!("\x1b[1m--- a/{}\x1b[0m", diff.path);
-                println!("\x1b[1m+++ b/{}\x1b[0m", diff.path);
+                let _ = writeln!(out, "\x1b[1m--- a/{}\x1b[0m", diff.path);
+                let _ = writeln!(out, "\x1b[1m+++ b/{}\x1b[0m", diff.path);
             }
         }
 
@@ -391,7 +410,8 @@ fn print_colored(diffs: &[FileDiff]) {
             let new_start = new_start_idx + 1;
             let new_count = new_end - new_start_idx;
 
-            println!(
+            let _ = writeln!(
+                out,
                 "\x1b[36m@@ -{},{} +{},{} @@\x1b[0m",
                 old_start, old_count, new_start, new_count
             );
@@ -406,9 +426,9 @@ fn print_colored(diffs: &[FileDiff]) {
                     let reset = if color.is_empty() { "" } else { "\x1b[0m" };
                     let value = change.value();
                     if value.ends_with('\n') {
-                        print!("{}{}{}{}", color, prefix, value, reset);
+                        let _ = write!(out, "{}{}{}{}", color, prefix, value, reset);
                     } else {
-                        println!("{}{}{}{}", color, prefix, value, reset);
+                        let _ = writeln!(out, "{}{}{}{}", color, prefix, value, reset);
                     }
                 }
             }
@@ -416,7 +436,7 @@ fn print_colored(diffs: &[FileDiff]) {
     }
 }
 
-fn print_json(diffs: &[FileDiff]) -> Result<()> {
+fn format_json(diffs: &[FileDiff], out: &mut String) -> Result<()> {
     let mut entries = Vec::new();
 
     for diff in diffs {
@@ -489,11 +509,12 @@ fn print_json(diffs: &[FileDiff]) -> Result<()> {
         }));
     }
 
-    println!("{}", serde_json::to_string_pretty(&entries)?);
+    out.push_str(&serde_json::to_string_pretty(&entries)?);
+    out.push('\n');
     Ok(())
 }
 
-fn print_stat(diffs: &[FileDiff]) {
+fn format_stat(diffs: &[FileDiff], out: &mut String) {
     let mut total_insertions = 0usize;
     let mut total_deletions = 0usize;
     let mut max_path_len = 0usize;
@@ -544,10 +565,11 @@ fn print_stat(diffs: &[FileDiff]) {
     // Second pass: print.
     for (path, status, ins, del) in &stats {
         if *status == "Bin" {
-            println!(" {:<width$} | Bin", path, width = max_path_len);
+            let _ = writeln!(out, " {:<width$} | Bin", path, width = max_path_len);
         } else {
             let total = ins + del;
-            println!(
+            let _ = writeln!(
+                out,
                 " {:<width$} | {:>4} {}",
                 path,
                 total,
@@ -558,7 +580,8 @@ fn print_stat(diffs: &[FileDiff]) {
     }
 
     if !stats.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             " {} file(s) changed, {} insertion(s)(+), {} deletion(s)(-)",
             stats.len(),
             total_insertions,

@@ -6,6 +6,7 @@ authors = ["Krishna Teja <krishna18developer@gmail.com>"]
 
 [dependencies]
 forge-proto = { path = "../../forge-proto" }
+forge-core = { path = "../../forge-core" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12", features = ["tls", "tls-roots"] }
@@ -28,3 +29,12 @@ hex = "0.4"
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
+
+# Windows-only: native Windows service support so forge-web can install
+# itself with the Service Control Manager. The order matters — every
+# `[target.'cfg(...)']` block must come AFTER the cross-platform
+# `[dependencies]` table or all the lines beneath the section header get
+# pulled into the cfg-gated namespace and disappear from Linux/macOS
+# builds.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"

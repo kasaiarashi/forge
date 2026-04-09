@@ -27,21 +27,62 @@ impl ForgeGrpcClient {
     /// Connect to the forge-server at the given gRPC URL.
     ///
     /// - `http://…` URLs use plaintext h2c.
-    /// - `https://…` URLs negotiate TLS. When `ca_cert_path` is provided,
-    ///   that PEM file is the sole trust root (required for self-signed
-    ///   deployments). Without it, the OS trust store is used.
+    /// - `https://…` URLs negotiate TLS. Trust-root assembly:
+    ///     * Load the explicit `ca_cert_path` from config, if any.
+    ///     * Load the CA published by forge-server at the well-known shared
+    ///       path resolved by [`forge_core::ca_publish::discover()`], if any.
+    ///     * Concatenate both PEMs and hand them to rustls as trust anchors.
+    ///       rustls accepts any chain that verifies against *either* anchor,
+    ///       so an operator who still has a stale `ca_cert_path` pinned to
+    ///       an old data dir will keep working the moment forge-server comes
+    ///       back up with a fresh CA.
+    ///     * If neither path yields bytes, fall back to the OS native root
+    ///       store (`with_native_roots`).
     pub async fn connect(grpc_url: &str, ca_cert_path: Option<&Path>) -> anyhow::Result<Self> {
         let endpoint = Endpoint::from_shared(grpc_url.to_string())?;
         let endpoint = if grpc_url.starts_with("https://") {
-            let tls = if let Some(path) = ca_cert_path {
-                let pem = std::fs::read(path).map_err(|e| {
+            let discovered = forge_core::ca_publish::discover();
+
+            // Read every candidate that resolves to a real file, logging
+            // the ones we used. De-dupe by canonical path so pointing the
+            // config at the discovered path on purpose doesn't load it
+            // twice.
+            let mut pem_bundle: Vec<u8> = Vec::new();
+            let mut trusted: Vec<String> = Vec::new();
+            let mut seen: std::collections::HashSet<std::path::PathBuf> =
+                std::collections::HashSet::new();
+
+            let mut try_load = |path: &Path| -> anyhow::Result<()> {
+                let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                if !seen.insert(canon) {
+                    return Ok(());
+                }
+                let bytes = std::fs::read(path).map_err(|e| {
                     anyhow::anyhow!("failed to read CA cert {}: {e}", path.display())
                 })?;
-                // Self-signed deployments: the operator-supplied PEM is the
-                // ONLY trust root. We don't merge with_native_roots() here
-                // because a typo in ca_cert_path could otherwise silently
-                // fall back to whatever the system trusts.
-                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem))
+                if !pem_bundle.is_empty() && !pem_bundle.ends_with(b"\n") {
+                    pem_bundle.push(b'\n');
+                }
+                pem_bundle.extend_from_slice(&bytes);
+                trusted.push(path.display().to_string());
+                Ok(())
+            };
+
+            if let Some(path) = ca_cert_path {
+                try_load(path)?;
+            }
+            if let Some(ref path) = discovered {
+                // The discovered CA is opportunistic — a missing / unreadable
+                // file here is fine, the configured one (if any) or native
+                // roots will carry the connection.
+                if let Err(e) = try_load(path) {
+                    tracing::debug!("skipping discovered CA {}: {e}", path.display());
+                }
+            }
+
+            let tls = if !pem_bundle.is_empty() {
+                tracing::info!("gRPC client trusting CA(s) from: {}", trusted.join(", "));
+                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem_bundle))
             } else {
                 ClientTlsConfig::new().with_native_roots()
             };

@@ -167,6 +167,27 @@ jobs:
             installers\windows\forge-server.iss
         shell: pwsh
 
+      # ── UE Plugin (Fab-compliant source zip) ──
+      # Stages the plugin into the directory layout Fab requires
+      # (Config / Content / Resources / Source / .uplugin) — explicitly
+      # excludes Binaries/ and Intermediate/ since Fab plugins ship as
+      # source and UE compiles them on the user's machine after install.
+      - name: Package UE Plugin (Fab source zip)
+        shell: pwsh
+        run: |
+          $plugin = "plugin\ForgeSourceControl\Plugins\ForgeSourceControl"
+          $stage  = "staging\ForgeSourceControl"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item        "$plugin\ForgeSourceControl.uplugin" $stage
+          Copy-Item -Recurse "$plugin\Config"    $stage
+          Copy-Item -Recurse "$plugin\Content"   $stage
+          Copy-Item -Recurse "$plugin\Resources" $stage
+          Copy-Item -Recurse "$plugin\Source"    $stage
+          $zip = "ForgeSourceControl-${{ github.ref_name }}.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path $stage -DestinationPath $zip
+
       # ── Linux x64 tar.gz ──
       - name: Package Linux x64
         shell: bash
@@ -249,6 +270,7 @@ jobs:
             forge-server-linux-amd64.tar.gz
             forge-server-macos-amd64.tar.gz
             forge-server-macos-arm64.tar.gz
+            ForgeSourceControl-${{ github.ref_name }}.zip
             forge-windows-x64.exe
             forge-server-windows-x64.exe
             forge-web-windows-x64.exe
