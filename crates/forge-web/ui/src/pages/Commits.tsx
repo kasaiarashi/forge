@@ -15,7 +15,7 @@ import {
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
 import type { CommitList, Branch } from '../api';
-import api, { copyToClipboard } from '../api';
+import api, { repoPath,  copyToClipboard } from '../api';
 
 function timeAgo(epoch: number): string {
   const date = new Date(epoch * 1000);
@@ -65,7 +65,7 @@ export default function Commits() {
   const [page, setPage] = useState(1);
   const [copiedHash, setCopiedHash] = useState('');
 
-  const encRepo = encodeURIComponent(repo);
+  const encRepo = repoPath(repo);
 
   useEffect(() => {
     setLoading(true);
@@ -126,7 +126,7 @@ export default function Commits() {
             <ActionMenu.Overlay>
               <ActionList>
                 {branches.map(b => (
-                  <ActionList.Item key={b.name} onSelect={() => navigate(`/${encodeURIComponent(repo)}/commits/${encodeURIComponent(b.name)}`)}>
+                  <ActionList.Item key={b.name} onSelect={() => navigate(`/${repoPath(repo)}/commits/${encodeURIComponent(b.name)}`)}>
                     {b.name}
                   </ActionList.Item>
                 ))}

@@ -27,9 +27,19 @@ pub fn run(action: Option<String>, args: Vec<String>) -> Result<()> {
             }
             let name = &args[0];
             let url = &args[1];
-            config.add_remote(name.clone(), url.clone())?;
+            // Accept the same `<server>/<owner>/<repo>` form `forge clone`
+            // takes. The bare server URL is what we store in `remotes`; the
+            // `<owner>/<repo>` path (if present) goes into `config.repo`.
+            let (server_url, repo_from_url) =
+                super::clone::parse_clone_url(url).map_err(|e| anyhow::anyhow!("{e}"))?;
+            config.add_remote(name.clone(), server_url.clone())?;
+            if let Some(r) = repo_from_url {
+                config.repo = r.clone();
+                println!("Added remote '{}' -> {}  (repo: {})", name, server_url, r);
+            } else {
+                println!("Added remote '{}' -> {}", name, server_url);
+            }
             ws.save_config(&config)?;
-            println!("Added remote '{}' -> {}", name, url);
         }
         Some("remove") => {
             if args.is_empty() {

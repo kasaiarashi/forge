@@ -22,7 +22,7 @@ import {
   LightBulbIcon,
 } from '@primer/octicons-react';
 import type { RepoInfo } from '../api';
-import api, { copyToClipboard } from '../api';
+import api, { repoPath,  copyToClipboard } from '../api';
 import { useAuth } from '../context/AuthContext';
 
 function CopyableCodeBlock({ lines, label }: { lines: string[]; label: string }) {
@@ -80,12 +80,6 @@ export default function Dashboard() {
   const [newDesc, setNewDesc] = useState('');
   const [creating, setCreating] = useState(false);
   const [createdRepo, setCreatedRepo] = useState<string | null>(null);
-  const [flashMsg, setFlashMsg] = useState('');
-
-  const triggerMockAction = (msg: string) => {
-    setFlashMsg(msg);
-    setTimeout(() => setFlashMsg(''), 3000);
-  };
 
   useEffect(() => {
     api.listRepos()
@@ -94,7 +88,16 @@ export default function Dashboard() {
       .finally(() => setLoading(false));
   }, []);
 
-  const serverUrl = window.location.origin;
+  // Bare gRPC server URL (NOT the web UI origin) — same protocol + hostname,
+  // forge-server's default port. Used to build the GitHub-style clone URL
+  // displayed in the quick-setup card.
+  const serverUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
+  // Full `<owner>/<repo>` path for the most-recently-created repo. Empty if
+  // nothing was just created.
+  const createdRepoPath = createdRepo && user?.username
+    ? `${user.username}/${createdRepo}`
+    : createdRepo ?? '';
+  const createdCloneUrl = createdRepoPath ? `${serverUrl}/${createdRepoPath}` : '';
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -138,11 +141,6 @@ export default function Dashboard() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1280px', margin: '0 auto' }}>
-      {flashMsg && (
-        <div style={{ padding: '0' }}>
-          <Flash variant="success">{flashMsg}</Flash>
-        </div>
-      )}
       <div style={{ display: 'flex', gap: '32px' }}>
       
       {/* Left Sidebar: Repositories */}
@@ -179,7 +177,7 @@ export default function Dashboard() {
               <li key={repo.name} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', borderBottom: '1px solid var(--border-muted)' }}>
                 <Avatar src={`https://github.com/identicons/${user?.username}.png`} size={16} />
                 <Link
-                  to={`/${encodeURIComponent(repo.name)}`}
+                  to={`/${repoPath(repo.name)}`}
                   style={{
                     fontWeight: 500,
                     fontSize: '14px',
@@ -193,7 +191,7 @@ export default function Dashboard() {
                   onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
                   onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}
                 >
-                  {user?.username}/{repo.name}
+                  {repo.name}
                 </Link>
                 <Label size="small" variant="secondary" style={{ flexShrink: 0 }}>
                   Public
@@ -202,10 +200,6 @@ export default function Dashboard() {
             ))
           )}
         </ul>
-        
-        <div style={{ marginTop: '16px', fontSize: '12px', color: 'var(--fg-muted)' }}>
-          <span style={{ color: 'var(--fg-muted)', cursor: 'pointer' }} onMouseOver={(e) => (e.currentTarget.style.color = 'var(--fg-accent)')} onMouseOut={(e) => (e.currentTarget.style.color = 'var(--fg-muted)')} onClick={() => triggerMockAction('Showing more repositories...')}>Show more</span>
-        </div>
       </div>
 
       {/* Main Content: Feed */}
@@ -217,7 +211,7 @@ export default function Dashboard() {
             <div className="forge-card-header" style={{ justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <RepoIcon size={16} />
-                <span style={{ fontWeight: 600 }}>Quick setup for {createdRepo}</span>
+                <span style={{ fontWeight: 600 }}>Quick setup for {createdRepoPath}</span>
               </div>
               <IconButton
                 aria-label="Dismiss"
@@ -229,22 +223,20 @@ export default function Dashboard() {
             </div>
             <div style={{ padding: '16px' }}>
               <CopyableCodeBlock
-                label="...or create a new repository on the command line"
+                label="Quick setup — clone and start committing"
                 lines={[
-                  'forge init',
-                  `forge config repo ${createdRepo}`,
-                  'forge config user.name "Your Name"',
-                  `forge remote add origin ${serverUrl}:9876`,
+                  `forge clone ${createdCloneUrl}`,
+                  `cd ${createdRepo}`,
+                  'echo "# starter" > README.md',
                   'forge add .',
-                  'forge commit -m "Initial commit"',
+                  'forge commit -m "first commit"',
                   'forge push',
                 ]}
               />
               <CopyableCodeBlock
-                label="...or push an existing repository"
+                label="…or push an existing repository from the command line"
                 lines={[
-                  `forge config repo ${createdRepo}`,
-                  `forge remote add origin ${serverUrl}:9876`,
+                  `forge remote add origin ${createdCloneUrl}`,
                   'forge push',
                 ]}
               />
@@ -256,10 +248,6 @@ export default function Dashboard() {
           <h2 style={{ fontSize: '20px', fontWeight: 600, margin: 0 }}>
             Home
           </h2>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <Button size="small" variant="invisible" onClick={() => triggerMockAction('Feedback recorded! Thank you.')}>Send feedback</Button>
-            <Button size="small" leadingVisual={SearchIcon} onClick={() => triggerMockAction('Filter options opened...')}>Filter</Button>
-          </div>
         </div>
 
         {repos.length === 0 ? (
@@ -285,30 +273,13 @@ export default function Dashboard() {
               <LightBulbIcon size={32} />
             </div>
             <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--fg-default)', margin: '0 0 8px 0' }}>
-              Discover interesting projects and people to populate your personal news feed.
+              No recent activity.
             </p>
             <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 16px 0' }}>
-              Your news feed helps you keep up with recent activity on repositories you watch and people you follow.
+              Push a commit, open a pull request, or acquire a lock — recent activity will show up here.
             </p>
-            <Button onClick={() => triggerMockAction('Navigating to Explore...')}>Explore Forge</Button>
           </div>
         )}
-      </div>
-
-      {/* Right Sidebar: Explore/Sponsor */}
-      <div style={{ width: '296px', flexShrink: 0 }}>
-        <div style={{ borderBottom: '1px solid var(--border-muted)', paddingBottom: '16px', marginBottom: '16px' }}>
-          <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0', color: 'var(--fg-default)' }}>Latest changes</h3>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '12px', color: 'var(--fg-muted)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <li><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: 'var(--fg-accent)', marginRight: '8px' }}></span> Yesterday • Welcome to the new Forge Dashboard interface! Enjoy the clean layout.</li>
-          </ul>
-        </div>
-        <div>
-          <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0', color: 'var(--fg-default)' }}>Explore repositories</h3>
-          <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
-            No recommendations yet. Check back later once you watch more repositories.
-          </div>
-        </div>
       </div>
 
       {/* Create repo dialog */}

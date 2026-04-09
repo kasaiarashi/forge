@@ -12,7 +12,7 @@ import {
   LightBulbIcon,
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
-import api from '../api';
+import api, { repoPath } from '../api';
 import type { PullRequestInfo } from '../api';
 import { getLabelColor } from '../utils';
 
@@ -105,7 +105,7 @@ export default function PullRequests() {
             />
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <Button size="medium" variant="primary" leadingVisual={GitPullRequestIcon} as={Link} to={`/${encodeURIComponent(repo)}/pulls/new`}>New pull request</Button>
+            <Button size="medium" variant="primary" leadingVisual={GitPullRequestIcon} as={Link} to={`/${repoPath(repo)}/pulls/new`}>New pull request</Button>
           </div>
         </div>
 
@@ -152,7 +152,7 @@ export default function PullRequests() {
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                    <Link to={`/${encodeURIComponent(repo)}/pulls/${pr.id}`} style={{ fontWeight: 600, fontSize: '16px', color: 'var(--fg-default)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.color = 'var(--fg-accent)'} onMouseOut={e => e.currentTarget.style.color = 'var(--fg-default)'}>
+                    <Link to={`/${repoPath(repo)}/pulls/${pr.id}`} style={{ fontWeight: 600, fontSize: '16px', color: 'var(--fg-default)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.color = 'var(--fg-accent)'} onMouseOut={e => e.currentTarget.style.color = 'var(--fg-default)'}>
                       {pr.title}
                     </Link>
                     {pr.labels.map(l => (

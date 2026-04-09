@@ -23,7 +23,7 @@ import hljs from 'highlight.js';
 import hljsLight from 'highlight.js/styles/github.css?url';
 import hljsDark from 'highlight.js/styles/github-dark.css?url';
 import type { FileContent } from '../api';
-import api, { copyToClipboard } from '../api';
+import api, { repoPath,  copyToClipboard } from '../api';
 import { useTheme } from '../context/ThemeContext';
 
 const extToLang: Record<string, string> = {
@@ -89,7 +89,7 @@ export default function FileView() {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const encRepo = encodeURIComponent(repo);
+  const encRepo = repoPath(repo);
   const encBranch = encodeURIComponent(branch);
 
   useEffect(() => {

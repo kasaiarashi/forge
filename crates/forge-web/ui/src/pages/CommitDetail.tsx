@@ -18,7 +18,7 @@ import {
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
 import type { CommitDetail as CommitDetailType, DiffFile } from '../api';
-import api, { copyToClipboard } from '../api';
+import api, { repoPath,  copyToClipboard } from '../api';
 
 function timeAgo(epoch: number): string {
   const date = new Date(epoch * 1000);
@@ -280,7 +280,7 @@ export default function CommitDetail() {
   const [copied, setCopied] = useState(false);
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
 
-  const encRepo = encodeURIComponent(repo);
+  const encRepo = repoPath(repo);
 
   useEffect(() => {
     setLoading(true);

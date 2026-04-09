@@ -392,6 +392,31 @@ function enc(s: string) {
   return encodeURIComponent(s);
 }
 
+/**
+ * Build a navigation path segment for a `<owner>/<name>` repo identifier.
+ *
+ * Each segment is URL-encoded individually but the `/` between owner and
+ * name is kept literal — that's what lets React Router split the path into
+ * the `:owner/:repo` route params. Use this for `<Link to={...}>` and
+ * `navigate(...)` targets, NOT for API call URLs (those need a single
+ * encoded segment so axum's `:repo` param receives the full path after
+ * per-segment decoding).
+ */
+export function repoPath(repo: string): string {
+  return repo
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/');
+}
+
+/// Split a `<owner>/<name>` identifier into its two halves. Returns
+/// `[owner, name]`. If the string has no slash, returns `['', repo]`.
+export function splitRepo(repo: string): [string, string] {
+  const idx = repo.indexOf('/');
+  if (idx < 0) return ['', repo];
+  return [repo.slice(0, idx), repo.slice(idx + 1)];
+}
+
 export default api;
 
 export interface LanguageStat {

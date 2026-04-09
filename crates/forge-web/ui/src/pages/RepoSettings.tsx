@@ -102,7 +102,10 @@ export default function RepoSettings() {
     }
   };
 
-  const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
+  // Full GitHub-style clone URL: server + path. The bare server URL is no
+  // longer surfaced in the UI — `forge clone` now takes the path inline.
+  const serverUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
+  const cloneUrl = `${serverUrl}/${repo}`;
 
   const handleCopyClone = () => {
     copyToClipboard(`forge clone ${cloneUrl}`);

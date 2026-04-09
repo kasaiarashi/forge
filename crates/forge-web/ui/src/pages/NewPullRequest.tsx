@@ -4,7 +4,7 @@ import { useRepoParam } from '../hooks/useRepoParam';
 import { TextInput, Button, Flash, ActionMenu, ActionList, Spinner, Avatar } from '@primer/react';
 import { GitPullRequestIcon, GitCommitIcon, CheckIcon, ArrowLeftIcon, MarkdownIcon, FileIcon, PersonIcon, GearIcon } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
-import api from '../api';
+import api, { repoPath } from '../api';
 import type { Branch, CommitSummary } from '../api';
 
 export default function NewPullRequest() {
@@ -60,7 +60,7 @@ export default function NewPullRequest() {
     setError('');
     try {
       await api.createPullRequest(repo, title.trim(), compareBranch, baseBranch, body, []);
-      navigate(`/${encodeURIComponent(repo)}/pulls`);
+      navigate(`/${repoPath(repo)}/pulls`);
     } catch (e: any) {
       setError(e.message || 'Failed to create pull request');
       setSubmitting(false);

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Flash, Spinner, TextInput, Checkbox, FormControl } from '@primer/react';
-import api from '../api';
+import api, { repoPath } from '../api';
 
 const DEFAULT_YAML = `name: My Workflow
 on:
@@ -57,7 +57,7 @@ export default function WorkflowEdit() {
         const res = await api.updateWorkflow(repo, Number(id), { name, yaml, enabled });
         if (!res.success) throw new Error((res as any).error || 'Failed to update');
       }
-      navigate(`/${encodeURIComponent(repo)}/actions`);
+      navigate(`/${repoPath(repo)}/actions`);
     } catch (e: any) {
       setError(e.message);
     } finally {

@@ -10,7 +10,7 @@ import {
   IssueClosedIcon,
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
-import api from '../api';
+import api, { repoPath } from '../api';
 import type { IssueInfo } from '../api';
 import { getLabelColor } from '../utils';
 
@@ -87,7 +87,7 @@ export default function Issues() {
             />
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <Button size="medium" variant="primary" as={Link} to={`/${encodeURIComponent(repo)}/issues/new`}>New issue</Button>
+            <Button size="medium" variant="primary" as={Link} to={`/${repoPath(repo)}/issues/new`}>New issue</Button>
           </div>
         </div>
 
@@ -128,7 +128,7 @@ export default function Issues() {
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                    <Link to={`/${encodeURIComponent(repo)}/issues/${issue.id}`} style={{ fontWeight: 600, fontSize: '16px', color: 'var(--fg-default)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.color = 'var(--fg-accent)'} onMouseOut={e => e.currentTarget.style.color = 'var(--fg-default)'}>
+                    <Link to={`/${repoPath(repo)}/issues/${issue.id}`} style={{ fontWeight: 600, fontSize: '16px', color: 'var(--fg-default)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.color = 'var(--fg-accent)'} onMouseOut={e => e.currentTarget.style.color = 'var(--fg-default)'}>
                       {issue.title}
                     </Link>
                     {issue.labels.map(l => (

@@ -14,7 +14,7 @@ import {
   PencilIcon,
   KebabHorizontalIcon,
 } from '@primer/octicons-react';
-import api from '../api';
+import api, { repoPath } from '../api';
 import type { WorkflowInfo, RunInfo } from '../api';
 import RepoHeader from '../components/RepoHeader';
 
@@ -67,7 +67,7 @@ export default function Workflows() {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const encRepo = encodeURIComponent(repo || '');
+  const encRepo = repoPath(repo || '');
 
   const load = async () => {
     if (!repo) return;

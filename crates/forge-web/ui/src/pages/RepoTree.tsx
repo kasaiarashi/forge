@@ -24,7 +24,7 @@ import {
 } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
 import type { TreeEntry, Branch, CommitSummary, RepoInfo, LanguageStat } from '../api';
-import api, { copyToClipboard, getLanguageStats } from '../api';
+import api, { repoPath,  copyToClipboard, getLanguageStats } from '../api';
 import { useAuth } from '../context/AuthContext';
 
 function timeAgo(epoch: number): string {
@@ -67,7 +67,11 @@ export default function RepoTree() {
   const [recentCommits, setRecentCommits] = useState<CommitSummary[]>([]);
   const { user } = useAuth();
 
-  const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
+  // Bare server URL (for `forge remote add` etc.) and the full
+  // server-plus-path URL the user will paste into `forge clone`. The full
+  // form is the GitHub-style `http://host:9876/<owner>/<name>`.
+  const serverUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
+  const cloneUrl = `${serverUrl}/${repo}`;
 
   const copyCloneUrl = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -131,7 +135,7 @@ export default function RepoTree() {
   }, [repo, branch, path]);
 
   const pathParts = path ? path.split('/') : [];
-  const encRepo = encodeURIComponent(repo);
+  const encRepo = repoPath(repo);
   const encBranch = encodeURIComponent(activeBranch);
 
   const buildPath = (index: number): string => {
@@ -158,18 +162,18 @@ export default function RepoTree() {
   if (isEmpty) {
     // Quickstart instructions for an empty repo. Same shape as the
     // "Quick setup for {repo}" card in Dashboard.tsx so refresh / direct
-    // navigation feels consistent.
+    // navigation feels consistent. Both flows now use the GitHub-style
+    // single-URL form.
+    const repoName = repo.split('/').pop() || repo;
     const quickstartInit = [
-      'forge init',
-      `forge config repo ${repo}`,
-      'forge config user.name "Your Name"',
-      `forge remote add origin ${cloneUrl}`,
+      `forge clone ${cloneUrl}`,
+      `cd ${repoName}`,
+      'echo "# starter" > README.md',
       'forge add .',
-      'forge commit -m "Initial commit"',
+      'forge commit -m "first commit"',
       'forge push',
     ];
     const quickstartPush = [
-      `forge config repo ${repo}`,
       `forge remote add origin ${cloneUrl}`,
       'forge push',
     ];
@@ -282,14 +286,11 @@ export default function RepoTree() {
                   <div style={{ fontSize: '12px', color: 'var(--fg-muted)', marginBottom: '8px' }}>
                     Use Forge CLI to clone this repository.
                   </div>
-                  <div style={{ display: 'flex', gap: '4px', marginBottom: '12px' }}>
+                  <div style={{ display: 'flex', gap: '4px', marginBottom: '4px' }}>
                     <TextInput value={`forge clone ${cloneUrl}`} readOnly block monospace size="small" />
                     <Button size="small" onClick={copyCloneUrl}>
                       {cloneCopied ? 'Copied!' : <CopyIcon size={16} />}
                     </Button>
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
-                    Then: <code style={{ background: 'var(--bg-subtle)', padding: '2px 6px', borderRadius: '3px' }}>forge config repo {repo}</code>
                   </div>
                 </div>
               )}
@@ -514,17 +515,6 @@ export default function RepoTree() {
               </Link>
             </div>
 
-            {/* Packages */}
-            <div style={{ marginBottom: '24px', borderTop: '1px solid var(--border-muted)', paddingTop: '16px' }}>
-              <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Packages</h3>
-              <div style={{ fontSize: '13px', color: 'var(--fg-muted)', marginBottom: '8px' }}>
-                No packages published
-              </div>
-              <a href="#" style={{ fontSize: '13px', color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={e => e.currentTarget.style.textDecoration = 'underline'} onMouseOut={e => e.currentTarget.style.textDecoration = 'none'}>
-                Publish your first package
-              </a>
-            </div>
-
             {/* Languages */}
             {languages.length > 0 && (
               <div style={{ marginBottom: '24px', borderTop: '1px solid var(--border-muted)', paddingTop: '16px' }}>
@@ -551,7 +541,7 @@ export default function RepoTree() {
               <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Recent activity</h3>
               {recentCommits.map(c => (
                 <div key={c.hash} style={{ fontSize: '12px', marginBottom: '8px' }}>
-                  <Link to={`/${encodeURIComponent(repo)}/commit/${c.hash}`} style={{ color: 'var(--fg-accent)', textDecoration: 'none' }}>
+                  <Link to={`/${repoPath(repo)}/commit/${c.hash}`} style={{ color: 'var(--fg-accent)', textDecoration: 'none' }}>
                     {c.message.length > 50 ? c.message.slice(0, 50) + '...' : c.message}
                   </Link>
                   <div style={{ color: 'var(--fg-muted)' }}>{c.author_name} · {timeAgo(c.timestamp)}</div>

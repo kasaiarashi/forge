@@ -66,15 +66,6 @@ export default function Layout({ children }: LayoutProps) {
         <Header.Item>
           <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Issues</Header.Link>
         </Header.Item>
-        <Header.Item>
-          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Codespaces</Header.Link>
-        </Header.Item>
-        <Header.Item>
-          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Marketplace</Header.Link>
-        </Header.Item>
-        <Header.Item>
-          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Explore</Header.Link>
-        </Header.Item>
 
         <Header.Item full />
 

@@ -16,7 +16,7 @@ import {
   PlayIcon,
   FileIcon,
 } from '@primer/octicons-react';
-import api from '../api';
+import api, { repoPath } from '../api';
 import type { RunDetail as RunDetailData } from '../api';
 import RepoHeader from '../components/RepoHeader';
 
@@ -136,7 +136,7 @@ export default function RunDetail() {
   if (!data?.run) return <Flash variant="danger">Run not found</Flash>;
 
   const { run, steps, artifacts } = data;
-  const encRepo = encodeURIComponent(repo!);
+  const encRepo = repoPath(repo!);
 
   // Group steps by job_name
   const jobNames = [...new Set(steps.map(s => s.job_name))];
