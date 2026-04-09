@@ -41,8 +41,22 @@ pub fn run_with_create(name: String, create: bool) -> Result<()> {
         println!("Created branch '{name}' at {}", head.short());
     }
 
-    // Verify the (now possibly just-created) target branch exists.
-    let target_commit = ws.get_branch_tip(&name)?;
+    // Verify the (now possibly just-created) target branch exists. If it
+    // doesn't, fall through to the DWIM path: a remote-tracking ref left
+    // by `forge fetch` is enough to materialize a local branch on the fly.
+    // Matches `git switch <branch>` when only `origin/<branch>` exists.
+    let target_commit = match ws.get_branch_tip(&name) {
+        Ok(h) => h,
+        Err(_) => match try_create_from_remote_ref(&ws, &name)? {
+            Some(h) => h,
+            None => {
+                bail!(
+                    "branch '{name}' does not exist locally or on any remote-tracking ref. \
+                     Run `forge fetch` if you expect it from the server."
+                );
+            }
+        },
+    };
 
     // Bail if already on that branch.
     if let Ok(HeadRef::Branch(current)) = ws.head() {
@@ -199,6 +213,50 @@ pub(crate) fn move_to_commit(
     // Finally, update HEAD.
     ws.set_head(&new_head)?;
     Ok(())
+}
+
+/// `git switch <branch>` DWIM: when the local branch doesn't exist, look
+/// for a remote-tracking ref (`refs/remotes/<remote>/<branch>`) left by
+/// `forge fetch`. If exactly one matches, materialize a local branch at
+/// that hash and return its tip. Returns `Ok(None)` when no remote has it,
+/// so the caller can produce a clean "branch not found" error.
+///
+/// Scans every remote-tracking ref on disk (not just `config.remotes`) so
+/// a workspace that was hand-populated or whose config was wiped still
+/// gets the DWIM. The default remote — when one is configured — is
+/// preferred over alphabetical order, matching git's "first hit wins"
+/// behavior.
+fn try_create_from_remote_ref(ws: &Workspace, name: &str) -> Result<Option<ForgeHash>> {
+    let all = ws.list_all_remote_refs()?;
+    if all.is_empty() {
+        return Ok(None);
+    }
+
+    // Find every (remote, hash) pair whose branch matches `name`.
+    let matches: Vec<(String, ForgeHash)> = all
+        .into_iter()
+        .filter_map(|(remote, branch, hash)| (branch == name).then_some((remote, hash)))
+        .collect();
+
+    if matches.is_empty() {
+        return Ok(None);
+    }
+
+    // Prefer the default remote when one is configured, otherwise take
+    // the first alphabetical match (list_all_remote_refs returns sorted).
+    let preferred_remote = ws
+        .config()
+        .ok()
+        .and_then(|c| c.default_remote().map(|r| r.name.clone()));
+
+    let (remote, tip) = preferred_remote
+        .as_ref()
+        .and_then(|name| matches.iter().find(|(r, _)| r == name).cloned())
+        .unwrap_or_else(|| matches[0].clone());
+
+    ws.set_branch_tip(name, &tip)?;
+    println!("Branch '{}' set up to track '{}/{}'", name, remote, name);
+    Ok(Some(tip))
 }
 
 /// Check if an object in the store is a ChunkedBlob (type byte == 2).

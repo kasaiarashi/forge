@@ -126,6 +126,12 @@ enum Commands {
     /// Pull commits from the server
     Pull,
 
+    /// Download remote branches and update remote-tracking refs (no checkout)
+    Fetch {
+        /// Branch to fetch (omit to fetch all remote branches)
+        branch: Option<String>,
+    },
+
     /// Clone a remote project
     Clone {
         /// Server URL
@@ -191,6 +197,14 @@ enum Commands {
         /// Delete the branch
         #[arg(short, long)]
         delete: bool,
+
+        /// List both local and remote-tracking branches
+        #[arg(short = 'a', long)]
+        all: bool,
+
+        /// List only remote-tracking branches
+        #[arg(short = 'r', long)]
+        remotes: bool,
     },
 
     /// Switch to a branch (optionally creating it first)
@@ -428,13 +442,14 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Log { count, file, oneline, all, no_pager } => commands::log::run(count, file, oneline, all, no_pager, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
+        Commands::Fetch { branch } => commands::fetch::run(branch)?,
         Commands::Clone { url, repo, path } => commands::clone::run(url, path, repo)?,
         Commands::Lock { path, reason } => commands::lock::run(path, reason, cli.json)?,
         Commands::Unlock { path, force } => commands::unlock::run(path, force, cli.json)?,
         Commands::Locks => commands::locks::run(cli.json)?,
         Commands::Unstage { paths } => commands::unstage::run(paths)?,
         Commands::Restore { staged, source, paths } => commands::restore::run(staged, source, paths)?,
-        Commands::Branch { name, delete } => commands::branch::run(name, delete, cli.json)?,
+        Commands::Branch { name, delete, all, remotes } => commands::branch::run(name, delete, all, remotes, cli.json)?,
         Commands::Switch { name, create } => commands::switch::run_with_create(name, create)?,
         Commands::Ignore { patterns } => commands::ignore::run(patterns)?,
         Commands::Remote { action, args } => commands::remote::run(action, args)?,
