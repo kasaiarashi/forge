@@ -219,11 +219,17 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Build the shared user store first so the gRPC service and the auth
+    // interceptor / AuthService all share one Arc<dyn UserStore>.
+    let user_store: Arc<dyn auth::UserStore> =
+        Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
+
     let service = ForgeGrpcService {
         fs: Arc::clone(&fs),
         db: Arc::clone(&db),
         start_time: std::time::Instant::now(),
         workflow_engine,
+        user_store: Arc::clone(&user_store),
     };
 
     let addr = config.server.listen.parse()?;
@@ -233,9 +239,7 @@ async fn main() -> Result<()> {
 
     let max_msg = config.server.max_message_size as usize;
 
-    // Build the shared user store + auth interceptor.
-    let user_store: Arc<dyn auth::UserStore> =
-        Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
+    // The interceptor reuses the same store the gRPC service holds.
     let interceptor = auth::interceptor::make_interceptor(Arc::clone(&user_store));
 
     let forge_svc = ForgeServiceServer::new(service)
