@@ -30,3 +30,8 @@ pub mod checkout;
 pub mod restore;
 pub mod asset_info;
 pub mod gc;
+pub mod login;
+pub mod logout;
+pub mod trust;
+pub mod update;
+pub mod whoami;

@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Spinner, Flash, Label } from '@primer/react';
 import { IssueOpenedIcon, IssueClosedIcon } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
-import api from '../api';
+import api, { repoPath } from '../api';
 import type { IssueInfo } from '../api';
 import { getLabelColor } from '../utils';
 
@@ -24,7 +25,8 @@ function timeAgo(epoch: number): string {
 }
 
 export default function IssueDetail() {
-  const { repo = '', id = '' } = useParams();
+  const repo = useRepoParam();
+  const { id = '' } = useParams<{ id?: string }>();
   const issueId = parseInt(id, 10);
   
   const [issue, setIssue] = useState<IssueInfo | null>(null);
@@ -90,7 +92,7 @@ export default function IssueDetail() {
             <h1 style={{ fontSize: '32px', fontWeight: 400, color: 'var(--fg-default)', margin: 0, lineHeight: 1.25 }}>
               {issue.title} <span style={{ color: 'var(--fg-muted)', fontWeight: 300 }}>#{issue.id}</span>
             </h1>
-            <Button as={Link} to={`/${encodeURIComponent(repo)}/issues/new`} variant="primary" size="small">New issue</Button>
+            <Button as={Link} to={`/${repoPath(repo)}/issues/new`} variant="primary" size="small">New issue</Button>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', color: 'var(--fg-muted)' }}>
             <div style={{ 

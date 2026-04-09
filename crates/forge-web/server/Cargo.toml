@@ -8,8 +8,16 @@ authors = ["Krishna Teja <krishna18developer@gmail.com>"]
 forge-proto = { path = "../../forge-proto" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
-tonic = "0.12"
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "set-header"] }
+tower_governor = "0.4"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs", "x509-parser"] }
+sha2 = "0.10"
+if-addrs = "0.13"
+percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -19,6 +27,4 @@ clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
-bcrypt = "0.17"
-jsonwebtoken = "9"
 toml = "0.8"

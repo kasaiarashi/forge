@@ -5,21 +5,115 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::AppState;
 
+/// Characters to percent-encode for the quoted `filename` in Content-Disposition.
+/// We stay conservative — anything outside ASCII alphanumerics plus a few
+/// obviously-safe punctuation chars is encoded.
+const DISPOSITION_FILENAME: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'\\')
+    .add(b';')
+    .add(b',')
+    .add(b'(')
+    .add(b')')
+    .add(b'<')
+    .add(b'>')
+    .add(b'@')
+    .add(b':')
+    .add(b'?')
+    .add(b'=')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'[')
+    .add(b']')
+    .add(b'%');
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn internal_error(msg: impl std::fmt::Display) -> Response {
+/// Error responder. If the underlying error is a tonic Status (the common
+/// case — almost every web handler proxies a gRPC call), translate the gRPC
+/// code to the matching HTTP status so the SPA's interceptor can react
+/// (401 → redirect to /login, 403 → show forbidden, etc.). Falls back to 500
+/// for everything else.
+pub(crate) fn internal_error_public(err: anyhow::Error) -> Response {
+    internal_error(err)
+}
+
+fn internal_error(err: anyhow::Error) -> Response {
+    // anyhow's downcast_ref works on the error chain.
+    if let Some(status) = err.downcast_ref::<tonic::Status>() {
+        return grpc_status_to_response(status);
+    }
+    // Sometimes the gRPC client wraps the Status inside another anyhow::Error
+    // layer; walk the source chain just in case.
+    let mut source: Option<&dyn std::error::Error> = err.source();
+    while let Some(s) = source {
+        if let Some(status) = s.downcast_ref::<tonic::Status>() {
+            return grpc_status_to_response(status);
+        }
+        source = s.source();
+    }
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": msg.to_string()})),
+        Json(serde_json::json!({"error": err.to_string()})),
     )
         .into_response()
+}
+
+fn grpc_status_to_response(status: &tonic::Status) -> Response {
+    use tonic::Code;
+    let code = status.code();
+    let http = match code {
+        Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+        Code::PermissionDenied => StatusCode::FORBIDDEN,
+        Code::NotFound => StatusCode::NOT_FOUND,
+        Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        Code::AlreadyExists => StatusCode::CONFLICT,
+        Code::FailedPrecondition => StatusCode::CONFLICT,
+        Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+        Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
+        Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
+        Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+
+    // Only forward the message for codes whose messages are known to come from
+    // our own handlers (validation errors, permission denials, etc). Internal /
+    // Unknown / DataLoss / Unavailable often carry raw DB or network error
+    // strings — those get a generic response and a server-side log entry.
+    let is_safe = matches!(
+        code,
+        Code::Unauthenticated
+            | Code::PermissionDenied
+            | Code::NotFound
+            | Code::InvalidArgument
+            | Code::AlreadyExists
+            | Code::FailedPrecondition
+            | Code::ResourceExhausted
+            | Code::DeadlineExceeded
+            | Code::Unimplemented
+    );
+    let msg = if is_safe {
+        status.message().to_string()
+    } else {
+        tracing::error!(
+            code = ?code,
+            upstream_msg = status.message(),
+            "upstream gRPC error — masking from client"
+        );
+        "internal server error".to_string()
+    };
+
+    (http, Json(serde_json::json!({"error": msg}))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +130,7 @@ struct RepoInfoJson {
     last_commit_message: String,
     last_commit_author: String,
     last_commit_time: i64,
+    visibility: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +143,8 @@ pub struct CreateRepoBody {
 pub struct UpdateRepoBody {
     pub new_name: Option<String>,
     pub description: Option<String>,
+    /// "private" | "public" | None (no change)
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,6 +275,7 @@ pub async fn list_repos(State(state): State<Arc<AppState>>) -> Response {
                     last_commit_message: r.last_commit_message,
                     last_commit_author: r.last_commit_author,
                     last_commit_time: r.last_commit_time,
+                    visibility: r.visibility,
                 })
                 .collect();
             (StatusCode::OK, Json(repos)).into_response()
@@ -230,8 +328,9 @@ pub async fn update_repo(
 
     let new_name = body.new_name.unwrap_or_default();
     let description = body.description.unwrap_or_default();
+    let visibility = body.visibility.unwrap_or_default();
 
-    match grpc.update_repo(&repo, &new_name, &description).await {
+    match grpc.update_repo(&repo, &new_name, &description, &visibility).await {
         Ok(resp) => {
             if resp.success {
                 (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
@@ -455,13 +554,21 @@ pub async fn get_raw(
 
     match grpc.get_file_content(&repo, &commit_hash, &query.path).await {
         Ok(resp) => {
-            let filename = query.path.rsplit('/').next().unwrap_or("file");
+            // Basename of the requested path. Percent-encode it for both the
+            // ASCII-fallback `filename=` and the RFC 5987 `filename*` form so
+            // a commit that contains quotes, semicolons, or non-ASCII
+            // characters cannot inject header content.
+            let raw_name = query.path.rsplit('/').next().unwrap_or("file");
+            let encoded: String =
+                utf8_percent_encode(raw_name, DISPOSITION_FILENAME).collect();
             let content_type = if resp.is_binary {
                 "application/octet-stream"
             } else {
                 "text/plain; charset=utf-8"
             };
-            let disposition = format!("attachment; filename=\"{}\"", filename);
+            let disposition = format!(
+                "attachment; filename=\"{encoded}\"; filename*=UTF-8''{encoded}"
+            );
 
             (
                 StatusCode::OK,
@@ -1054,6 +1161,12 @@ pub async fn language_stats(
 // ---------------------------------------------------------------------------
 
 /// Resolve a branch name to its HEAD commit hash via GetRefs.
+///
+/// "Not found" cases (empty repo, missing commit, missing branch) are
+/// returned as `tonic::Status::not_found` so the smart `internal_error`
+/// mapper translates them to HTTP 404 — letting the SPA distinguish
+/// "this repo has no commits yet, show quickstart" from "the server is
+/// broken, show a flash error".
 async fn resolve_branch(
     grpc: &crate::grpc_client::ForgeGrpcClient,
     repo: &str,
@@ -1085,7 +1198,9 @@ async fn resolve_branch(
                 }
             }
         }
-        anyhow::bail!("commit '{}' not found", branch);
+        return Err(
+            tonic::Status::not_found(format!("commit '{branch}' not found")).into(),
+        );
     }
 
     let refs_resp = grpc.get_refs(repo).await?;
@@ -1100,5 +1215,5 @@ async fn resolve_branch(
         }
     }
 
-    anyhow::bail!("branch '{}' not found", branch)
+    Err(tonic::Status::not_found(format!("branch '{branch}' not found")).into())
 }

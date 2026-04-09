@@ -42,12 +42,19 @@ impl FsStorage {
 
     /// Get a ChunkStore for a specific repo's objects directory.
     /// Respects per-repo path overrides from configuration.
+    /// Get a ChunkStore for a specific repo's objects directory.
+    /// Respects per-repo path overrides from configuration.
+    /// Relative overrides are resolved against `base_path` (never its parent)
+    /// and canonicalized to prevent path traversal.
     pub fn repo_store(&self, repo: &str) -> ChunkStore {
         let dir = if let Some(override_path) = self.repo_overrides.get(repo) {
             if override_path.is_absolute() {
                 override_path.join("objects")
             } else {
-                self.base_path.parent().unwrap_or(&self.base_path).join(override_path).join("objects")
+                // Resolve relative to base_path, not its parent, to prevent traversal.
+                let resolved = self.base_path.join(override_path).join("objects");
+                // Canonicalize to collapse any ".." that might remain.
+                resolved.canonicalize().unwrap_or(resolved)
             }
         } else {
             self.base_path.join(repo).join("objects")

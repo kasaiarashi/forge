@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import {
   Breadcrumbs,
   Button,
@@ -22,7 +23,7 @@ import hljs from 'highlight.js';
 import hljsLight from 'highlight.js/styles/github.css?url';
 import hljsDark from 'highlight.js/styles/github-dark.css?url';
 import type { FileContent } from '../api';
-import api, { copyToClipboard } from '../api';
+import api, { repoPath,  copyToClipboard } from '../api';
 import { useTheme } from '../context/ThemeContext';
 
 const extToLang: Record<string, string> = {
@@ -80,14 +81,15 @@ function formatSize(bytes: number): string {
 }
 
 export default function FileView() {
-  const { repo = '', branch = 'main', '*': filePath = '' } = useParams();
+  const repo = useRepoParam();
+  const { branch = 'main', '*': filePath = '' } = useParams<{ branch?: string; '*'?: string }>();
   const { resolvedMode } = useTheme();
   const [file, setFile] = useState<FileContent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const encRepo = encodeURIComponent(repo);
+  const encRepo = repoPath(repo);
   const encBranch = encodeURIComponent(branch);
 
   useEffect(() => {

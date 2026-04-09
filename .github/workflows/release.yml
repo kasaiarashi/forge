@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -140,6 +141,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: forge-*
 
       - name: List artifacts
         run: Get-ChildItem -Recurse artifacts/ | Select-Object FullName
@@ -213,6 +215,29 @@ jobs:
           chmod +x staging/forge-server-macos-arm64/install.sh
           cd staging && tar czf ../forge-server-macos-arm64.tar.gz forge-server-macos-arm64
 
+      # ── Prepare raw binaries for self-updater ──
+      - name: Prepare raw binaries
+        shell: bash
+        run: |
+          # Client binaries
+          cp artifacts/forge-windows-client/forge.exe forge-windows-x64.exe
+
+          # Server + Web binaries (Windows)
+          cp artifacts/forge-server-windows/forge-server.exe forge-server-windows-x64.exe
+          cp artifacts/forge-server-windows/forge-web.exe    forge-web-windows-x64.exe
+
+          # Server + Web binaries (Linux)
+          cp artifacts/forge-server-linux-amd64/forge-server forge-server-linux-x64
+          cp artifacts/forge-server-linux-amd64/forge-web    forge-web-linux-x64
+
+          # Server + Web binaries (macOS x64)
+          cp artifacts/forge-server-macos-amd64/forge-server forge-server-macos-x64
+          cp artifacts/forge-server-macos-amd64/forge-web    forge-web-macos-x64
+
+          # Server + Web binaries (macOS ARM64)
+          cp artifacts/forge-server-macos-arm64/forge-server forge-server-macos-arm64
+          cp artifacts/forge-server-macos-arm64/forge-web    forge-web-macos-arm64
+
       # ── Create GitHub Release ──
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -224,3 +249,72 @@ jobs:
             forge-server-linux-amd64.tar.gz
             forge-server-macos-amd64.tar.gz
             forge-server-macos-arm64.tar.gz
+            forge-windows-x64.exe
+            forge-server-windows-x64.exe
+            forge-web-windows-x64.exe
+            forge-server-linux-x64
+            forge-web-linux-x64
+            forge-server-macos-x64
+            forge-web-macos-x64
+            forge-server-macos-arm64
+            forge-web-macos-arm64
+
+  # ─── Build & push Docker images (reuses build-server linux + build-ui) ───
+  docker:
+    name: Docker (${{ matrix.image }})
+    needs: [build-server, build-ui]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: forge-server
+            target: forge-server
+          - image: forge-web
+            target: forge-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux server artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-server-linux-amd64
+          path: dist/
+
+      - name: Download UI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-web-ui-dist
+          path: dist/ui/
+
+      - name: Make binaries executable
+        run: chmod +x dist/forge-server dist/forge-web
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

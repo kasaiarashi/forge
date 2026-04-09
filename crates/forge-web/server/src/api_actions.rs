@@ -12,8 +12,10 @@ use std::sync::Arc;
 
 use crate::AppState;
 
-fn internal_error(msg: impl std::fmt::Display) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg.to_string()}))).into_response()
+/// Reuses the smart error mapper from `api.rs` so gRPC Unauthenticated /
+/// PermissionDenied / NotFound surface as the right HTTP status, not 500.
+fn internal_error(err: anyhow::Error) -> Response {
+    crate::api::internal_error_public(err)
 }
 
 // ── DTOs ──

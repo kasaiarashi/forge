@@ -29,12 +29,21 @@ impl MetadataDb {
         conn.pragma_update(None, "journal_mode", "WAL")
             .with_context(|| "Failed to enable WAL mode")?;
 
+        // Enforce foreign-key constraints. SQLite leaves this off per
+        // connection by default; the auth tables (sessions / pats /
+        // repo_acls) rely on ON DELETE CASCADE to clean up after a user
+        // is deleted, so this must be on.
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .with_context(|| "Failed to enable foreign_keys pragma")?;
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS repos (
                 name TEXT PRIMARY KEY,
                 description TEXT NOT NULL DEFAULT '',
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private'
+                    CHECK(visibility IN ('private','public'))
             );
             CREATE TABLE IF NOT EXISTS refs (
                 repo TEXT NOT NULL,
@@ -51,6 +60,51 @@ impl MetadataDb {
                 reason TEXT,
                 PRIMARY KEY (repo, path)
             );
+            CREATE TABLE IF NOT EXISTS users (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                username        TEXT    NOT NULL UNIQUE,
+                email           TEXT    NOT NULL UNIQUE,
+                display_name    TEXT    NOT NULL,
+                password_hash   TEXT,
+                is_server_admin INTEGER NOT NULL DEFAULT 0,
+                created_at      INTEGER NOT NULL,
+                last_login_at   INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash   TEXT    NOT NULL UNIQUE,
+                token_prefix TEXT    NOT NULL,
+                user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at   INTEGER NOT NULL,
+                last_used_at INTEGER NOT NULL,
+                expires_at   INTEGER NOT NULL,
+                user_agent   TEXT,
+                ip           TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_prefix ON sessions(token_prefix);
+            CREATE TABLE IF NOT EXISTS personal_access_tokens (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                name         TEXT    NOT NULL,
+                token_hash   TEXT    NOT NULL UNIQUE,
+                token_prefix TEXT    NOT NULL,
+                user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                scopes       TEXT    NOT NULL,
+                created_at   INTEGER NOT NULL,
+                last_used_at INTEGER,
+                expires_at   INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_pats_user ON personal_access_tokens(user_id);
+            CREATE INDEX IF NOT EXISTS idx_pats_prefix ON personal_access_tokens(token_prefix);
+            CREATE TABLE IF NOT EXISTS repo_acls (
+                repo       TEXT    NOT NULL,
+                user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role       TEXT    NOT NULL CHECK(role IN ('read','write','admin')),
+                granted_at INTEGER NOT NULL,
+                granted_by INTEGER REFERENCES users(id),
+                PRIMARY KEY (repo, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_repo_acls_user ON repo_acls(user_id);
             ",
         )?;
 
@@ -102,12 +156,14 @@ impl MetadataDb {
 
     pub fn list_repos(&self) -> Result<Vec<RepoRecord>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT name, description, created_at FROM repos")?;
+        let mut stmt =
+            conn.prepare("SELECT name, description, created_at, visibility FROM repos")?;
         let rows = stmt.query_map([], |row| {
             Ok(RepoRecord {
                 name: row.get(0)?,
                 description: row.get(1)?,
                 created_at: row.get(2)?,
+                visibility: row.get(3)?,
             })
         })?;
         let mut result = Vec::new();
@@ -115,6 +171,40 @@ impl MetadataDb {
             result.push(row?);
         }
         Ok(result)
+    }
+
+    /// Read the visibility flag for a single repo. Returns `None` if the
+    /// repo doesn't exist. Used by the gRPC interceptor's read-path authz
+    /// check to allow anonymous clones of public repos.
+    pub fn get_repo_visibility(&self, name: &str) -> Result<Option<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT visibility FROM repos WHERE name = ?1")?;
+        let result = stmt
+            .query_row([name], |row| row.get::<_, String>(0))
+            .ok();
+        Ok(result)
+    }
+
+    /// Returns true if the repo is publicly readable (anonymous clone/pull
+    /// allowed). Returns false for private repos and for repos that don't
+    /// exist — the latter is fine because the read handler will fail later
+    /// with NotFound.
+    pub fn is_repo_public(&self, name: &str) -> bool {
+        matches!(self.get_repo_visibility(name).ok().flatten().as_deref(), Some("public"))
+    }
+
+    /// Set the visibility of a repo. Returns true on success, false if the
+    /// repo doesn't exist.
+    pub fn set_repo_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        if visibility != "private" && visibility != "public" {
+            anyhow::bail!("visibility must be 'private' or 'public'");
+        }
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE repos SET visibility = ?1 WHERE name = ?2",
+            rusqlite::params![visibility, name],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn create_repo(&self, name: &str, description: &str) -> Result<bool> {
@@ -209,9 +299,38 @@ impl MetadataDb {
         Ok(result)
     }
 
-    /// Compare-and-swap update. Returns true if the update succeeded.
-    pub fn update_ref(&self, repo: &str, name: &str, old_hash: &[u8], new_hash: &[u8]) -> Result<bool> {
+    /// Update a ref. Returns true if the row was changed.
+    ///
+    /// Three modes, picked by the caller:
+    ///
+    /// - `force = true` → unconditional `INSERT OR REPLACE`. Used by
+    ///   `forge push --force` to publish a rewritten history. Skips both the
+    ///   create-only and CAS checks below.
+    /// - `old_hash` is all-zeros (and `force` is false) → create-only:
+    ///   `INSERT OR IGNORE`, succeeds when the ref doesn't exist yet.
+    /// - otherwise → atomic compare-and-swap: `UPDATE … WHERE hash = old_hash`,
+    ///   succeeds only if the current ref still matches `old_hash`.
+    pub fn update_ref(
+        &self,
+        repo: &str,
+        name: &str,
+        old_hash: &[u8],
+        new_hash: &[u8],
+        force: bool,
+    ) -> Result<bool> {
         let conn = self.conn()?;
+
+        if force {
+            // Force overwrite — INSERT new row or replace existing one. We
+            // don't return false on a no-op overwrite because callers want
+            // success when the new_hash equals what's already there.
+            let affected = conn.execute(
+                "INSERT INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(repo, name) DO UPDATE SET hash = excluded.hash",
+                rusqlite::params![repo, name, new_hash],
+            )?;
+            return Ok(affected > 0);
+        }
 
         let is_create = old_hash.iter().all(|&b| b == 0);
 
@@ -554,4 +673,144 @@ pub struct RepoRecord {
     pub name: String,
     pub description: String,
     pub created_at: i64,
+    pub visibility: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn fresh_db() -> (TempDir, MetadataDb) {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open(&tmp.path().join("forge.db")).unwrap();
+        // The repos table has a NOT NULL FK relationship in the refs CHECK
+        // so we register the repo first.
+        db.create_repo("alice/forcetest", "").unwrap();
+        (tmp, db)
+    }
+
+    const ZERO: [u8; 32] = [0u8; 32];
+
+    fn h(byte: u8) -> Vec<u8> {
+        vec![byte; 32]
+    }
+
+    // ── update_ref ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn create_path_inserts_when_absent() {
+        let (_tmp, db) = fresh_db();
+        // old_hash = zeros + force = false → INSERT OR IGNORE
+        let ok = db
+            .update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
+            .unwrap();
+        assert!(ok);
+        let stored = db
+            .get_ref("alice/forcetest", "refs/heads/main")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, h(0xAA));
+    }
+
+    #[test]
+    fn create_path_no_op_when_already_present() {
+        let (_tmp, db) = fresh_db();
+        db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
+            .unwrap();
+        // Second create returns false because INSERT OR IGNORE skips.
+        let ok = db
+            .update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xBB), false)
+            .unwrap();
+        assert!(!ok);
+        // The original hash is preserved.
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            h(0xAA)
+        );
+    }
+
+    #[test]
+    fn cas_path_succeeds_when_old_hash_matches() {
+        let (_tmp, db) = fresh_db();
+        db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
+            .unwrap();
+        // CAS update with the right old_hash succeeds.
+        let ok = db
+            .update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xBB), false)
+            .unwrap();
+        assert!(ok);
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            h(0xBB)
+        );
+    }
+
+    #[test]
+    fn cas_path_fails_when_old_hash_stale() {
+        let (_tmp, db) = fresh_db();
+        db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
+            .unwrap();
+        // Someone else moved the ref to 0xBB
+        db.update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xBB), false)
+            .unwrap();
+        // We try to update assuming it's still 0xAA — must fail.
+        let ok = db
+            .update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xCC), false)
+            .unwrap();
+        assert!(!ok);
+        // And the existing ref is untouched.
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            h(0xBB)
+        );
+    }
+
+    #[test]
+    fn force_overwrites_existing_ref() {
+        let (_tmp, db) = fresh_db();
+        db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
+            .unwrap();
+        // Force-push to a totally unrelated hash, with a stale old_hash to
+        // prove force bypasses the CAS check.
+        let ok = db
+            .update_ref("alice/forcetest", "refs/heads/main", &h(0xDE), &h(0xCC), true)
+            .unwrap();
+        assert!(ok);
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            h(0xCC)
+        );
+    }
+
+    #[test]
+    fn force_creates_ref_when_absent() {
+        let (_tmp, db) = fresh_db();
+        // Force on a brand-new ref should also work — it inserts the row.
+        let ok = db
+            .update_ref("alice/forcetest", "refs/heads/dev", &ZERO, &h(0xEE), true)
+            .unwrap();
+        assert!(ok);
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/dev").unwrap().unwrap(),
+            h(0xEE)
+        );
+    }
+
+    #[test]
+    fn force_with_same_hash_is_a_noop_but_reports_success() {
+        let (_tmp, db) = fresh_db();
+        db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
+            .unwrap();
+        // Force-pushing the same hash should be a clean no-op (UPSERT
+        // touches the row, affected = 1).
+        let ok = db
+            .update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), true)
+            .unwrap();
+        assert!(ok);
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            h(0xAA)
+        );
+    }
 }

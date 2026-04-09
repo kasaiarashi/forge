@@ -1,4 +1,9 @@
+mod client;
 mod commands;
+mod credentials;
+mod pager;
+mod tofu;
+mod url_resolver;
 
 use clap::{Parser, Subcommand};
 
@@ -77,6 +82,10 @@ enum Commands {
         /// Show commits from all branches
         #[arg(long)]
         all: bool,
+
+        /// Disable the pager and write output directly to stdout
+        #[arg(long)]
+        no_pager: bool,
     },
 
     /// Push commits to the server
@@ -93,6 +102,10 @@ enum Commands {
     Clone {
         /// Server URL
         url: String,
+
+        /// Repository name on the server (defaults to "default")
+        #[arg(long)]
+        repo: Option<String>,
 
         /// Local directory (defaults to repo name)
         #[arg(long)]
@@ -293,23 +306,91 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Check for updates and self-update the forge CLI
+    Update {
+        /// Only check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
+
+    /// Authenticate against a forge server and store the credential
+    Login {
+        /// Server URL (defaults to current workspace's remote)
+        #[arg(long)]
+        server: Option<String>,
+        /// Skip the password prompt and use this PAT directly
+        #[arg(long)]
+        token: Option<String>,
+        /// Username (skips the interactive prompt; use with --password)
+        #[arg(long, short = 'u')]
+        username: Option<String>,
+        /// Password (skips the interactive prompt; avoid in shared shells)
+        #[arg(long, short = 'p')]
+        password: Option<String>,
+        /// Automatically trust the server's TLS certificate on first
+        /// connect without prompting. Use in CI / scripts only — interactive
+        /// users should verify the fingerprint manually.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Forget the stored credential for a server (and revoke its session)
+    Logout {
+        /// Server URL (defaults to current workspace's remote)
+        #[arg(long)]
+        server: Option<String>,
+    },
+
+    /// Show the authenticated user for a forge server
+    Whoami {
+        /// Server URL (defaults to current workspace's remote)
+        #[arg(long)]
+        server: Option<String>,
+    },
+
+    /// Pin a forge server's self-signed TLS certificate (trust on first use).
+    ///
+    /// Connects to the given `https://<host>:<port>` URL, captures the
+    /// presented certificate chain, prints the CA fingerprint for manual
+    /// comparison, and — on confirmation — saves the trust anchor to
+    /// `~/.forge/trusted/<host>_<port>.pem`. Subsequent forge CLI calls to
+    /// that server will use the pinned certificate automatically.
+    Trust {
+        /// Full server URL, e.g. `https://forge.example.com:9876`
+        server: String,
+        /// Skip the interactive confirmation prompt (scripts, CI).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     tracing_subscriber::fmt::init();
 
-    let cli = Cli::parse();
+    // Install a rustls crypto provider so `https://` server URLs work.
+    // See twin call in forge-server/forge-web main — multiple provider crates
+    // can end up in the build, so we pick aws-lc-rs explicitly.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    let cli = Cli::parse();
+    if let Err(err) = run_cli(cli) {
+        print_pretty_error(err);
+        std::process::exit(1);
+    }
+}
+
+fn run_cli(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init => commands::init::run()?,
         Commands::Add { paths } => commands::add::run(paths)?,
         Commands::Commit { message, all } => commands::snapshot::run(message, all, cli.json)?,
         Commands::Status => commands::status::run(cli.json)?,
         Commands::Diff { commit, staged, stat, extract, paths } => commands::diff::run(commit, staged, stat, extract, paths, cli.json)?,
-        Commands::Log { count, file, oneline, all } => commands::log::run(count, file, oneline, all, cli.json)?,
+        Commands::Log { count, file, oneline, all, no_pager } => commands::log::run(count, file, oneline, all, no_pager, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
-        Commands::Clone { url, path } => commands::clone::run(url, path)?,
+        Commands::Clone { url, repo, path } => commands::clone::run(url, path, repo)?,
         Commands::Lock { path, reason } => commands::lock::run(path, reason, cli.json)?,
         Commands::Unlock { path, force } => commands::unlock::run(path, force, cli.json)?,
         Commands::Locks => commands::locks::run(cli.json)?,
@@ -333,7 +414,135 @@ fn main() -> anyhow::Result<()> {
         Commands::Revert { commit } => commands::revert::run(commit)?,
         Commands::AssetInfo { path } => commands::asset_info::run(path, cli.json)?,
         Commands::Gc { dry_run } => commands::gc::run(dry_run)?,
+        Commands::Update { check } => commands::update::run(check, cli.json)?,
+        Commands::Login { server, token, username, password, yes } => commands::login::run(server, token, username, password, yes)?,
+        Commands::Logout { server } => commands::logout::run(server)?,
+        Commands::Whoami { server } => commands::whoami::run(server)?,
+        Commands::Trust { server, yes } => commands::trust::run(server, yes)?,
     }
 
     Ok(())
+}
+
+// ── Pretty error reporting ───────────────────────────────────────────────────
+
+/// Pretty-print an error from any subcommand. The interesting case is a
+/// `tonic::Status` bubbled up from a gRPC call — those carry rich metadata
+/// that's noisy as a Display impl, so we strip it down to a one-line message
+/// and offer a contextual next step (login prompt for Unauthenticated, etc).
+fn print_pretty_error(err: anyhow::Error) {
+    if let Some(status) = find_tonic_status(&err) {
+        match status.code() {
+            tonic::Code::Unauthenticated => {
+                eprintln!("\x1b[1;31merror:\x1b[0m not authenticated");
+                if !status.message().is_empty() {
+                    eprintln!("       \x1b[2m{}\x1b[0m", status.message());
+                }
+                eprintln!();
+                offer_login();
+                return;
+            }
+            tonic::Code::PermissionDenied => {
+                eprintln!("\x1b[1;31merror:\x1b[0m permission denied");
+                if !status.message().is_empty() {
+                    eprintln!("       \x1b[2m{}\x1b[0m", status.message());
+                }
+                eprintln!();
+                eprintln!(
+                    "Your account is logged in but doesn't have the required role on this resource."
+                );
+                eprintln!("Ask a server admin to grant access.");
+                return;
+            }
+            tonic::Code::NotFound => {
+                eprintln!("\x1b[1;31merror:\x1b[0m {}", status.message());
+                return;
+            }
+            tonic::Code::FailedPrecondition | tonic::Code::AlreadyExists => {
+                eprintln!("\x1b[1;31merror:\x1b[0m {}", status.message());
+                return;
+            }
+            tonic::Code::Unavailable => {
+                eprintln!("\x1b[1;31merror:\x1b[0m forge server unavailable");
+                if !status.message().is_empty() {
+                    eprintln!("       \x1b[2m{}\x1b[0m", status.message());
+                }
+                eprintln!();
+                eprintln!("Check that the server is running and reachable.");
+                return;
+            }
+            _ => {
+                eprintln!("\x1b[1;31merror:\x1b[0m {}", status.message());
+                return;
+            }
+        }
+    }
+    eprintln!("\x1b[1;31merror:\x1b[0m {err}");
+}
+
+/// Walk an `anyhow::Error` chain looking for a `tonic::Status`.
+fn find_tonic_status(err: &anyhow::Error) -> Option<&tonic::Status> {
+    if let Some(s) = err.downcast_ref::<tonic::Status>() {
+        return Some(s);
+    }
+    let mut source: Option<&dyn std::error::Error> = err.source();
+    while let Some(s) = source {
+        if let Some(status) = s.downcast_ref::<tonic::Status>() {
+            return Some(status);
+        }
+        source = s.source();
+    }
+    None
+}
+
+/// Print a "Run forge login" suggestion and, if the user is on a TTY,
+/// prompt to run it inline. After the login completes, the user re-runs
+/// their original command.
+fn offer_login() {
+    use std::io::{IsTerminal, Write};
+
+    // Try to discover the workspace's default remote so the suggestion is
+    // ready-to-paste with the correct --server.
+    let server = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| forge_core::workspace::Workspace::discover(&cwd).ok())
+        .and_then(|ws| ws.config().ok())
+        .and_then(|c| c.default_remote_url().map(str::to_string));
+
+    let suggestion = match &server {
+        Some(s) => format!("forge login --server {s}"),
+        None => "forge login --server <url>".to_string(),
+    };
+
+    eprintln!("To authenticate, run:");
+    eprintln!();
+    eprintln!("    {suggestion}");
+    eprintln!();
+
+    // Only prompt interactively if both stdin and stderr are TTYs — never
+    // try to prompt from CI / piped input.
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return;
+    }
+
+    eprint!("Login now? [Y/n] ");
+    let _ = std::io::stderr().flush();
+    let mut buf = String::new();
+    if std::io::stdin().read_line(&mut buf).is_err() {
+        return;
+    }
+    let answer = buf.trim().to_lowercase();
+    if !(answer.is_empty() || answer == "y" || answer == "yes") {
+        return;
+    }
+
+    // Run the regular interactive login flow. It'll prompt for username +
+    // password (rpassword), call AuthService::Login, mint a PAT, and store
+    // it in the keychain / credentials file.
+    if let Err(e) = commands::login::run(server, None, None, None, false) {
+        eprintln!("\x1b[1;31mlogin failed:\x1b[0m {e}");
+        return;
+    }
+    eprintln!();
+    eprintln!("\x1b[32mLogged in.\x1b[0m Re-run your command.");
 }

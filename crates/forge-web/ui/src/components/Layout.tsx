@@ -66,15 +66,6 @@ export default function Layout({ children }: LayoutProps) {
         <Header.Item>
           <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Issues</Header.Link>
         </Header.Item>
-        <Header.Item>
-          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Codespaces</Header.Link>
-        </Header.Item>
-        <Header.Item>
-          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Marketplace</Header.Link>
-        </Header.Item>
-        <Header.Item>
-          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Explore</Header.Link>
-        </Header.Item>
 
         <Header.Item full />
 
@@ -151,22 +142,43 @@ export default function Layout({ children }: LayoutProps) {
         {children}
       </main>
 
-      <footer className="forge-footer" style={{ borderTop: 'none', marginTop: '40px', paddingTop: '40px', paddingBottom: '40px', maxWidth: '1012px', margin: '40px auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+      {/* `gap: 32px` + `flex-wrap: wrap` keeps the © block and the link
+          row from kissing on wide screens AND lets them stack cleanly on
+          narrow ones. `space-between` still expands the gap to fill the
+          row when there's room. */}
+      <footer className="forge-footer" style={{ borderTop: 'none', marginTop: '40px', paddingTop: '40px', paddingBottom: '40px', maxWidth: '1012px', margin: '40px auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '32px', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginRight: '24px' }}>
           <span style={{ color: 'var(--fg-muted)', display: 'flex' }}><RepoIcon size={24} /></span>
-          <span>© 2026 Forge VCS</span>
+          {/* Non-breaking space after the © glyph so the year doesn't
+              wrap onto a new line on narrow viewports. */}
+          <span>©&nbsp;2026 Forge VCS</span>
         </div>
-        <div style={{ display: 'flex', gap: '16px' }}>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Terms</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Privacy</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Security</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Status</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Docs</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Contact</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Manage cookies</a>
-          <a href="#" style={{ color: 'var(--fg-accent)', textDecoration: 'none' }} onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')} onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}>Do not share my personal information</a>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
+          <FooterLink to="/terms">Terms</FooterLink>
+          <FooterLink to="/privacy">Privacy</FooterLink>
+          <FooterLink to="/security">Security</FooterLink>
+          <FooterLink to="/status">Status</FooterLink>
+          <FooterLink to="/docs">Docs</FooterLink>
+          <FooterLink to="/contact">Contact</FooterLink>
         </div>
       </footer>
     </div>
+  );
+}
+
+/**
+ * Footer link styled like the rest of the footer row, but routed via
+ * react-router so navigation stays inside the SPA (no full-page reload).
+ */
+function FooterLink({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      style={{ color: 'var(--fg-accent)', textDecoration: 'none' }}
+      onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+      onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}
+    >
+      {children}
+    </Link>
   );
 }

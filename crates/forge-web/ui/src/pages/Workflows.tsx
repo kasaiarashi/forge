@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Flash, Spinner, TextInput, ActionMenu, ActionList, Label } from '@primer/react';
 import {
   SearchIcon,
@@ -13,7 +14,7 @@ import {
   PencilIcon,
   KebabHorizontalIcon,
 } from '@primer/octicons-react';
-import api from '../api';
+import api, { repoPath } from '../api';
 import type { WorkflowInfo, RunInfo } from '../api';
 import RepoHeader from '../components/RepoHeader';
 
@@ -53,7 +54,8 @@ function extractBranch(ref: string): string {
 }
 
 export default function Workflows() {
-  const { repo, id } = useParams<{ repo: string; id?: string }>();
+  const repo = useRepoParam();
+  const { id } = useParams<{ id?: string }>();
   const navigate = useNavigate();
   const selectedWorkflowId = id ? Number(id) : null;
 
@@ -65,7 +67,7 @@ export default function Workflows() {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const encRepo = encodeURIComponent(repo || '');
+  const encRepo = repoPath(repo || '');
 
   const load = async () => {
     if (!repo) return;

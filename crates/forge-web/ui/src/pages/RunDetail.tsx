@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Flash, Spinner, Label } from '@primer/react';
 import {
   CheckCircleIcon,
@@ -15,7 +16,7 @@ import {
   PlayIcon,
   FileIcon,
 } from '@primer/octicons-react';
-import api from '../api';
+import api, { repoPath } from '../api';
 import type { RunDetail as RunDetailData } from '../api';
 import RepoHeader from '../components/RepoHeader';
 
@@ -88,7 +89,8 @@ function deriveJobStatus(steps: { status: string }[]): string {
 }
 
 export default function RunDetail() {
-  const { repo, runId } = useParams<{ repo: string; runId: string }>();
+  const repo = useRepoParam();
+  const { runId } = useParams<{ runId: string }>();
   const [data, setData] = useState<RunDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -134,7 +136,7 @@ export default function RunDetail() {
   if (!data?.run) return <Flash variant="danger">Run not found</Flash>;
 
   const { run, steps, artifacts } = data;
-  const encRepo = encodeURIComponent(repo!);
+  const encRepo = repoPath(repo!);
 
   // Group steps by job_name
   const jobNames = [...new Set(steps.map(s => s.job_name))];

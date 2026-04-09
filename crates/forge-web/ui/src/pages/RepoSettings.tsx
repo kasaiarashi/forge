@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import {
   TextInput,
   Button,
@@ -16,7 +17,7 @@ import type { RepoInfo, Branch } from '../api';
 import api, { copyToClipboard } from '../api';
 
 export default function RepoSettings() {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
   const navigate = useNavigate();
 
   const [, setRepoInfo] = useState<RepoInfo | null>(null);
@@ -101,7 +102,10 @@ export default function RepoSettings() {
     }
   };
 
-  const cloneUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
+  // Full GitHub-style clone URL: server + path. The bare server URL is no
+  // longer surfaced in the UI — `forge clone` now takes the path inline.
+  const serverUrl = `${window.location.protocol}//${window.location.hostname}:9876`;
+  const cloneUrl = `${serverUrl}/${repo}`;
 
   const handleCopyClone = () => {
     copyToClipboard(`forge clone ${cloneUrl}`);

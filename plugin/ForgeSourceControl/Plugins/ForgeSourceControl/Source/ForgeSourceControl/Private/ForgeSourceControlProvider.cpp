@@ -2,37 +2,87 @@
 // Licensed under the MIT License.
 
 #include "ForgeSourceControlProvider.h"
-#include "ForgeSourceControlState.h"
+#include "ForgeSourceControlCommand.h"
+#include "ForgeSourceControlWorkers.h"
+#include "ForgeSourceControlModule.h"
 #include "ISourceControlModule.h"
-#include "Widgets/SNullWidget.h"
+#include "SourceControlHelpers.h"
+#include "SourceControlOperations.h"
+#include "ScopedSourceControlProgress.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
+#include "Misc/QueuedThreadPool.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "HAL/PlatformProcess.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "ForgeSourceControl"
 
+// ── Init / Close ────────────────────────────────────────────────────────────
+
 void FForgeSourceControlProvider::Init(bool bForceConnection)
 {
-	// Locate the forge executable.
 	ForgeExePath = TEXT("forge");
+	bIsAvailable = false;
 
-	// Fast check: just see if .forge directory exists in the project.
-	const FString ForgeDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()) / TEXT(".forge");
-	bIsAvailable = FPaths::DirectoryExists(ForgeDir);
+	// Walk up from project dir to find .forge/.
+	FString SearchDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	FPaths::NormalizeDirectoryName(SearchDir);
 
-	if (bIsAvailable)
+	while (!SearchDir.IsEmpty())
 	{
-		UE_LOG(LogSourceControl, Log, TEXT("Forge: workspace found at %s"), *ForgeDir);
+		const FString ForgeDir = SearchDir / TEXT(".forge");
+		if (FPaths::DirectoryExists(ForgeDir))
+		{
+			WorkspaceRoot = SearchDir;
+			bIsAvailable = true;
+			UE_LOG(LogSourceControl, Log, TEXT("Forge: workspace root at %s"), *WorkspaceRoot);
+
+			// Read user name from .forge/config.json.
+			const FString ConfigPath = ForgeDir / TEXT("config.json");
+			FString ConfigJson;
+			if (FFileHelper::LoadFileToString(ConfigJson, *ConfigPath))
+			{
+				TSharedPtr<FJsonObject> ConfigObj;
+				TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ConfigJson);
+				if (FJsonSerializer::Deserialize(Reader, ConfigObj) && ConfigObj.IsValid())
+				{
+					const TSharedPtr<FJsonObject>* UserObj;
+					if (ConfigObj->TryGetObjectField(TEXT("user"), UserObj))
+					{
+						(*UserObj)->TryGetStringField(TEXT("name"), CurrentUserName);
+						UE_LOG(LogSourceControl, Log, TEXT("Forge: user is '%s'"), *CurrentUserName);
+					}
+				}
+			}
+			break;
+		}
+
+		FString Parent = FPaths::GetPath(SearchDir);
+		if (Parent == SearchDir || Parent.IsEmpty()) break;
+		SearchDir = Parent;
 	}
 }
 
 void FForgeSourceControlProvider::Close()
 {
 	bIsAvailable = false;
+	WorkspaceRoot.Empty();
+	CurrentUserName.Empty();
 	StateCache.Empty();
+
+	for (FForgeSourceControlCommand* Cmd : CommandQueue)
+	{
+		Cmd->Abandon();
+		if (Cmd->bAutoDelete) delete Cmd;
+	}
+	CommandQueue.Empty();
 }
+
+// ── Identity ────────────────────────────────────────────────────────────────
 
 const FName& FForgeSourceControlProvider::GetName() const
 {
@@ -42,11 +92,9 @@ const FName& FForgeSourceControlProvider::GetName() const
 
 FText FForgeSourceControlProvider::GetStatusText() const
 {
-	if (bIsAvailable)
-	{
-		return LOCTEXT("StatusAvailable", "Connected to Forge workspace");
-	}
-	return LOCTEXT("StatusUnavailable", "No Forge workspace found");
+	return bIsAvailable
+		? LOCTEXT("StatusAvailable", "Connected to Forge workspace")
+		: LOCTEXT("StatusUnavailable", "No Forge workspace found");
 }
 
 TMap<ISourceControlProvider::EStatus, FString> FForgeSourceControlProvider::GetStatus() const
@@ -57,67 +105,68 @@ TMap<ISourceControlProvider::EStatus, FString> FForgeSourceControlProvider::GetS
 	return Result;
 }
 
-bool FForgeSourceControlProvider::IsEnabled() const
-{
-	return true;
-}
+bool FForgeSourceControlProvider::IsEnabled() const { return true; }
+bool FForgeSourceControlProvider::IsAvailable() const { return bIsAvailable; }
 
-bool FForgeSourceControlProvider::IsAvailable() const
-{
-	return bIsAvailable;
-}
+// ── State cache ─────────────────────────────────────────────────────────────
 
-void FForgeSourceControlProvider::RefreshStatusCache()
+TSharedRef<FForgeSourceControlState> FForgeSourceControlProvider::GetStateInternal(const FString& Filename)
 {
-	TSharedPtr<FJsonObject> Result;
-	if (RunForgeCommand(TEXT("status --json"), Result) && Result.IsValid())
+	if (TSharedRef<FForgeSourceControlState>* Existing = StateCache.Find(Filename))
 	{
-		StateCache.Empty();
-		const FString ProjDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		return *Existing;
+	}
 
-		auto ParseArray = [&](const FString& FieldName, FForgeSourceControlState::EFileState State)
+	TSharedRef<FForgeSourceControlState> NewState = MakeShared<FForgeSourceControlState>(Filename);
+	NewState->FileState = FForgeSourceControlState::EFileState::Unmodified;
+	StateCache.Add(Filename, NewState);
+	return NewState;
+}
+
+bool FForgeSourceControlProvider::UpdateCachedStates(
+	const TMap<FString, FForgeSourceControlState::EFileState>& InStates,
+	const TMap<FString, FString>& InLockOwners)
+{
+	// Collect which files are in the new status snapshot.
+	TSet<FString> NewPaths;
+	NewPaths.Reserve(InStates.Num());
+
+	// Apply new states (create-or-update, never remove).
+	for (const auto& Pair : InStates)
+	{
+		NewPaths.Add(Pair.Key);
+		TSharedRef<FForgeSourceControlState> State = GetStateInternal(Pair.Key);
+		State->FileState = Pair.Value;
+
+		if (const FString* Owner = InLockOwners.Find(Pair.Key))
 		{
-			const TArray<TSharedPtr<FJsonValue>>* Files;
-			if (Result->TryGetArrayField(FieldName, Files))
-			{
-				for (const auto& Val : *Files)
-				{
-					FString Path = FPaths::ConvertRelativePathToFull(ProjDir, Val->AsString());
-					FPaths::NormalizeFilename(Path);
-					auto FileState = MakeShared<FForgeSourceControlState>(Path);
-					FileState->FileState = State;
-					StateCache.Add(Path, FileState);
-				}
-			}
-		};
-
-		ParseArray(TEXT("staged_new"), FForgeSourceControlState::EFileState::Added);
-		ParseArray(TEXT("staged_modified"), FForgeSourceControlState::EFileState::Modified);
-		ParseArray(TEXT("staged_deleted"), FForgeSourceControlState::EFileState::Deleted);
-		ParseArray(TEXT("modified"), FForgeSourceControlState::EFileState::Modified);
-		ParseArray(TEXT("deleted"), FForgeSourceControlState::EFileState::Deleted);
-		ParseArray(TEXT("untracked"), FForgeSourceControlState::EFileState::Untracked);
-
-		const TArray<TSharedPtr<FJsonValue>>* LockedFiles;
-		if (Result->TryGetArrayField(TEXT("locked"), LockedFiles))
+			State->LockOwner = *Owner;
+		}
+		else
 		{
-			for (const auto& Val : *LockedFiles)
-			{
-				const TSharedPtr<FJsonObject>* LockObj;
-				if (Val->TryGetObject(LockObj))
-				{
-					FString LockPath = (*LockObj)->GetStringField(TEXT("path"));
-					FString LockOwner = (*LockObj)->GetStringField(TEXT("owner"));
-					FString FullPath = FPaths::ConvertRelativePathToFull(ProjDir, LockPath);
-					FPaths::NormalizeFilename(FullPath);
-					auto FileState = MakeShared<FForgeSourceControlState>(FullPath);
-					FileState->FileState = FForgeSourceControlState::EFileState::Locked;
-					FileState->LockOwner = LockOwner;
-					StateCache.Add(FullPath, FileState);
-				}
-			}
+			State->LockOwner = FString();
 		}
 	}
+
+	// Files in cache but NOT in new snapshot → reset to Unmodified.
+	// Only touch the enum (uint8, safe); leave FString members untouched.
+	for (auto& Pair : StateCache)
+	{
+		if (!NewPaths.Contains(Pair.Key))
+		{
+			Pair.Value->FileState = FForgeSourceControlState::EFileState::Unmodified;
+		}
+	}
+
+	return InStates.Num() > 0;
+}
+
+void FForgeSourceControlProvider::RefreshStatusAsync()
+{
+	if (!bIsAvailable) return;
+	auto Operation = ISourceControlOperation::Create<FUpdateStatus>();
+	Execute(Operation, nullptr, TArray<FString>(), EConcurrency::Asynchronous,
+		FSourceControlOperationComplete());
 }
 
 ECommandResult::Type FForgeSourceControlProvider::GetState(
@@ -125,23 +174,16 @@ ECommandResult::Type FForgeSourceControlProvider::GetState(
 	TArray<FSourceControlStateRef>& OutState,
 	EStateCacheUsage::Type InStateCacheUsage)
 {
-	// Never spawn a process here — always use cache.
-	// Cache is refreshed explicitly after user actions (add, commit, etc.).
+	TArray<FString> AbsoluteFiles = SourceControlHelpers::AbsoluteFilenames(InFiles);
 
-	// Return cached states for requested files.
-	for (const FString& File : InFiles)
+	if (InStateCacheUsage == EStateCacheUsage::ForceUpdate)
 	{
-		if (const FSourceControlStateRef* CachedState = StateCache.Find(File))
-		{
-			OutState.Add(*CachedState);
-		}
-		else
-		{
-			// File not in cache — assume unmodified/tracked.
-			auto State = MakeShared<FForgeSourceControlState>(File);
-			State->FileState = FForgeSourceControlState::EFileState::Unmodified;
-			OutState.Add(State);
-		}
+		RefreshStatusAsync();
+	}
+
+	for (const FString& File : AbsoluteFiles)
+	{
+		OutState.Add(GetStateInternal(File));
 	}
 
 	return ECommandResult::Succeeded;
@@ -152,7 +194,6 @@ ECommandResult::Type FForgeSourceControlProvider::GetState(
 	TArray<FSourceControlChangelistStateRef>& OutState,
 	EStateCacheUsage::Type InStateCacheUsage)
 {
-	// Forge doesn't use changelists — return empty.
 	return ECommandResult::Succeeded;
 }
 
@@ -170,6 +211,22 @@ TArray<FSourceControlStateRef> FForgeSourceControlProvider::GetCachedStateByPred
 	return Result;
 }
 
+TOptional<int> FForgeSourceControlProvider::GetNumLocalChanges() const
+{
+	int32 Count = 0;
+	for (const auto& Pair : StateCache)
+	{
+		if (Pair.Value->FileState != FForgeSourceControlState::EFileState::Unmodified &&
+			Pair.Value->FileState != FForgeSourceControlState::EFileState::Untracked)
+		{
+			Count++;
+		}
+	}
+	return Count;
+}
+
+// ── Delegates ───────────────────────────────────────────────────────────────
+
 FDelegateHandle FForgeSourceControlProvider::RegisterSourceControlStateChanged_Handle(
 	const FSourceControlStateChanged::FDelegate& SourceControlStateChanged)
 {
@@ -181,6 +238,30 @@ void FForgeSourceControlProvider::UnregisterSourceControlStateChanged_Handle(FDe
 	OnSourceControlStateChanged.Remove(Handle);
 }
 
+// ── Worker registration ─────────────────────────────────────────────────────
+
+void FForgeSourceControlProvider::RegisterWorker(const FName& InName, const FGetForgeWorker& InDelegate)
+{
+	WorkersMap.Add(InName, InDelegate);
+}
+
+TSharedPtr<IForgeWorker, ESPMode::ThreadSafe> FForgeSourceControlProvider::CreateWorker(const FName& InOperationName) const
+{
+	const FGetForgeWorker* Delegate = WorkersMap.Find(InOperationName);
+	if (Delegate != nullptr)
+	{
+		return Delegate->Execute();
+	}
+	return nullptr;
+}
+
+bool FForgeSourceControlProvider::CanExecuteOperation(const FSourceControlOperationRef& InOperation) const
+{
+	return WorkersMap.Find(InOperation->GetName()) != nullptr;
+}
+
+// ── Execute ─────────────────────────────────────────────────────────────────
+
 ECommandResult::Type FForgeSourceControlProvider::Execute(
 	const FSourceControlOperationRef& InOperation,
 	FSourceControlChangelistPtr InChangelist,
@@ -188,117 +269,129 @@ ECommandResult::Type FForgeSourceControlProvider::Execute(
 	EConcurrency::Type InConcurrency,
 	const FSourceControlOperationComplete& InOperationCompleteDelegate)
 {
+	UE_LOG(LogSourceControl, Log, TEXT("Forge: Execute '%s' (%s, %d files)"),
+		*InOperation->GetName().ToString(),
+		InConcurrency == EConcurrency::Synchronous ? TEXT("sync") : TEXT("async"),
+		InFiles.Num());
+
+	const TArray<FString> AbsoluteFiles = SourceControlHelpers::AbsoluteFilenames(InFiles);
+
+	TSharedPtr<IForgeWorker, ESPMode::ThreadSafe> Worker = CreateWorker(InOperation->GetName());
+	if (!Worker.IsValid())
+	{
+		UE_LOG(LogSourceControl, Warning, TEXT("Forge: operation '%s' not supported"),
+			*InOperation->GetName().ToString());
+		InOperationCompleteDelegate.ExecuteIfBound(InOperation, ECommandResult::Failed);
+		return ECommandResult::Failed;
+	}
+
+	FForgeSourceControlCommand* Command = new FForgeSourceControlCommand(
+		InOperation, Worker.ToSharedRef(), InConcurrency, *this);
+	Command->Files = AbsoluteFiles;
+	Command->OperationCompleteDelegate = InOperationCompleteDelegate;
+
+	if (InConcurrency == EConcurrency::Synchronous)
+	{
+		Command->bAutoDelete = false;
+		return ExecuteSynchronousCommand(*Command, InOperation->GetInProgressString());
+	}
+	else
+	{
+		Command->bAutoDelete = true;
+		return IssueCommand(*Command);
+	}
+}
+
+// ── Command dispatch ────────────────────────────────────────────────────────
+
+ECommandResult::Type FForgeSourceControlProvider::IssueCommand(FForgeSourceControlCommand& InCommand)
+{
+	if (GThreadPool != nullptr)
+	{
+		GThreadPool->AddQueuedWork(&InCommand);
+		CommandQueue.Add(&InCommand);
+		return ECommandResult::Succeeded;
+	}
+
+	UE_LOG(LogSourceControl, Error, TEXT("Forge: no thread pool available"));
+	InCommand.MarkOperationCompleted(false);
+	return ECommandResult::Failed;
+}
+
+ECommandResult::Type FForgeSourceControlProvider::ExecuteSynchronousCommand(
+	FForgeSourceControlCommand& InCommand, const FText& Task)
+{
 	ECommandResult::Type Result = ECommandResult::Failed;
-	const FName OperationName = InOperation->GetName();
 
-	if (OperationName == "Connect")
 	{
-		// Already verified in Init() — .forge directory exists.
-		Result = bIsAvailable ? ECommandResult::Succeeded : ECommandResult::Failed;
-	}
-	else if (OperationName == "CheckOut")
-	{
-		// CheckOut = Lock in Forge (Perforce-style).
-		for (const FString& File : InFiles)
-		{
-			FString RelPath = File;
-			FPaths::MakePathRelativeTo(RelPath, *FPaths::ProjectDir());
-			TSharedPtr<FJsonObject> JsonResult;
-			if (RunForgeCommand(FString::Printf(TEXT("lock \"%s\""), *RelPath), JsonResult))
-			{
-				auto State = MakeShared<FForgeSourceControlState>(File);
-				State->FileState = FForgeSourceControlState::EFileState::Locked;
-				StateCache.Add(File, State);
-			}
-		}
-		Result = ECommandResult::Succeeded;
-	}
-	else if (OperationName == "CheckIn")
-	{
-		// CheckIn = Snapshot + Unlock + Push.
-		FString Message = InOperation->GetInProgressString().ToString();
-		if (Message.IsEmpty()) { Message = TEXT("Checked in from Unreal Editor"); }
+		FScopedSourceControlProgress Progress(Task);
+		IssueCommand(InCommand);
 
-		// Add files.
-		for (const FString& File : InFiles)
+		while (!InCommand.bExecuteProcessed)
 		{
-			FString RelPath = File;
-			FPaths::MakePathRelativeTo(RelPath, *FPaths::ProjectDir());
-			TSharedPtr<FJsonObject> Unused;
-			RunForgeCommand(FString::Printf(TEXT("add \"%s\""), *RelPath), Unused);
+			Tick();
+			Progress.Tick();
+			FPlatformProcess::Sleep(0.01f);
 		}
 
-		// Create snapshot.
-		TSharedPtr<FJsonObject> Unused;
-		RunForgeCommand(FString::Printf(TEXT("snapshot -m \"%s\""), *Message), Unused);
+		Tick(); // Process the completed command.
 
-		// Unlock files.
-		for (const FString& File : InFiles)
+		if (InCommand.bCommandSuccessful)
 		{
-			FString RelPath = File;
-			FPaths::MakePathRelativeTo(RelPath, *FPaths::ProjectDir());
-			RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+			Result = ECommandResult::Succeeded;
 		}
-
-		// Push.
-		RunForgeCommand(TEXT("push"), Unused);
-
-		Result = ECommandResult::Succeeded;
-	}
-	else if (OperationName == "MarkForAdd")
-	{
-		for (const FString& File : InFiles)
-		{
-			FString RelPath = File;
-			FPaths::MakePathRelativeTo(RelPath, *FPaths::ProjectDir());
-			TSharedPtr<FJsonObject> Unused;
-			RunForgeCommand(FString::Printf(TEXT("add \"%s\""), *RelPath), Unused);
-		}
-		Result = ECommandResult::Succeeded;
-	}
-	else if (OperationName == "UpdateStatus")
-	{
-		// Return success — cache is refreshed after explicit user actions only.
-		Result = ECommandResult::Succeeded;
-	}
-	else if (OperationName == "Revert")
-	{
-		// TODO: restore files from latest snapshot, unlock
-		Result = ECommandResult::Succeeded;
-	}
-	else if (OperationName == "Sync")
-	{
-		TSharedPtr<FJsonObject> Unused;
-		Result = RunForgeCommand(TEXT("pull"), Unused)
-			? ECommandResult::Succeeded
-			: ECommandResult::Failed;
 	}
 
-	// Refresh cache after mutating operations.
-	if (Result == ECommandResult::Succeeded &&
-		(OperationName == "CheckOut" || OperationName == "CheckIn" ||
-		 OperationName == "MarkForAdd" || OperationName == "Revert" || OperationName == "Sync"))
+	if (CommandQueue.Contains(&InCommand))
 	{
-		RefreshStatusCache();
+		CommandQueue.Remove(&InCommand);
 	}
+	delete &InCommand;
 
-	// Notify completion.
-	InOperationCompleteDelegate.ExecuteIfBound(InOperation, Result);
 	return Result;
 }
 
-bool FForgeSourceControlProvider::CanCancelOperation(const FSourceControlOperationRef& InOperation) const
-{
-	return false;
-}
-
-void FForgeSourceControlProvider::CancelOperation(const FSourceControlOperationRef& InOperation)
-{
-}
+// ── Tick ─────────────────────────────────────────────────────────────────────
 
 void FForgeSourceControlProvider::Tick()
 {
+	// Broadcast deferred from previous tick (gives renderer a full frame to finish).
+	if (bPendingBroadcast)
+	{
+		bPendingBroadcast = false;
+		OnSourceControlStateChanged.Broadcast();
+	}
+
+	for (int32 i = 0; i < CommandQueue.Num(); ++i)
+	{
+		FForgeSourceControlCommand& Command = *CommandQueue[i];
+		if (Command.bExecuteProcessed)
+		{
+			UE_LOG(LogSourceControl, Log, TEXT("Forge: completed '%s' (success=%d)"),
+				*Command.Worker->GetName().ToString(), Command.bCommandSuccessful);
+
+			CommandQueue.RemoveAt(i);
+
+			if (Command.Worker->UpdateStates())
+			{
+				bPendingBroadcast = true; // Broadcast on NEXT tick.
+			}
+
+			Command.ReturnResults();
+
+			if (Command.bAutoDelete)
+			{
+				delete &Command;
+			}
+			break; // One per tick.
+		}
+	}
 }
+
+// ── Stubs ───────────────────────────────────────────────────────────────────
+
+bool FForgeSourceControlProvider::CanCancelOperation(const FSourceControlOperationRef& InOperation) const { return false; }
+void FForgeSourceControlProvider::CancelOperation(const FSourceControlOperationRef& InOperation) {}
 
 TArray<TSharedRef<class ISourceControlLabel>> FForgeSourceControlProvider::GetLabels(const FString& InMatchingSpec) const
 {
@@ -312,48 +405,84 @@ TArray<FSourceControlChangelistRef> FForgeSourceControlProvider::GetChangelists(
 
 TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() const
 {
-	return SNullWidget::NullWidget;
+	FForgeSourceControlProvider* MutableThis = const_cast<FForgeSourceControlProvider*>(this);
+
+	return SNew(SVerticalBox)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(2.0f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock).Text(LOCTEXT("ForgePathLabel", "Forge Executable Path:"))
+			]
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			.Padding(4.0f, 0.0f)
+			[
+				SNew(SEditableTextBox)
+				.Text(FText::FromString(ForgeExePath))
+				.OnTextCommitted_Lambda([MutableThis](const FText& NewText, ETextCommit::Type)
+				{
+					MutableThis->ForgeExePath = NewText.ToString();
+				})
+			]
+		];
 }
+
+// ── CLI execution (thread-safe) ─────────────────────────────────────────────
 
 bool FForgeSourceControlProvider::RunForgeCommand(const FString& Args, TSharedPtr<FJsonObject>& OutResult) const
 {
 	int32 ReturnCode = -1;
-	FString StdOut;
-	FString StdErr;
-
+	FString StdOut, StdErr;
 	FString FullArgs = FString::Printf(TEXT("--json %s"), *Args);
 
-	// Run from the project directory so forge can find the .forge workspace.
-	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	UE_LOG(LogSourceControl, Log, TEXT("Forge: running from dir '%s': forge %s"), *ProjectDir, *Args);
+	UE_LOG(LogSourceControl, Log, TEXT("Forge: forge --json %s"), *Args);
 
 	FPlatformProcess::ExecProcess(
-		*ForgeExePath,
-		*FullArgs,
-		&ReturnCode,
-		&StdOut,
-		&StdErr,
-		*ProjectDir
-	);
+		*ForgeExePath, *FullArgs,
+		&ReturnCode, &StdOut, &StdErr, *WorkspaceRoot);
 
 	if (ReturnCode != 0)
 	{
-		UE_LOG(LogSourceControl, Warning,
-			TEXT("Forge command failed (exit %d): forge %s\n%s"),
+		UE_LOG(LogSourceControl, Warning, TEXT("Forge: exit %d: forge %s\n%s"),
 			ReturnCode, *Args, *StdErr);
 		return false;
 	}
 
-	// Parse JSON output.
 	if (!StdOut.IsEmpty())
 	{
 		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(StdOut);
 		if (!FJsonSerializer::Deserialize(Reader, OutResult) || !OutResult.IsValid())
 		{
-			UE_LOG(LogSourceControl, Warning,
-				TEXT("Forge: failed to parse JSON output from: forge %s"), *Args);
+			UE_LOG(LogSourceControl, Warning, TEXT("Forge: bad JSON from: forge %s"), *Args);
 			return false;
 		}
+	}
+
+	return true;
+}
+
+bool FForgeSourceControlProvider::RunForgeCommandRaw(const FString& Args) const
+{
+	int32 ReturnCode = -1;
+	FString StdOut, StdErr;
+
+	UE_LOG(LogSourceControl, Log, TEXT("Forge: forge %s"), *Args);
+
+	FPlatformProcess::ExecProcess(
+		*ForgeExePath, *Args,
+		&ReturnCode, &StdOut, &StdErr, *WorkspaceRoot);
+
+	if (ReturnCode != 0)
+	{
+		UE_LOG(LogSourceControl, Warning, TEXT("Forge: exit %d: forge %s\n%s"),
+			ReturnCode, *Args, *StdErr);
+		return false;
 	}
 
 	return true;

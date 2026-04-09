@@ -2,14 +2,23 @@
 // Licensed under the MIT License.
 
 use anyhow::Result;
+use forge_core::diff::flatten_tree;
 use forge_core::hash::ForgeHash;
+use forge_core::index::{Index, IndexEntry};
 use forge_core::workspace::Workspace;
-use forge_proto::forge::forge_service_client::ForgeServiceClient;
 use forge_proto::forge::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use std::time::SystemTime;
 
 pub fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
+    run_with_workspace(&ws)
+}
+
+/// Pull using an already-opened workspace (used by clone).
+pub fn run_with_workspace(ws: &Workspace) -> Result<()> {
     let config = ws.config()?;
 
     let server_url = config
@@ -24,11 +33,11 @@ pub fn run() -> Result<()> {
     };
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async { pull_async(&ws, &server_url, &repo_name).await })
+    rt.block_on(async { pull_async(ws, &server_url, &repo_name).await })
 }
 
 async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result<()> {
-    let mut client = ForgeServiceClient::connect(server_url.to_string()).await?;
+    let mut client = crate::client::connect_forge(server_url).await?;
 
     let branch = ws
         .current_branch()?
@@ -59,20 +68,26 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
         return Ok(());
     }
 
-    println!("Pulling from remote...");
-
     // Request all objects from the remote tip that we don't have locally.
-    // Start by requesting the snapshot object and work from there.
     let mut want = vec![remote_tip_bytes.clone()];
     let mut received = 0u64;
+    let mut total_discovered = 0u64;
 
-    // Iteratively pull objects we're missing.
+    // Progress bar for receiving objects — length updated as we discover more.
+    let pb = ProgressBar::new(0);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("Receiving objects: [{bar:30}] {pos}/{len} ({percent}%)")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
     loop {
         if want.is_empty() {
             break;
         }
 
-        // Filter to objects we don't already have.
         let need: Vec<Vec<u8>> = want
             .iter()
             .filter(|h| {
@@ -88,82 +103,179 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
             break;
         }
 
-        let mut stream = client
-            .pull_objects(PullRequest {
-                want_hashes: need,
-                repo: repo_name.to_string(),
-            })
-            .await?
-            .into_inner();
+        total_discovered += need.len() as u64;
+        pb.set_length(total_discovered);
+
+        const BATCH_SIZE: usize = 5000;
+        let batches: Vec<Vec<Vec<u8>>> = need
+            .chunks(BATCH_SIZE)
+            .map(|c| c.to_vec())
+            .collect();
 
         want.clear();
 
-        let mut current_data = Vec::new();
-        let mut current_hash: Option<Vec<u8>> = None;
+        for batch in batches {
+            let mut stream = client
+                .pull_objects(PullRequest {
+                    want_hashes: batch,
+                    repo: repo_name.to_string(),
+                })
+                .await?
+                .into_inner();
 
-        while let Some(chunk) = stream.message().await? {
-            if current_hash.as_ref() != Some(&chunk.hash) {
-                current_data.clear();
-                current_hash = Some(chunk.hash.clone());
-            }
+            let mut current_data = Vec::new();
+            let mut current_hash: Option<Vec<u8>> = None;
 
-            current_data.extend_from_slice(&chunk.data);
-
-            if chunk.is_last {
-                let hash_hex = hex::encode(&chunk.hash);
-                let forge_hash = ForgeHash::from_hex(&hash_hex)?;
-
-                // Verify received data matches claimed hash.
-                let computed = ForgeHash::from_bytes(&current_data);
-                if computed != forge_hash {
-                    anyhow::bail!(
-                        "integrity error: server sent corrupt object (claimed {}, got {})",
-                        forge_hash.short(),
-                        computed.short()
-                    );
+            while let Some(chunk) = stream.message().await? {
+                if current_hash.as_ref() != Some(&chunk.hash) {
+                    current_data.clear();
+                    current_hash = Some(chunk.hash.clone());
                 }
 
-                ws.object_store
-                    .chunks
-                    .put(&forge_hash, &current_data)?;
+                current_data.extend_from_slice(&chunk.data);
 
-                received += 1;
+                if chunk.is_last {
+                    let hash_hex = hex::encode(&chunk.hash);
+                    let forge_hash = ForgeHash::from_hex(&hash_hex)?;
 
-                // Try to parse as snapshot to discover more objects to pull.
-                if let Ok(snapshot) = ws.object_store.get_snapshot(&forge_hash) {
-                    want.push(snapshot.tree.as_bytes().to_vec());
-                    for parent in &snapshot.parents {
-                        if !parent.is_zero() {
-                            want.push(parent.as_bytes().to_vec());
+                    let computed = ForgeHash::from_bytes(&current_data);
+                    if computed != forge_hash {
+                        pb.finish_and_clear();
+                        anyhow::bail!(
+                            "integrity error: server sent corrupt object (claimed {}, got {})",
+                            forge_hash.short(),
+                            computed.short()
+                        );
+                    }
+
+                    ws.object_store
+                        .chunks
+                        .put(&forge_hash, &current_data)?;
+
+                    received += 1;
+                    pb.set_position(received);
+
+                    if let Ok(snapshot) = ws.object_store.get_snapshot(&forge_hash) {
+                        want.push(snapshot.tree.as_bytes().to_vec());
+                        for parent in &snapshot.parents {
+                            if !parent.is_zero() {
+                                want.push(parent.as_bytes().to_vec());
+                            }
                         }
                     }
-                }
 
-                // Try to parse as tree to discover blob objects.
-                if let Ok(tree) = ws.object_store.get_tree(&forge_hash) {
-                    for entry in &tree.entries {
-                        want.push(entry.hash.as_bytes().to_vec());
+                    if let Ok(tree) = ws.object_store.get_tree(&forge_hash) {
+                        for entry in &tree.entries {
+                            want.push(entry.hash.as_bytes().to_vec());
+                        }
                     }
-                }
 
-                // Try to parse as chunked blob to discover chunk objects.
-                if let Ok(chunked) = ws.object_store.get_chunked_blob(&forge_hash) {
-                    for chunk_ref in &chunked.chunks {
-                        want.push(chunk_ref.hash.as_bytes().to_vec());
+                    if let Ok(chunked) = ws.object_store.get_chunked_blob(&forge_hash) {
+                        for chunk_ref in &chunked.chunks {
+                            want.push(chunk_ref.hash.as_bytes().to_vec());
+                        }
                     }
-                }
 
-                current_data.clear();
-                current_hash = None;
+                    current_data.clear();
+                    current_hash = None;
+                }
             }
         }
     }
 
+    pb.finish_and_clear();
+    println!("Receiving objects: {} done.", received);
+
     // Fast-forward local branch.
     let old_tip = local_tip.short();
     ws.set_branch_tip(&branch, &remote_tip)?;
-    println!("Receiving objects: {} done.", received);
     println!("   {}..{} {} -> {}", old_tip, remote_tip.short(), branch, branch);
 
+    // Checkout working tree from the new tip.
+    checkout_tree(ws, &remote_tip)?;
+
+    Ok(())
+}
+
+/// Write the commit's tree contents into the working directory and update the index.
+/// Uses rayon to read/decompress objects in parallel, then writes files sequentially.
+fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
+    let snap = ws.object_store.get_snapshot(commit_hash)?;
+    let get_tree = |h: &ForgeHash| ws.object_store.get_tree(h).ok();
+    let tree = ws.object_store.get_tree(&snap.tree)?;
+    let file_map = flatten_tree(&tree, "", &get_tree);
+
+    let mut index = Index::load(&ws.forge_dir().join("index"))?;
+
+    // Remove files not in the target tree.
+    let old_paths: Vec<String> = index.entries.keys().cloned().collect();
+    for path in &old_paths {
+        if !file_map.contains_key(path) {
+            let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if abs_path.exists() {
+                let _ = std::fs::remove_file(&abs_path);
+            }
+            index.remove(path);
+        }
+    }
+
+    let total = file_map.len() as u64;
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("Checking out files: [{bar:30}] {pos}/{len} ({percent}%)")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+
+    // Collect entries for parallel read.
+    let entries: Vec<(String, ForgeHash, u64)> = file_map
+        .iter()
+        .map(|(p, (h, s))| (p.clone(), *h, *s))
+        .collect();
+
+    // Parallel read + decompress objects.
+    let read_results: Vec<Result<(String, Vec<u8>, ForgeHash, u64)>> = entries
+        .par_iter()
+        .map(|(path, hash, size)| {
+            let content = ws.object_store.read_file(hash)?;
+            Ok((path.clone(), content, *hash, *size))
+        })
+        .collect();
+
+    // Sequential write to disk + index update.
+    for result in read_results {
+        let (path, content, obj_hash, size) = result?;
+        let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if let Some(parent) = abs_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&abs_path, &content)?;
+
+        let mtime = std::fs::metadata(&abs_path)?
+            .modified()?
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+
+        index.set(
+            path,
+            IndexEntry {
+                hash: ForgeHash::from_bytes(&content),
+                size,
+                mtime_secs: mtime.as_secs() as i64,
+                mtime_nanos: mtime.subsec_nanos(),
+                staged: false,
+                is_chunked: false,
+                object_hash: obj_hash,
+            },
+        );
+
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+    println!("Checking out files: {} done.", total);
+
+    index.save(&ws.forge_dir().join("index"))?;
     Ok(())
 }

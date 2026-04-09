@@ -609,10 +609,8 @@ fn extract_blueprint_var_names_with_scan(
         None => return Vec::new(),
     };
 
-    let offset = export.serial_size as usize; // serial_size, not offset — we need serial_offset
-    // We can't get serial_offset from ExportInfo. But we can scan the whole file
+    // We can't get serial_offset from ExportInfo, so we scan the whole file
     // for the NewVariables pattern — it only appears once per Blueprint.
-    // Scan the raw file data for VarName FName patterns in the NewVariables region.
     let vars = uasset::structured::scan_blueprint_variables(data, names);
     if !vars.is_empty() {
         return vars;

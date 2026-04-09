@@ -1,7 +1,11 @@
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Spinner } from '@primer/react';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
+import Setup from './pages/Setup';
+import { useAuth } from './context/AuthContext';
+import type { ReactNode } from 'react';
 import RepoTree from './pages/RepoTree';
 import FileView from './pages/FileView';
 import Commits from './pages/Commits';
@@ -20,40 +24,131 @@ import IssueDetail from './pages/IssueDetail';
 import PullRequests from './pages/PullRequests';
 import NewPullRequest from './pages/NewPullRequest';
 import PullRequestDetail from './pages/PullRequestDetail';
+import Terms from './pages/Terms';
+import Privacy from './pages/Privacy';
+import Security from './pages/Security';
+import Status from './pages/Status';
+import Docs from './pages/Docs';
+import Contact from './pages/Contact';
 
+
+function FullPageSpinner() {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', padding: '64px 0' }}>
+      <Spinner size="large" />
+    </div>
+  );
+}
+
+/**
+ * Gate that fires before any other guard: if the server has zero users,
+ * every route in the app gets redirected to /setup. Once the wizard
+ * completes (or if the operator created the first admin via the CLI), this
+ * guard becomes a no-op.
+ */
+function RequireSetup({ children }: { children: ReactNode }) {
+  const { initialized, loading } = useAuth();
+  if (loading || initialized === null) return <FullPageSpinner />;
+  if (!initialized) return <Navigate to="/setup" replace />;
+  return <>{children}</>;
+}
+
+/**
+ * Redirect to /login if the user isn't authenticated. Used to wrap every
+ * route that needs a session — keeps stale-cookie users from landing on a
+ * page that flashes "401: invalid or expired session" before our request
+ * helper can react. Always nest inside `RequireSetup` so an uninitialized
+ * server bounces to the wizard before this even runs.
+ */
+function RequireAuth({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+  if (loading) return <FullPageSpinner />;
+  if (!user) {
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+  return <>{children}</>;
+}
+
+/**
+ * The /setup route uses the inverse gate: if the server is *already*
+ * initialized, kick the visitor back to / instead of letting them re-run
+ * the wizard (forge-server's BootstrapAdmin would reject the call anyway,
+ * but we want a clean redirect, not an error).
+ */
+function OnlyWhenUninitialized({ children }: { children: ReactNode }) {
+  const { initialized, loading } = useAuth();
+  if (loading || initialized === null) return <FullPageSpinner />;
+  if (initialized) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+/** Compose RequireSetup + RequireAuth for the common case. */
+function Authenticated({ children }: { children: ReactNode }) {
+  return (
+    <RequireSetup>
+      <RequireAuth>{children}</RequireAuth>
+    </RequireSetup>
+  );
+}
 
 export default function App() {
   return (
     <Layout>
       <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/login" element={<Login />} />
-        <Route path="/admin" element={<Admin />} />
-        
-        <Route path="/:repo" element={<RepoTree />} />
-        <Route path="/:repo/tree/:branch" element={<RepoTree />} />
-        <Route path="/:repo/tree/:branch/*" element={<RepoTree />} />
-        <Route path="/:repo/blob/:branch/*" element={<FileView />} />
-        <Route path="/:repo/commits/:branch" element={<Commits />} />
-        <Route path="/:repo/commit/:hash" element={<CommitDetail />} />
-        <Route path="/:repo/locks" element={<Locks />} />
-        <Route path="/:repo/settings" element={<RepoSettings />} />
-        
-        <Route path="/:repo/actions" element={<Workflows />} />
-        <Route path="/:repo/actions/new" element={<WorkflowEdit />} />
-        <Route path="/:repo/actions/:id/edit" element={<WorkflowEdit />} />
-        <Route path="/:repo/actions/:id/runs" element={<WorkflowRuns />} />
-        <Route path="/:repo/actions/runs/:runId" element={<RunDetail />} />
-        <Route path="/:repo/releases" element={<Releases />} />
+        {/* Setup wizard: only renders when no admin exists yet. Sits OUTSIDE
+            both the auth and setup gates so it can be reached from a fresh
+            install. */}
+        <Route
+          path="/setup"
+          element={<OnlyWhenUninitialized><Setup /></OnlyWhenUninitialized>}
+        />
 
-        {/* New Dummy Tabs */}
-        <Route path="/:repo/issues" element={<Issues />} />
-        <Route path="/:repo/issues/new" element={<NewIssue />} />
-        <Route path="/:repo/issues/:id" element={<IssueDetail />} />
-        
-        <Route path="/:repo/pulls" element={<PullRequests />} />
-        <Route path="/:repo/pulls/new" element={<NewPullRequest />} />
-        <Route path="/:repo/pulls/:id" element={<PullRequestDetail />} />
+        {/* Login: must wait for setup to complete first, then renders. */}
+        <Route
+          path="/login"
+          element={<RequireSetup><Login /></RequireSetup>}
+        />
+
+        {/* Public footer pages — no auth gate so the login screen can
+            link to them. They sit BEFORE the catch-all /:owner/:repo
+            route so React Router matches the literal path first; the
+            same names are reserved as user/repo segments by validate.rs
+            on the server side. */}
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/privacy" element={<Privacy />} />
+        <Route path="/security" element={<Security />} />
+        <Route path="/status" element={<Status />} />
+        <Route path="/docs" element={<Docs />} />
+        <Route path="/contact" element={<Contact />} />
+
+        <Route path="/" element={<Authenticated><Dashboard /></Authenticated>} />
+        <Route path="/admin" element={<Authenticated><Admin /></Authenticated>} />
+
+        {/* User-namespaced repo routes: /<owner>/<repo>/... — all gated. */}
+        <Route path="/:owner/:repo" element={<Authenticated><RepoTree /></Authenticated>} />
+        <Route path="/:owner/:repo/tree/:branch" element={<Authenticated><RepoTree /></Authenticated>} />
+        <Route path="/:owner/:repo/tree/:branch/*" element={<Authenticated><RepoTree /></Authenticated>} />
+        <Route path="/:owner/:repo/blob/:branch/*" element={<Authenticated><FileView /></Authenticated>} />
+        <Route path="/:owner/:repo/commits/:branch" element={<Authenticated><Commits /></Authenticated>} />
+        <Route path="/:owner/:repo/commit/:hash" element={<Authenticated><CommitDetail /></Authenticated>} />
+        <Route path="/:owner/:repo/locks" element={<Authenticated><Locks /></Authenticated>} />
+        <Route path="/:owner/:repo/settings" element={<Authenticated><RepoSettings /></Authenticated>} />
+
+        <Route path="/:owner/:repo/actions" element={<Authenticated><Workflows /></Authenticated>} />
+        <Route path="/:owner/:repo/actions/new" element={<Authenticated><WorkflowEdit /></Authenticated>} />
+        <Route path="/:owner/:repo/actions/:id/edit" element={<Authenticated><WorkflowEdit /></Authenticated>} />
+        <Route path="/:owner/:repo/actions/:id/runs" element={<Authenticated><WorkflowRuns /></Authenticated>} />
+        <Route path="/:owner/:repo/actions/runs/:runId" element={<Authenticated><RunDetail /></Authenticated>} />
+        <Route path="/:owner/:repo/releases" element={<Authenticated><Releases /></Authenticated>} />
+
+        <Route path="/:owner/:repo/issues" element={<Authenticated><Issues /></Authenticated>} />
+        <Route path="/:owner/:repo/issues/new" element={<Authenticated><NewIssue /></Authenticated>} />
+        <Route path="/:owner/:repo/issues/:id" element={<Authenticated><IssueDetail /></Authenticated>} />
+
+        <Route path="/:owner/:repo/pulls" element={<Authenticated><PullRequests /></Authenticated>} />
+        <Route path="/:owner/:repo/pulls/new" element={<Authenticated><NewPullRequest /></Authenticated>} />
+        <Route path="/:owner/:repo/pulls/:id" element={<Authenticated><PullRequestDetail /></Authenticated>} />
       </Routes>
     </Layout>
   );

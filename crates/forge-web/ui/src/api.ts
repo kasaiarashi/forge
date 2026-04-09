@@ -3,6 +3,20 @@ export interface User {
   is_admin: boolean;
 }
 
+/**
+ * Server-side user record returned by `/api/auth/users` (admin only) and
+ * other admin endpoints. Distinct from the lighter [`User`] which is the
+ * shape `/api/auth/me` returns for the SPA's own session — `User` predates
+ * the multi-user admin surface and we don't want to retrofit it.
+ */
+export interface UserSummary {
+  id: number;
+  username: string;
+  email: string;
+  display_name: string;
+  is_server_admin: boolean;
+}
+
 export interface RepoInfo {
   name: string;
   description: string;
@@ -195,6 +209,21 @@ export interface PullRequestListResponse {
   closed_count: number;
 }
 
+/**
+ * Endpoints that we expect to be unauthenticated. A 401 from these is
+ * informational (e.g. `me()` returning null when logged out) and should NOT
+ * trigger an automatic redirect to /login. Everything else, on 401, hard-
+ * navigates to /login because the user is no longer authenticated and the
+ * page they're on can't render without data.
+ */
+const PUBLIC_AUTH_PATHS = new Set([
+  '/api/auth/login',
+  '/api/auth/me',
+  '/api/auth/initialized',
+  '/api/auth/bootstrap',
+  '/api/auth/logout',
+]);
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     credentials: 'same-origin',
@@ -202,6 +231,18 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     ...options,
   });
   if (!res.ok) {
+    // 401 on a normal data endpoint means the session expired or was
+    // revoked. Hard-redirect to /login so the user is never stranded on a
+    // page rendering "401: invalid or expired session" as a flash error.
+    // Skip the redirect for the auth endpoints themselves so the login form
+    // and the AuthContext.refresh() probe can still surface the error
+    // through their own catch handlers.
+    if (res.status === 401 && !PUBLIC_AUTH_PATHS.has(url) && typeof window !== 'undefined') {
+      // Avoid an infinite redirect loop if we're already on /login.
+      if (window.location.pathname !== '/login') {
+        window.location.assign('/login');
+      }
+    }
     const text = await res.text().catch(() => '');
     throw new Error(`${res.status}: ${text || res.statusText}`);
   }
@@ -222,6 +263,28 @@ const api = {
   },
   me() {
     return request<User>('/api/auth/me').catch(() => null);
+  },
+  isInitialized() {
+    return request<{ initialized: boolean }>('/api/auth/initialized')
+      .then((r) => r.initialized)
+      .catch(() => false);
+  },
+  listUsers() {
+    // Server-admin only — non-admins get a 401/403, which the caller is
+    // expected to handle gracefully. Used by the Contact page to surface
+    // every active server admin's email.
+    return request<UserSummary[]>('/api/auth/users');
+  },
+  bootstrapAdmin(input: {
+    username: string;
+    email: string;
+    display_name: string;
+    password: string;
+  }) {
+    return request<{ user: User }>('/api/auth/bootstrap', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
   },
 
   // Repos
@@ -363,6 +426,31 @@ const api = {
 
 function enc(s: string) {
   return encodeURIComponent(s);
+}
+
+/**
+ * Build a navigation path segment for a `<owner>/<name>` repo identifier.
+ *
+ * Each segment is URL-encoded individually but the `/` between owner and
+ * name is kept literal — that's what lets React Router split the path into
+ * the `:owner/:repo` route params. Use this for `<Link to={...}>` and
+ * `navigate(...)` targets, NOT for API call URLs (those need a single
+ * encoded segment so axum's `:repo` param receives the full path after
+ * per-segment decoding).
+ */
+export function repoPath(repo: string): string {
+  return repo
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/');
+}
+
+/// Split a `<owner>/<name>` identifier into its two halves. Returns
+/// `[owner, name]`. If the string has no slash, returns `['', repo]`.
+export function splitRepo(repo: string): [string, string] {
+  const idx = repo.indexOf('/');
+  if (idx < 0) return ['', repo];
+  return [repo.slice(0, idx), repo.slice(idx + 1)];
 }
 
 export default api;

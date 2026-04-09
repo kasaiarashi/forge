@@ -5,10 +5,18 @@
 
 #include "ISourceControlProvider.h"
 #include "ISourceControlOperation.h"
+#include "ForgeSourceControlState.h"
+#include "ForgeSourceControlWorkers.h"
+
+class FForgeSourceControlCommand;
 
 /**
  * Forge source control provider.
- * Shells out to the `forge` CLI with --json for all operations.
+ *
+ * Uses the Command/Worker/ThreadPool pattern:
+ *   Execute() creates a command and dispatches it to GThreadPool.
+ *   Worker::Execute() runs forge CLI on a background thread.
+ *   Tick() processes completed commands on the game thread.
  */
 class FForgeSourceControlProvider : public ISourceControlProvider
 {
@@ -18,7 +26,6 @@ public:
 
 	virtual const FName& GetName() const override;
 	virtual FText GetStatusText() const override;
-
 	virtual TMap<EStatus, FString> GetStatus() const override;
 	virtual bool IsEnabled() const override;
 	virtual bool IsAvailable() const override;
@@ -43,7 +50,6 @@ public:
 
 	virtual FDelegateHandle RegisterSourceControlStateChanged_Handle(
 		const FSourceControlStateChanged::FDelegate& SourceControlStateChanged) override;
-
 	virtual void UnregisterSourceControlStateChanged_Handle(FDelegateHandle Handle) override;
 
 	virtual ECommandResult::Type Execute(
@@ -53,14 +59,13 @@ public:
 		EConcurrency::Type InConcurrency,
 		const FSourceControlOperationComplete& InOperationCompleteDelegate) override;
 
-	virtual bool CanExecuteOperation(const FSourceControlOperationRef& InOperation) const override { return true; }
+	virtual bool CanExecuteOperation(const FSourceControlOperationRef& InOperation) const override;
 	virtual bool CanCancelOperation(const FSourceControlOperationRef& InOperation) const override;
 	virtual void CancelOperation(const FSourceControlOperationRef& InOperation) override;
 
 	virtual void Tick() override;
 
 	virtual TArray<TSharedRef<class ISourceControlLabel>> GetLabels(const FString& InMatchingSpec) const override;
-
 	virtual TArray<FSourceControlChangelistRef> GetChangelists(EStateCacheUsage::Type InStateCacheUsage) override;
 
 	virtual bool UsesLocalReadOnlyState() const override { return false; }
@@ -68,33 +73,57 @@ public:
 	virtual bool UsesUncontrolledChangelists() const override { return false; }
 	virtual bool UsesCheckout() const override { return true; }
 	virtual bool UsesFileRevisions() const override { return false; }
-	virtual bool UsesSnapshots() const override { return true; }
+	// Must be false: when true, FSourceControlWindows::PromptForCheckin auto-calls
+	// SyncLatest() before checkin, which reloads every loaded package (including
+	// engine packages) and crashes the render thread. Git/Diversion both return false.
+	virtual bool UsesSnapshots() const override { return false; }
 	virtual bool AllowsDiffAgainstDepot() const override { return false; }
 
 	virtual TOptional<bool> IsAtLatestRevision() const override { return TOptional<bool>(); }
-	virtual TOptional<int> GetNumLocalChanges() const override { return TOptional<int>(); }
+	virtual TOptional<int> GetNumLocalChanges() const override;
 
 	virtual TSharedRef<class SWidget> MakeSettingsWidget() const override;
 
-	/** Explicitly refresh the status cache by running forge status --json. */
-	void RefreshStatusCache();
+	// ── Public API for workers ──────────────────────────────────────────────
+
+	void RegisterWorker(const FName& InName, const FGetForgeWorker& InDelegate);
+
+	/** Get or create a cached state. Never invalidates existing TSharedRef pointers. */
+	TSharedRef<FForgeSourceControlState> GetStateInternal(const FString& Filename);
+
+	/** Update existing state objects in-place (never removes them from cache). */
+	bool UpdateCachedStates(
+		const TMap<FString, FForgeSourceControlState::EFileState>& InStates,
+		const TMap<FString, FString>& InLockOwners);
+
+	/** Queue an async UpdateStatus refresh. */
+	void RefreshStatusAsync();
+
+	/** CLI execution — thread-safe. */
+	bool RunForgeCommand(const FString& Args, TSharedPtr<FJsonObject>& OutResult) const;
+	bool RunForgeCommandRaw(const FString& Args) const;
+
+	const FString& GetWorkspaceRoot() const { return WorkspaceRoot; }
+	const FString& GetCurrentUserName() const { return CurrentUserName; }
 
 private:
-	/** Run the forge CLI and return parsed JSON output. */
-	bool RunForgeCommand(const FString& Args, TSharedPtr<FJsonObject>& OutResult) const;
+	TSharedPtr<IForgeWorker, ESPMode::ThreadSafe> CreateWorker(const FName& InOperationName) const;
+	ECommandResult::Type IssueCommand(FForgeSourceControlCommand& InCommand);
+	ECommandResult::Type ExecuteSynchronousCommand(FForgeSourceControlCommand& InCommand, const FText& Task);
 
-	/** Path to the forge executable. */
+	TMap<FName, FGetForgeWorker> WorkersMap;
+	TArray<FForgeSourceControlCommand*> CommandQueue;
+
+	/** State cache — objects are NEVER removed, only updated in-place. */
+	TMap<FString, TSharedRef<FForgeSourceControlState>> StateCache;
+
 	FString ForgeExePath;
-
-	/** Whether we successfully connected to a forge workspace. */
+	FString WorkspaceRoot;
+	FString CurrentUserName;
 	bool bIsAvailable = false;
 
-	/** Whether the cache needs a background refresh. */
-	bool bNeedsCacheRefresh = false;
+	/** Deferred broadcast — set when states change, fires on the NEXT tick. */
+	bool bPendingBroadcast = false;
 
-	/** Cached file states. */
-	TMap<FString, FSourceControlStateRef> StateCache;
-
-	/** Delegates for state change notifications. */
 	FSourceControlStateChanged OnSourceControlStateChanged;
 };

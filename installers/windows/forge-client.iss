@@ -13,11 +13,13 @@
   #define PluginDir "..\..\plugin\ForgeSourceControl\Plugins\ForgeSourceControl"
 #endif
 
+#define FabMarketplaceURL "https://www.fab.com/listings/forge-source-control"
+
 [Setup]
 AppName=Forge VCS
 AppVersion={#AppVersion}
 AppPublisher=Krishna Teja
-AppPublisherURL=https://github.com/nicholasgasior/forge
+AppPublisherURL=https://github.com/kasaiarashi/forge
 DefaultDirName={autopf}\Forge
 DefaultGroupName=Forge VCS
 OutputBaseFilename=ForgeClient-Windows-x64-Setup
@@ -38,7 +40,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Forge CLI binary
 Source: "{#ArtifactDir}\forge-windows-client\forge.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; UE Plugin files (only installed if user selects a UE path)
+; UE Plugin files (only installed if user selects local install)
 Source: "{#PluginDir}\ForgeSourceControl.uplugin"; DestDir: "{code:GetUEPluginDestDir}"; Flags: ignoreversion; Check: ShouldInstallPlugin
 Source: "{#PluginDir}\Source\*"; DestDir: "{code:GetUEPluginDestDir}\Source"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallPlugin
 
@@ -54,12 +56,18 @@ Name: "{group}\Uninstall Forge"; Filename: "{uninstallexe}"
 
 [Code]
 var
-  UEPage: TInputDirWizardPage;
-  UEInstallPlugin: Boolean;
+  UEPage: TWizardPage;
+  RadioInstallLocal: TNewRadioButton;
+  RadioFabMarketplace: TNewRadioButton;
+  RadioSkipPlugin: TNewRadioButton;
+  FabInfoLabel: TNewStaticText;
+  UEDirEdit: TEdit;
+  UEDirBrowseBtn: TNewButton;
+  UEDirLabel: TNewStaticText;
   UEDetectedPaths: TStringList;
   UEDetectedLabels: TStringList;
-  SkipPluginCheckBox: TNewCheckBox;
   UEComboBox: TNewComboBox;
+  ComboLabel: TNewStaticText;
 
 // Check if a path is already in the system PATH
 function NeedsAddPath(Param: string): Boolean;
@@ -73,7 +81,6 @@ begin
     Result := True;
     exit;
   end;
-  // Look for the path with leading and trailing semicolons
   Result := Pos(';' + Uppercase(Param) + ';', ';' + Uppercase(OrigPath) + ';') = 0;
 end;
 
@@ -145,7 +152,6 @@ begin
     InstallDir := 'C:\Program Files\Epic Games\UE_5.' + IntToStr(I);
     if DirExists(InstallDir) then
     begin
-      // Avoid duplicates
       if UEDetectedPaths.IndexOf(InstallDir) < 0 then
       begin
         UEDetectedLabels.Add('Unreal Engine 5.' + IntToStr(I) + ' - ' + InstallDir);
@@ -155,68 +161,155 @@ begin
   end;
 end;
 
-procedure OnSkipPluginClick(Sender: TObject);
+procedure UpdatePluginControls();
+var
+  LocalSelected: Boolean;
+  FabSelected: Boolean;
 begin
-  UEComboBox.Enabled := not SkipPluginCheckBox.Checked;
-  UEPage.Buttons[0].Enabled := not SkipPluginCheckBox.Checked;
-  UEPage.Edits[0].Enabled := not SkipPluginCheckBox.Checked;
+  LocalSelected := RadioInstallLocal.Checked;
+  FabSelected := RadioFabMarketplace.Checked;
+
+  // Local install controls
+  UEDirLabel.Enabled := LocalSelected;
+  UEDirEdit.Enabled := LocalSelected;
+  UEDirBrowseBtn.Enabled := LocalSelected;
+  UEComboBox.Enabled := LocalSelected;
+  ComboLabel.Enabled := LocalSelected;
+
+  // Fab info label
+  FabInfoLabel.Visible := FabSelected;
+end;
+
+procedure OnPluginRadioClick(Sender: TObject);
+begin
+  UpdatePluginControls();
+end;
+
+procedure OnBrowseClick(Sender: TObject);
+var
+  Dir: string;
+begin
+  Dir := UEDirEdit.Text;
+  if BrowseForFolder('Select Unreal Engine installation folder:', Dir, False) then
+    UEDirEdit.Text := Dir;
+end;
+
+procedure OnComboChange(Sender: TObject);
+begin
+  if (UEComboBox.ItemIndex >= 0) and (UEComboBox.ItemIndex < UEDetectedPaths.Count) then
+    UEDirEdit.Text := UEDetectedPaths[UEComboBox.ItemIndex];
 end;
 
 procedure InitializeWizard();
 var
-  I: Integer;
-  ComboLabel: TNewStaticText;
+  I, Y: Integer;
 begin
   DetectUnrealEngines();
 
-  // Create the UE plugin installation page
-  UEPage := CreateInputDirPage(wpSelectDir,
+  // Create custom plugin page
+  UEPage := CreateCustomPage(wpSelectDir,
     'Unreal Engine Plugin',
-    'Install the Forge source control plugin for Unreal Engine.',
-    'Select the Unreal Engine installation folder, or browse to locate it manually.' + #13#10 +
-    'The plugin will be installed to Engine\Plugins\Marketplace\ForgeSourceControl\.',
-    False, '');
-  UEPage.Add('UE Installation Path:');
+    'Choose how to install the Forge source control plugin for Unreal Engine.');
 
-  // Add skip checkbox
-  SkipPluginCheckBox := TNewCheckBox.Create(UEPage);
-  SkipPluginCheckBox.Parent := UEPage.Surface;
-  SkipPluginCheckBox.Caption := 'Skip Unreal Engine plugin installation';
-  SkipPluginCheckBox.Top := UEPage.Edits[0].Top + UEPage.Edits[0].Height + 16;
-  SkipPluginCheckBox.Left := UEPage.Edits[0].Left;
-  SkipPluginCheckBox.Width := UEPage.SurfaceWidth;
-  SkipPluginCheckBox.OnClick := @OnSkipPluginClick;
+  Y := 0;
 
-  // Add detected engines combo box if any found
+  // ── Radio 1: Install from this installer ──
+  RadioInstallLocal := TNewRadioButton.Create(UEPage);
+  RadioInstallLocal.Parent := UEPage.Surface;
+  RadioInstallLocal.Caption := 'Install plugin from this installer';
+  RadioInstallLocal.Top := Y;
+  RadioInstallLocal.Left := 0;
+  RadioInstallLocal.Width := UEPage.SurfaceWidth;
+  RadioInstallLocal.Checked := True;
+  RadioInstallLocal.OnClick := @OnPluginRadioClick;
+  Y := Y + 24;
+
+  // Detected engines combo
+  ComboLabel := TNewStaticText.Create(UEPage);
+  ComboLabel.Parent := UEPage.Surface;
+  ComboLabel.Top := Y;
+  ComboLabel.Left := 24;
+  Y := Y + 18;
+
+  UEComboBox := TNewComboBox.Create(UEPage);
+  UEComboBox.Parent := UEPage.Surface;
+  UEComboBox.Top := Y;
+  UEComboBox.Left := 24;
+  UEComboBox.Width := UEPage.SurfaceWidth - 24;
+  UEComboBox.Style := csDropDownList;
+  UEComboBox.OnChange := @OnComboChange;
+
   if UEDetectedPaths.Count > 0 then
   begin
-    ComboLabel := TNewStaticText.Create(UEPage);
-    ComboLabel.Parent := UEPage.Surface;
-    ComboLabel.Caption := 'Detected Unreal Engine installations:';
-    ComboLabel.Top := SkipPluginCheckBox.Top + SkipPluginCheckBox.Height + 16;
-    ComboLabel.Left := UEPage.Edits[0].Left;
-
-    UEComboBox := TNewComboBox.Create(UEPage);
-    UEComboBox.Parent := UEPage.Surface;
-    UEComboBox.Top := ComboLabel.Top + ComboLabel.Height + 4;
-    UEComboBox.Left := UEPage.Edits[0].Left;
-    UEComboBox.Width := UEPage.SurfaceWidth - UEPage.Edits[0].Left;
-    UEComboBox.Style := csDropDownList;
-
+    ComboLabel.Caption := 'Detected installations:';
     for I := 0 to UEDetectedLabels.Count - 1 do
       UEComboBox.Items.Add(UEDetectedLabels[I]);
-
     UEComboBox.ItemIndex := 0;
-
-    // Pre-fill the path input with the first detected engine
-    UEPage.Values[0] := UEDetectedPaths[0];
   end else
   begin
-    // No engines detected — create a dummy combo so references don't fail
-    UEComboBox := TNewComboBox.Create(UEPage);
-    UEComboBox.Parent := UEPage.Surface;
+    ComboLabel.Caption := 'No Unreal Engine installations detected.';
     UEComboBox.Visible := False;
   end;
+  Y := Y + 28;
+
+  // UE dir input + browse
+  UEDirLabel := TNewStaticText.Create(UEPage);
+  UEDirLabel.Parent := UEPage.Surface;
+  UEDirLabel.Caption := 'UE Installation Path:';
+  UEDirLabel.Top := Y;
+  UEDirLabel.Left := 24;
+  Y := Y + 18;
+
+  UEDirEdit := TEdit.Create(UEPage);
+  UEDirEdit.Parent := UEPage.Surface;
+  UEDirEdit.Top := Y;
+  UEDirEdit.Left := 24;
+  UEDirEdit.Width := UEPage.SurfaceWidth - 24 - 90;
+
+  UEDirBrowseBtn := TNewButton.Create(UEPage);
+  UEDirBrowseBtn.Parent := UEPage.Surface;
+  UEDirBrowseBtn.Caption := 'Browse...';
+  UEDirBrowseBtn.Top := Y - 2;
+  UEDirBrowseBtn.Left := UEDirEdit.Left + UEDirEdit.Width + 8;
+  UEDirBrowseBtn.Width := 80;
+  UEDirBrowseBtn.OnClick := @OnBrowseClick;
+
+  if UEDetectedPaths.Count > 0 then
+    UEDirEdit.Text := UEDetectedPaths[0];
+
+  Y := Y + 36;
+
+  // ── Radio 2: Get from Fab Marketplace ──
+  RadioFabMarketplace := TNewRadioButton.Create(UEPage);
+  RadioFabMarketplace.Parent := UEPage.Surface;
+  RadioFabMarketplace.Caption := 'Get plugin from Fab Marketplace';
+  RadioFabMarketplace.Top := Y;
+  RadioFabMarketplace.Left := 0;
+  RadioFabMarketplace.Width := UEPage.SurfaceWidth;
+  RadioFabMarketplace.OnClick := @OnPluginRadioClick;
+  Y := Y + 24;
+
+  FabInfoLabel := TNewStaticText.Create(UEPage);
+  FabInfoLabel.Parent := UEPage.Surface;
+  FabInfoLabel.Caption :=
+    'The Fab Marketplace page will open in your browser after installation.' + #13#10 +
+    'Install the plugin directly from there into your Unreal Engine.' + #13#10 +
+    'This is recommended if you want automatic plugin updates via the Epic Games Launcher.';
+  FabInfoLabel.Top := Y;
+  FabInfoLabel.Left := 24;
+  FabInfoLabel.Width := UEPage.SurfaceWidth - 24;
+  FabInfoLabel.AutoSize := True;
+  FabInfoLabel.Visible := False;
+  Y := Y + 60;
+
+  // ── Radio 3: Skip entirely ──
+  RadioSkipPlugin := TNewRadioButton.Create(UEPage);
+  RadioSkipPlugin.Parent := UEPage.Surface;
+  RadioSkipPlugin.Caption := 'Skip plugin installation (CLI only)';
+  RadioSkipPlugin.Top := Y;
+  RadioSkipPlugin.Left := 0;
+  RadioSkipPlugin.Width := UEPage.SurfaceWidth;
+  RadioSkipPlugin.OnClick := @OnPluginRadioClick;
 end;
 
 // Update the path edit when user selects from combo box
@@ -225,22 +318,23 @@ begin
   Result := True;
   if CurPageID = UEPage.ID then
   begin
-    if not SkipPluginCheckBox.Checked then
+    if RadioInstallLocal.Checked then
     begin
-      // Sync combo selection to path edit
-      if (UEComboBox.ItemIndex >= 0) and (UEComboBox.ItemIndex < UEDetectedPaths.Count) then
-        UEPage.Values[0] := UEDetectedPaths[UEComboBox.ItemIndex];
-
-      // Validate the selected path
-      if not DirExists(UEPage.Values[0]) then
+      if UEDirEdit.Text = '' then
       begin
-        MsgBox('The selected Unreal Engine path does not exist. Please select a valid path or skip plugin installation.', mbError, MB_OK);
+        MsgBox('Please select an Unreal Engine installation path.', mbError, MB_OK);
         Result := False;
         exit;
       end;
 
-      // Verify it looks like a UE installation
-      if not DirExists(UEPage.Values[0] + '\Engine') then
+      if not DirExists(UEDirEdit.Text) then
+      begin
+        MsgBox('The selected Unreal Engine path does not exist.', mbError, MB_OK);
+        Result := False;
+        exit;
+      end;
+
+      if not DirExists(UEDirEdit.Text + '\Engine') then
       begin
         MsgBox('The selected folder does not appear to be an Unreal Engine installation (no Engine subfolder found).', mbError, MB_OK);
         Result := False;
@@ -252,10 +346,27 @@ end;
 
 function ShouldInstallPlugin(): Boolean;
 begin
-  Result := not SkipPluginCheckBox.Checked;
+  Result := RadioInstallLocal.Checked;
 end;
 
 function GetUEPluginDestDir(Param: string): string;
 begin
-  Result := UEPage.Values[0] + '\Engine\Plugins\Marketplace\ForgeSourceControl';
+  if RadioInstallLocal.Checked then
+    Result := UEDirEdit.Text + '\Engine\Plugins\Marketplace\ForgeSourceControl'
+  else
+    Result := ExpandConstant('{tmp}');  // dummy, won't be used
+end;
+
+// Open Fab Marketplace after install if selected
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ErrorCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if RadioFabMarketplace.Checked then
+    begin
+      ShellExec('open', '{#FabMarketplaceURL}', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
+    end;
+  end;
 end;

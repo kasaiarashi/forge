@@ -1,17 +1,17 @@
 import { TelescopeIcon } from '@primer/octicons-react';
 import { Button } from '@primer/react';
-import RepoHeader from '../components/RepoHeader';
-import { useParams } from 'react-router-dom';
+import RepoHeader, { type Tab } from '../components/RepoHeader';
+import { useRepoParam } from '../hooks/useRepoParam';
 
 interface PlaceholderProps {
-  tabName: 'projects' | 'security' | 'insights' | 'settings';
+  tabName: Tab;
   title: string;
   description: string;
   actionText?: string;
 }
 
 export default function PlaceholderPage({ tabName, title, description, actionText }: PlaceholderProps) {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
 
   return (
     <div>

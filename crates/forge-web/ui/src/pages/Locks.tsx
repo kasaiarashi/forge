@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import {
   Spinner,
   Flash,
@@ -33,7 +33,7 @@ function timeAgo(epoch: number): string {
 }
 
 export default function Locks() {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
   const [locks, setLocks] = useState<Lock[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

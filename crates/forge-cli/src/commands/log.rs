@@ -1,9 +1,11 @@
+use crate::pager;
 use anyhow::Result;
 use forge_core::diff::{diff_maps, flatten_tree, DiffEntry};
 use forge_core::hash::ForgeHash;
 use forge_core::workspace::Workspace;
-use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::fmt::Write as _;
 
 /// A commit with its timestamp, used for chronological ordering in --all mode.
 struct TimedCommit {
@@ -28,7 +30,14 @@ impl Ord for TimedCommit {
     }
 }
 
-pub fn run(count: u32, file: Option<String>, oneline: bool, all: bool, json: bool) -> Result<()> {
+pub fn run(
+    count: u32,
+    file: Option<String>,
+    oneline: bool,
+    all: bool,
+    no_pager: bool,
+    json: bool,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
 
@@ -48,6 +57,7 @@ pub fn run(count: u32, file: Option<String>, oneline: bool, all: bool, json: boo
     let filter = file.map(|f| f.replace('\\', "/").trim_start_matches("./").to_string());
 
     let mut json_entries = Vec::new();
+    let mut buffer = String::new();
     let mut shown = 0u32;
 
     if all {
@@ -94,7 +104,17 @@ pub fn run(count: u32, file: Option<String>, oneline: bool, all: bool, json: boo
                 }
             }
 
-            print_commit(&tc.hash, &snapshot, &ref_map, &current_branch, &head_hash, oneline, json, &mut json_entries);
+            print_commit(
+                &mut buffer,
+                &tc.hash,
+                &snapshot,
+                &ref_map,
+                &current_branch,
+                &head_hash,
+                oneline,
+                json,
+                &mut json_entries,
+            );
             shown += 1;
 
             // Enqueue parents.
@@ -123,7 +143,17 @@ pub fn run(count: u32, file: Option<String>, oneline: bool, all: bool, json: boo
                 }
             }
 
-            print_commit(&current, &snapshot, &ref_map, &current_branch, &head_hash, oneline, json, &mut json_entries);
+            print_commit(
+                &mut buffer,
+                &current,
+                &snapshot,
+                &ref_map,
+                &current_branch,
+                &head_hash,
+                oneline,
+                json,
+                &mut json_entries,
+            );
             shown += 1;
 
             current = snapshot.parents.first().copied().unwrap_or(ForgeHash::ZERO);
@@ -131,10 +161,15 @@ pub fn run(count: u32, file: Option<String>, oneline: bool, all: bool, json: boo
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&json_entries)?);
+        let s = serde_json::to_string_pretty(&json_entries)?;
+        buffer.clear();
+        buffer.push_str(&s);
+        buffer.push('\n');
     } else if shown == 0 {
-        println!("No commits yet.");
+        buffer.push_str("No commits yet.\n");
     }
+
+    pager::show(buffer, no_pager, json);
 
     Ok(())
 }
@@ -172,7 +207,50 @@ fn commit_touches_file(
     })
 }
 
+/// Build the git-style decoration block for a commit, e.g.
+/// ` (HEAD -> main, dev)` or ` (HEAD)` for detached HEAD. Returns an empty
+/// string if there is nothing to show. Used by both default and oneline modes.
+fn format_decorations(
+    hash: &ForgeHash,
+    ref_map: &HashMap<ForgeHash, Vec<String>>,
+    current_branch: &Option<String>,
+    head_hash: &ForgeHash,
+) -> String {
+    if let Some(refs) = ref_map.get(hash) {
+        let mut parts: Vec<String> = Vec::new();
+        let is_head_commit = *hash == *head_hash;
+
+        for branch in refs {
+            // The branch matching the current branch (if HEAD points at this commit)
+            // gets the "HEAD -> " prefix and goes first.
+            if is_head_commit && current_branch.as_deref() == Some(branch.as_str()) {
+                parts.insert(
+                    0,
+                    format!("\x1b[1;36mHEAD -> \x1b[1;32m{}\x1b[0m", branch),
+                );
+            } else {
+                parts.push(format!("\x1b[1;32m{}\x1b[0m", branch));
+            }
+        }
+
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " \x1b[33m(\x1b[0m{}\x1b[33m)\x1b[0m",
+                parts.join("\x1b[33m, \x1b[0m")
+            )
+        }
+    } else if *hash == *head_hash && current_branch.is_none() {
+        // Detached HEAD: show "(HEAD)" so the user can see where they are.
+        " \x1b[33m(\x1b[1;36mHEAD\x1b[33m)\x1b[0m".to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn print_commit(
+    out: &mut String,
     hash: &ForgeHash,
     snapshot: &forge_core::object::snapshot::Snapshot,
     ref_map: &HashMap<ForgeHash, Vec<String>>,
@@ -193,61 +271,33 @@ fn print_commit(
             "date": snapshot.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
             "message": snapshot.message,
         }));
-    } else if oneline {
-        let decorations = if let Some(refs) = ref_map.get(hash) {
-            let parts: Vec<&str> = refs.iter().map(|s| s.as_str()).collect();
-            format!(" \x1b[33m({})\x1b[0m", parts.join(", "))
-        } else {
-            String::new()
-        };
-        println!(
+        return;
+    }
+
+    let decorations = format_decorations(hash, ref_map, current_branch, head_hash);
+
+    if oneline {
+        let _ = writeln!(
+            out,
             "\x1b[33m{}\x1b[0m{} {}",
             hash.short(),
             decorations,
             snapshot.message
         );
     } else {
-        let decorations = if let Some(refs) = ref_map.get(hash) {
-            let mut parts: Vec<String> = Vec::new();
-            for branch in refs {
-                if current_branch.as_deref() == Some(branch.as_str()) {
-                    parts.insert(
-                        0,
-                        format!("\x1b[1;36mHEAD -> \x1b[1;32m{}\x1b[0m", branch),
-                    );
-                } else {
-                    parts.push(format!("\x1b[1;32m{}\x1b[0m", branch));
-                }
-            }
-            if parts.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " \x1b[33m(\x1b[0m{}\x1b[33m)\x1b[0m",
-                    parts.join("\x1b[33m, \x1b[0m")
-                )
-            }
-        } else if *hash == *head_hash && current_branch.is_none() {
-            " \x1b[33m(\x1b[1;36mHEAD\x1b[33m)\x1b[0m".to_string()
-        } else {
-            String::new()
-        };
-
-        println!(
-            "\x1b[33mcommit {}\x1b[0m{}",
-            hash.short(),
-            decorations
-        );
-        println!(
+        let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m{}", hash.short(), decorations);
+        let _ = writeln!(
+            out,
             "Author: {} <{}>",
             snapshot.author.name, snapshot.author.email
         );
-        println!(
+        let _ = writeln!(
+            out,
             "Date:   {}",
             snapshot.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         );
-        println!();
-        println!("    {}", snapshot.message);
-        println!();
+        let _ = writeln!(out);
+        let _ = writeln!(out, "    {}", snapshot.message);
+        let _ = writeln!(out);
     }
 }

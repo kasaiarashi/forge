@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { TextInput, Button, FormControl, Flash } from '@primer/react';
 import RepoHeader from '../components/RepoHeader';
-import api from '../api';
+import api, { repoPath } from '../api';
 
 export default function NewIssue() {
-  const { repo = '' } = useParams();
+  const repo = useRepoParam();
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
@@ -23,7 +24,7 @@ export default function NewIssue() {
         .map(l => l.trim())
         .filter(l => l.length > 0);
       await api.createIssue(repo, title.trim(), body, labelArray);
-      navigate(`/${encodeURIComponent(repo)}/issues`);
+      navigate(`/${repoPath(repo)}/issues`);
     } catch (e: any) {
       setError(e.message || 'Failed to create issue');
       setSubmitting(false);
@@ -78,7 +79,7 @@ export default function NewIssue() {
               <Button variant="primary" onClick={handleSubmit} disabled={submitting || !title.trim()}>
                 Submit new issue
               </Button>
-              <Link to={`/${encodeURIComponent(repo)}/issues`} style={{ color: 'var(--fg-muted)', textDecoration: 'none' }}>
+              <Link to={`/${repoPath(repo)}/issues`} style={{ color: 'var(--fg-muted)', textDecoration: 'none' }}>
                 Cancel
               </Link>
             </div>

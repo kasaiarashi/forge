@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useRepoParam } from '../hooks/useRepoParam';
 import { Flash, Spinner, Label } from '@primer/react';
 import { TagIcon, PackageIcon } from '@primer/octicons-react';
 import api from '../api';
@@ -18,7 +18,7 @@ function formatSize(bytes: number): string {
 }
 
 export default function Releases() {
-  const { repo } = useParams<{ repo: string }>();
+  const repo = useRepoParam();
   const [releases, setReleases] = useState<ReleaseInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
