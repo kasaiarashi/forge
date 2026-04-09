@@ -343,11 +343,17 @@ enum Commands {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
+    if let Err(err) = run_cli(cli) {
+        print_pretty_error(err);
+        std::process::exit(1);
+    }
+}
 
+fn run_cli(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init => commands::init::run()?,
         Commands::Add { paths } => commands::add::run(paths)?,
@@ -388,4 +394,127 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ── Pretty error reporting ───────────────────────────────────────────────────
+
+/// Pretty-print an error from any subcommand. The interesting case is a
+/// `tonic::Status` bubbled up from a gRPC call — those carry rich metadata
+/// that's noisy as a Display impl, so we strip it down to a one-line message
+/// and offer a contextual next step (login prompt for Unauthenticated, etc).
+fn print_pretty_error(err: anyhow::Error) {
+    if let Some(status) = find_tonic_status(&err) {
+        match status.code() {
+            tonic::Code::Unauthenticated => {
+                eprintln!("\x1b[1;31merror:\x1b[0m not authenticated");
+                if !status.message().is_empty() {
+                    eprintln!("       \x1b[2m{}\x1b[0m", status.message());
+                }
+                eprintln!();
+                offer_login();
+                return;
+            }
+            tonic::Code::PermissionDenied => {
+                eprintln!("\x1b[1;31merror:\x1b[0m permission denied");
+                if !status.message().is_empty() {
+                    eprintln!("       \x1b[2m{}\x1b[0m", status.message());
+                }
+                eprintln!();
+                eprintln!(
+                    "Your account is logged in but doesn't have the required role on this resource."
+                );
+                eprintln!("Ask a server admin to grant access.");
+                return;
+            }
+            tonic::Code::NotFound => {
+                eprintln!("\x1b[1;31merror:\x1b[0m {}", status.message());
+                return;
+            }
+            tonic::Code::FailedPrecondition | tonic::Code::AlreadyExists => {
+                eprintln!("\x1b[1;31merror:\x1b[0m {}", status.message());
+                return;
+            }
+            tonic::Code::Unavailable => {
+                eprintln!("\x1b[1;31merror:\x1b[0m forge server unavailable");
+                if !status.message().is_empty() {
+                    eprintln!("       \x1b[2m{}\x1b[0m", status.message());
+                }
+                eprintln!();
+                eprintln!("Check that the server is running and reachable.");
+                return;
+            }
+            _ => {
+                eprintln!("\x1b[1;31merror:\x1b[0m {}", status.message());
+                return;
+            }
+        }
+    }
+    eprintln!("\x1b[1;31merror:\x1b[0m {err}");
+}
+
+/// Walk an `anyhow::Error` chain looking for a `tonic::Status`.
+fn find_tonic_status(err: &anyhow::Error) -> Option<&tonic::Status> {
+    if let Some(s) = err.downcast_ref::<tonic::Status>() {
+        return Some(s);
+    }
+    let mut source: Option<&dyn std::error::Error> = err.source();
+    while let Some(s) = source {
+        if let Some(status) = s.downcast_ref::<tonic::Status>() {
+            return Some(status);
+        }
+        source = s.source();
+    }
+    None
+}
+
+/// Print a "Run forge login" suggestion and, if the user is on a TTY,
+/// prompt to run it inline. After the login completes, the user re-runs
+/// their original command.
+fn offer_login() {
+    use std::io::{IsTerminal, Write};
+
+    // Try to discover the workspace's default remote so the suggestion is
+    // ready-to-paste with the correct --server.
+    let server = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| forge_core::workspace::Workspace::discover(&cwd).ok())
+        .and_then(|ws| ws.config().ok())
+        .and_then(|c| c.default_remote_url().map(str::to_string));
+
+    let suggestion = match &server {
+        Some(s) => format!("forge login --server {s}"),
+        None => "forge login --server <url>".to_string(),
+    };
+
+    eprintln!("To authenticate, run:");
+    eprintln!();
+    eprintln!("    {suggestion}");
+    eprintln!();
+
+    // Only prompt interactively if both stdin and stderr are TTYs — never
+    // try to prompt from CI / piped input.
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return;
+    }
+
+    eprint!("Login now? [Y/n] ");
+    let _ = std::io::stderr().flush();
+    let mut buf = String::new();
+    if std::io::stdin().read_line(&mut buf).is_err() {
+        return;
+    }
+    let answer = buf.trim().to_lowercase();
+    if !(answer.is_empty() || answer == "y" || answer == "yes") {
+        return;
+    }
+
+    // Run the regular interactive login flow. It'll prompt for username +
+    // password (rpassword), call AuthService::Login, mint a PAT, and store
+    // it in the keychain / credentials file.
+    if let Err(e) = commands::login::run(server, None, None, None) {
+        eprintln!("\x1b[1;31mlogin failed:\x1b[0m {e}");
+        return;
+    }
+    eprintln!();
+    eprintln!("\x1b[32mLogged in.\x1b[0m Re-run your command.");
 }
