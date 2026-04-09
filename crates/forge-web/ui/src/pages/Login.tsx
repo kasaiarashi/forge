@@ -7,6 +7,7 @@ import {
   Flash,
 } from '@primer/react';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -15,6 +16,7 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const { login } = useAuth();
+  const { resolvedMode } = useTheme();
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -36,11 +38,17 @@ export default function Login() {
 
   return (
     <div className="login-wrapper" style={{ marginTop: '-24px' }}>
-      {/* Logo */}
-      <div style={{ marginBottom: '24px' }}>
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="#24292f">
-          <path d="M12 2L4 6v2h16V6L12 2zm-1 8H5v8l7 4 7-4v-8h-6v6l-1 .5-1-.5v-6z" />
-        </svg>
+      {/* Hero logo: full square wordmark+glyph at 128x128. Swaps the
+          BW source for the WB variant when the active theme is night so
+          the glyph stays legible on either background. */}
+      <div style={{ marginBottom: '32px', marginTop: '8px' }}>
+        <img
+          src={resolvedMode === 'night' ? '/forge-logo-dark.svg' : '/forge-logo.svg'}
+          alt="Forge VCS"
+          width={128}
+          height={128}
+          style={{ display: 'block' }}
+        />
       </div>
 
       <h1 style={{ fontSize: '24px', fontWeight: 300, color: 'var(--fg-default)', marginBottom: '16px', marginTop: 0 }}>

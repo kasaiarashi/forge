@@ -1,5 +1,9 @@
 # Forge
 
+<p align="center">
+  <img src="docs/branding/forge-logo.svg" width="320" alt="Forge VCS" />
+</p>
+
 A version control system built in Rust, purpose-built for Unreal Engine game development.
 
 Forge treats large binary assets (.uasset, .umap, .uexp, .ubulk) as first-class citizens, provides Perforce-style file locking, and offers a simple CLI designed for game developers.

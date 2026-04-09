@@ -7,6 +7,7 @@ import {
   Flash,
 } from '@primer/react';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
 
 /**
  * First-run setup wizard. Renders only when `/api/auth/initialized` returns
@@ -19,6 +20,7 @@ import { useAuth } from '../context/AuthContext';
 export default function Setup() {
   const navigate = useNavigate();
   const { bootstrap } = useAuth();
+  const { resolvedMode } = useTheme();
 
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
@@ -60,10 +62,15 @@ export default function Setup() {
 
   return (
     <div className="login-wrapper" style={{ marginTop: '-24px' }}>
-      <div style={{ marginBottom: '24px' }}>
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="#24292f">
-          <path d="M12 2L4 6v2h16V6L12 2zm-1 8H5v8l7 4 7-4v-8h-6v6l-1 .5-1-.5v-6z" />
-        </svg>
+      {/* Same 128x128 hero treatment as Login, with the same theme swap. */}
+      <div style={{ marginBottom: '32px', marginTop: '8px' }}>
+        <img
+          src={resolvedMode === 'night' ? '/forge-logo-dark.svg' : '/forge-logo.svg'}
+          alt="Forge VCS"
+          width={128}
+          height={128}
+          style={{ display: 'block' }}
+        />
       </div>
 
       <h1

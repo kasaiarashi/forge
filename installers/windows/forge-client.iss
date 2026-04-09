@@ -30,7 +30,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ChangesEnvironment=yes
 PrivilegesRequired=admin
 WizardStyle=modern
-SetupIconFile=compiler:SetupClassicIcon.ico
+SetupIconFile=forge.ico
 UninstallDisplayIcon={app}\forge.exe
 
 [Languages]

@@ -11,7 +11,6 @@ import {
   SunIcon,
   MoonIcon,
   SearchIcon,
-  RepoIcon,
   PlusIcon,
   BellIcon,
 } from '@primer/octicons-react';
@@ -43,8 +42,19 @@ export default function Layout({ children }: LayoutProps) {
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <Header style={{ background: 'var(--header-bg)', padding: '16px', borderBottom: 'none' }}>
         <Header.Item>
-          <Header.Link as={Link} to="/" style={{ color: 'var(--header-logo)' }}>
-            <RepoIcon size={32} />
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-logo)', display: 'flex', alignItems: 'center' }}>
+            {/* Compact 48x48 brand mark. The navbar background is always
+                dark (a deep slate, regardless of day/night theme), so we
+                always serve the white-on-transparent simple variant — no
+                CSS invert hack. The actual hero placement is on the
+                Dashboard page itself (see Dashboard.tsx). */}
+            <img
+              src="/forge-logo-simple-dark.svg"
+              alt="Forge VCS"
+              width={48}
+              height={48}
+              style={{ display: 'block' }}
+            />
           </Header.Link>
         </Header.Item>
 
@@ -148,7 +158,17 @@ export default function Layout({ children }: LayoutProps) {
           row when there's room. */}
       <footer className="forge-footer" style={{ borderTop: 'none', marginTop: '40px', paddingTop: '40px', paddingBottom: '40px', maxWidth: '1012px', margin: '40px auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '32px', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginRight: '24px' }}>
-          <span style={{ color: 'var(--fg-muted)', display: 'flex' }}><RepoIcon size={24} /></span>
+          {/* Footer glyph swaps with the active theme — BW on the day
+              theme's white-ish background, WB on the night theme's dark
+              background. Slightly muted with opacity to match the rest
+              of the footer copy. */}
+          <img
+            src={resolvedMode === 'night' ? '/forge-logo-simple-dark.svg' : '/forge-logo-simple.svg'}
+            alt=""
+            width={24}
+            height={24}
+            style={{ display: 'block', opacity: 0.7 }}
+          />
           {/* Non-breaking space after the © glyph so the year doesn't
               wrap onto a new line on narrow viewports. */}
           <span>©&nbsp;2026 Forge VCS</span>
