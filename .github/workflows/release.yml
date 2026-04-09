@@ -167,12 +167,14 @@ jobs:
             installers\windows\forge-server.iss
         shell: pwsh
 
-      # ── UE Plugin (Fab-compliant source zip) ──
+      # ── UE Plugin (Fab zip) ──
       # Stages the plugin into the directory layout Fab requires
-      # (Config / Content / Resources / Source / .uplugin) — explicitly
-      # excludes Binaries/ and Intermediate/ since Fab plugins ship as
-      # source and UE compiles them on the user's machine after install.
-      - name: Package UE Plugin (Fab source zip)
+      # (Config / Content / Resources / Source / Binaries / .uplugin)
+      # and zips it. Binaries/ is intentionally INCLUDED — Fab code
+      # plugins ship pre-built so end users don't need a UE build
+      # environment to install. Only Intermediate/ is excluded since
+      # those are local-only build outputs that UE recreates per host.
+      - name: Package UE Plugin (Fab zip)
         shell: pwsh
         run: |
           $plugin = "plugin\ForgeSourceControl\Plugins\ForgeSourceControl"
@@ -184,6 +186,7 @@ jobs:
           Copy-Item -Recurse "$plugin\Content"   $stage
           Copy-Item -Recurse "$plugin\Resources" $stage
           Copy-Item -Recurse "$plugin\Source"    $stage
+          Copy-Item -Recurse "$plugin\Binaries"  $stage
           $zip = "ForgeSourceControl-${{ github.ref_name }}.zip"
           if (Test-Path $zip) { Remove-Item $zip }
           Compress-Archive -Path $stage -DestinationPath $zip

@@ -294,6 +294,7 @@ fn load_serve_config(cli: &Cli) -> Result<ServerConfig> {
         info!("Created default config: {}", config_path.display());
     }
     let mut config = ServerConfig::load(config_path)?;
+    resolve_base_path_relative_to_config(&mut config, config_path);
     if let Some(ref listen) = cli.listen {
         config.server.listen = listen.clone();
     }
@@ -301,6 +302,30 @@ fn load_serve_config(cli: &Cli) -> Result<ServerConfig> {
         config.storage.base_path = storage.into();
     }
     Ok(config)
+}
+
+/// If `config.storage.base_path` is a relative path, anchor it to the
+/// directory the config file lives in. Without this, `base_path = "./forge-data"`
+/// (the default) resolves against whatever cwd happened to launch the
+/// server — and a restart from a different shell silently picks a brand
+/// new directory, mints a fresh self-signed CA, and breaks every client
+/// that had already pinned the old fingerprint.
+///
+/// We canonicalize the config path so the parent is always absolute even
+/// when the user passed `--config forge-server.toml` (parent would be
+/// empty string otherwise). Falls back to cwd only if canonicalization
+/// fails — which would mean the file doesn't exist, in which case we're
+/// already in a degraded state and the existing relative behavior is no
+/// worse than before.
+fn resolve_base_path_relative_to_config(config: &mut ServerConfig, config_path: &std::path::Path) {
+    if config.storage.base_path.is_absolute() {
+        return;
+    }
+    let config_dir = std::fs::canonicalize(config_path)
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    config.storage.base_path = config_dir.join(&config.storage.base_path);
 }
 
 /// Run the gRPC server until `shutdown` resolves. Extracted from the
@@ -635,6 +660,11 @@ fn load_config_for_admin(cli: &Cli) -> Result<ServerConfig> {
     } else {
         ServerConfig::default()
     };
+    // Same config-relative resolution as load_serve_config so admin
+    // commands operate on the *same* storage root the server uses.
+    if config_path.exists() {
+        resolve_base_path_relative_to_config(&mut config, config_path);
+    }
     if let Some(ref storage) = cli.storage {
         config.storage.base_path = storage.into();
     }

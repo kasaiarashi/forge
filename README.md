@@ -8,6 +8,39 @@ A version control system built in Rust, purpose-built for Unreal Engine game dev
 
 Forge treats large binary assets (.uasset, .umap, .uexp, .ubulk) as first-class citizens, provides Perforce-style file locking, and offers a simple CLI designed for game developers.
 
+## Quick Setup
+
+Install the Forge server on the host that will store your repos. Clients connect to it over gRPC on port `9876` by default.
+
+### Linux
+
+```bash
+curl -fsSL https://github.com/kasaiarashi/forge/releases/download/v0.1.0/forge-server-linux-amd64.tar.gz \
+  | sudo tar xz -C /opt \
+  && sudo /opt/forge-server-linux-amd64/install.sh
+```
+
+The bundled `install.sh` (also at [`installers/linux/install.sh`](installers/linux/install.sh)) drops `forge-server` and `forge-web` into `/usr/local/bin`, the web UI into `/usr/local/share/forge/ui`, configs into `/etc/forge/`, and data into `/var/lib/forge/`. Override any of these via `PREFIX=`, `CONFIG_DIR=`, `DATA_DIR=` env vars.
+
+### macOS
+
+```bash
+brew install kasaiarashi/forge/forge-server
+brew services start forge-server
+```
+
+The tap lives at [kasaiarashi/homebrew-forge](https://github.com/kasaiarashi/homebrew-forge). Configs land in `$(brew --prefix)/etc/forge/` and data in `$(brew --prefix)/var/forge/`.
+
+### Windows
+
+Download and run the server installer:
+
+[**ForgeServer-Windows-x64-Setup.exe**](https://github.com/kasaiarashi/forge/releases/download/v0.1.0/ForgeServer-Windows-x64-Setup.exe)
+
+The installer registers Forge as a Windows service, drops a default `forge-server.toml`, and starts the service automatically.
+
+After install on any platform, watch the server log for the **TLS CA fingerprint** line — clients verify it on first `forge login` to pin the self-signed CA (TOFU).
+
 ## Why Forge?
 
 Game projects break Git. Game projects break Perforce. Forge was built because neither tool was designed for the reality of modern game development: repos with tens of thousands of multi-gigabyte binary assets, artists and programmers on the same team, and builds that can't wait for version control to catch up.
