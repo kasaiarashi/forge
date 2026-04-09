@@ -142,14 +142,18 @@ export default function Layout({ children }: LayoutProps) {
         {children}
       </main>
 
-      <footer className="forge-footer" style={{ borderTop: 'none', marginTop: '40px', paddingTop: '40px', paddingBottom: '40px', maxWidth: '1012px', margin: '40px auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+      {/* `gap: 32px` + `flex-wrap: wrap` keeps the © block and the link
+          row from kissing on wide screens AND lets them stack cleanly on
+          narrow ones. `space-between` still expands the gap to fill the
+          row when there's room. */}
+      <footer className="forge-footer" style={{ borderTop: 'none', marginTop: '40px', paddingTop: '40px', paddingBottom: '40px', maxWidth: '1012px', margin: '40px auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '32px', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginRight: '24px' }}>
           <span style={{ color: 'var(--fg-muted)', display: 'flex' }}><RepoIcon size={24} /></span>
-          {/* Slight extra spacing after the © glyph using a non-breaking
-              space so it doesn't visually crowd the year. */}
-          <span style={{ marginLeft: '4px' }}>©&nbsp; 2026 Forge VCS</span>
+          {/* Non-breaking space after the © glyph so the year doesn't
+              wrap onto a new line on narrow viewports. */}
+          <span>©&nbsp;2026 Forge VCS</span>
         </div>
-        <div style={{ display: 'flex', gap: '16px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
           <FooterLink to="/terms">Terms</FooterLink>
           <FooterLink to="/privacy">Privacy</FooterLink>
           <FooterLink to="/security">Security</FooterLink>

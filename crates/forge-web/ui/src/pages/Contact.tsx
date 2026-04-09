@@ -95,11 +95,11 @@ export default function ContactPage() {
           If you've found a bug in the upstream Forge VCS code (CLI, gRPC
           server, web UI, or the actions engine), the project lives at{' '}
           <a
-            href="https://github.com/anthropics/forge-vcs"
+            href="https://github.com/kasaiarashi/forge"
             target="_blank"
             rel="noopener noreferrer"
           >
-            github.com/anthropics/forge-vcs
+            github.com/kasaiarashi/forge
           </a>
           . Open an issue with reproduction steps and your{' '}
           <code>forge --version</code> + <code>forge-server --version</code>

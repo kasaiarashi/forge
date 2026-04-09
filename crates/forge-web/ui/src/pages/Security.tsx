@@ -142,7 +142,7 @@ export default function SecurityPage() {
           If you've found a security issue in the upstream Forge VCS
           source code, please report it privately via the{' '}
           <a
-            href="https://github.com/anthropics/forge-vcs/security/advisories/new"
+            href="https://github.com/kasaiarashi/forge/security/advisories/new"
             target="_blank"
             rel="noopener noreferrer"
           >
