@@ -181,24 +181,12 @@ export default function RepoTree() {
           </div>
           <div style={{ padding: '16px' }}>
             <p style={{ color: 'var(--fg-muted)', fontSize: '14px', margin: '0 0 16px 0' }}>
-              Get started by creating a new file or pushing an existing repo from the command line.
+              This repository has no commits yet. Create one from the command line:
             </p>
 
             <div style={{ marginBottom: '16px' }}>
               <div style={{ fontSize: '12px', color: 'var(--fg-muted)', marginBottom: '4px' }}>
-                Quick setup — clone URL
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <TextInput value={`forge clone ${cloneUrl}`} readOnly block monospace size="small" />
-                <Button leadingVisual={CopyIcon} size="small" onClick={copyCloneUrl}>
-                  {cloneCopied ? 'Copied!' : 'Copy'}
-                </Button>
-              </div>
-            </div>
-
-            <div style={{ marginBottom: '16px' }}>
-              <div style={{ fontSize: '12px', color: 'var(--fg-muted)', marginBottom: '4px' }}>
-                …or create a new repository on the command line
+                Create a new repository on the command line
               </div>
               <pre style={{ background: 'var(--bg-canvas-inset)', padding: '12px', borderRadius: '6px', fontSize: '12px', overflow: 'auto', margin: 0 }}>
 {quickstartInit.join('\n')}
