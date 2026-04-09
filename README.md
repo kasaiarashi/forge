@@ -15,12 +15,10 @@ Install the Forge server on the host that will store your repos. Clients connect
 ### Linux
 
 ```bash
-curl -fsSL https://github.com/kasaiarashi/forge/releases/download/v0.1.0/forge-server-linux-amd64.tar.gz \
-  | sudo tar xz -C /opt \
-  && sudo /opt/forge-server-linux-amd64/install.sh
+curl -fsSL https://raw.githubusercontent.com/kasaiarashi/forge/master/installers/linux/install.sh | sudo bash
 ```
 
-The bundled `install.sh` (also at [`installers/linux/install.sh`](installers/linux/install.sh)) drops `forge-server` and `forge-web` into `/usr/local/bin`, the web UI into `/usr/local/share/forge/ui`, configs into `/etc/forge/`, and data into `/var/lib/forge/`. Override any of these via `PREFIX=`, `CONFIG_DIR=`, `DATA_DIR=` env vars.
+The script ([`installers/linux/install.sh`](installers/linux/install.sh)) downloads the latest release tarball, extracts it, drops `forge-server` and `forge-web` into `/usr/local/bin`, the web UI into `/usr/local/share/forge/ui`, configs into `/etc/forge/`, and data into `/var/lib/forge/`. Override any of these via `PREFIX=`, `CONFIG_DIR=`, `DATA_DIR=`, or pin a specific version with `FORGE_VERSION=v0.1.0`.
 
 ### macOS
 
