@@ -4,11 +4,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Web UI server configuration. Auth is no longer carried here — it lives
+/// entirely on the forge-server side now (users + sessions + PATs in the
+/// shared SQLite metadata DB). This server is just an HTTP shell that
+/// translates browser cookies into gRPC bearer tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub web: WebConfig,
     pub server: ServerConfig,
-    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,17 +31,6 @@ pub struct ServerConfig {
     pub grpc_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthConfig {
-    /// bcrypt hash of the admin password.
-    /// Generate with: forge-web hash-password <password>
-    pub admin_password_hash: String,
-    /// Secret used to sign JWT tokens
-    pub jwt_secret: String,
-    /// How long tokens last, in hours
-    pub token_ttl_hours: u64,
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -49,11 +41,6 @@ impl Default for Config {
             },
             server: ServerConfig {
                 grpc_url: "http://localhost:9876".to_string(),
-            },
-            auth: AuthConfig {
-                admin_password_hash: String::new(),
-                jwt_secret: "change-me-to-random-string".to_string(),
-                token_ttl_hours: 24,
             },
         }
     }

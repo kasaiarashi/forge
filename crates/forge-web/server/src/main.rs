@@ -48,11 +48,6 @@ struct Cli {
 enum Commands {
     /// Generate a default forge-web.toml config file
     Init,
-    /// Hash a password for use in the config file
-    HashPassword {
-        /// The plaintext password to hash
-        password: String,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +63,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Get or create the gRPC client connection.
+    /// Get or create the gRPC client connection. Idempotent and lazy.
     pub async fn grpc_client(&self) -> anyhow::Result<ForgeGrpcClient> {
         // Fast path: already connected.
         {
@@ -86,6 +81,22 @@ impl AppState {
         let client = ForgeGrpcClient::connect(&self.config.server.grpc_url).await?;
         *guard = Some(client.clone());
         Ok(client)
+    }
+
+    /// Build a fresh `AuthServiceClient` for one request, with the current
+    /// task-local session token attached. Used by `auth.rs` handlers.
+    pub async fn grpc_auth_client(
+        &self,
+    ) -> anyhow::Result<
+        forge_proto::forge::auth_service_client::AuthServiceClient<
+            tonic::service::interceptor::InterceptedService<
+                tonic::transport::Channel,
+                crate::grpc_client::BearerInterceptor,
+            >,
+        >,
+    > {
+        let client = self.grpc_client().await?;
+        Ok(client.auth())
     }
 }
 
@@ -108,13 +119,15 @@ async fn main() -> anyhow::Result<()> {
             }
             Config::write_default(path)?;
             println!("Wrote default config to {}", path.display());
-            println!("Edit the file and set auth.admin_password_hash.");
-            println!("Generate a hash with: forge-web hash-password <password>");
-            return Ok(());
-        }
-        Some(Commands::HashPassword { password }) => {
-            let hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST)?;
-            println!("{hash}");
+            println!();
+            println!("Next steps:");
+            println!(
+                "  1. Make sure forge-server is running and create your first admin:"
+            );
+            println!("       forge-server user add --admin <username>");
+            println!("     (or visit /setup in the browser after starting forge-web).");
+            println!("  2. Start forge-web:");
+            println!("       forge-web");
             return Ok(());
         }
         None => {}
@@ -150,11 +163,33 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Build router ----
 
-    // Public auth routes (no session required).
+    // Auth routes. Login / logout / me / setup wizard are public; everything
+    // else (token mint, session list, user admin, repo ACL admin) is gated by
+    // the gRPC server's per-handler authz check, which reads the bearer token
+    // we forward from the cookie.
     let auth_routes = Router::new()
         .route("/login", post(auth::login))
         .route("/logout", post(auth::logout))
-        .route("/me", get(auth::me));
+        .route("/me", get(auth::me))
+        .route("/initialized", get(auth::is_initialized))
+        .route("/bootstrap", post(auth::bootstrap_admin))
+        .route("/tokens", get(auth::list_tokens).post(auth::create_token))
+        .route("/tokens/:id", delete(auth::delete_token))
+        .route(
+            "/sessions",
+            get(auth::list_sessions),
+        )
+        .route("/sessions/:id", delete(auth::delete_session))
+        .route(
+            "/users",
+            get(auth::list_users).post(auth::create_user),
+        )
+        .route("/users/:id", delete(auth::delete_user))
+        .route(
+            "/repos/:repo/members",
+            get(auth::list_repo_members).post(auth::grant_repo_role),
+        )
+        .route("/repos/:repo/members/:user_id", delete(auth::revoke_repo_role));
 
     // Public read-only API routes (no auth needed for browsing).
     let public_api = Router::new()
@@ -180,11 +215,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/:repo/releases", get(api_actions::list_releases))
         .route("/repos/:repo/releases/:release_id", get(api_actions::get_release));
 
-    // Protected API routes (require auth for writes/admin).
+    // Mutating routes. The gRPC server's per-handler authz now enforces
+    // authentication and per-repo roles, so the web server doesn't need a
+    // separate require_auth middleware. The session_token_layer (installed
+    // below at the top-level router) takes care of forwarding the cookie
+    // through to the upstream gRPC call.
     let protected_api = Router::new()
         .route("/repos", post(api::create_repo))
         .route("/repos/:repo", put(api::update_repo).delete(api::delete_repo))
-        // Issues & Pull Requests (protected writes)
+        // Issues & Pull Requests (writes)
         .route("/repos/:repo/issues", post(api::create_issue))
         .route("/repos/:repo/issues/:id", put(api::update_issue))
         .route("/repos/:repo/pulls", post(api::create_pull_request))
@@ -193,15 +232,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/:repo/locks/acquire", post(api::acquire_lock))
         .route("/repos/:repo/locks/:path", delete(api::release_lock))
         .route("/server/info", get(api::server_info))
-        // Actions (protected writes)
+        // Actions (writes)
         .route("/repos/:repo/workflows", post(api_actions::create_workflow))
         .route("/repos/:repo/workflows/:id", put(api_actions::update_workflow).delete(api_actions::delete_workflow))
         .route("/repos/:repo/workflows/:id/trigger", post(api_actions::trigger_workflow))
-        .route("/repos/:repo/runs/:run_id/cancel", post(api_actions::cancel_run))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_auth,
-        ));
+        .route("/repos/:repo/runs/:run_id/cancel", post(api_actions::cancel_run));
 
     let api_routes = Router::new()
         .nest("/auth", auth_routes)
@@ -251,6 +286,13 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .nest("/api", api_routes)
         .fallback_service(spa_service)
+        // Run every request inside the session-token task-local scope so the
+        // gRPC client can read the cookie's session token without rewriting
+        // every handler signature. Layer order matters: cors must wrap the
+        // session layer because the cors preflight responses don't need a
+        // token. The session layer wraps with_state so handlers see the
+        // task-local already populated.
+        .layer(middleware::from_fn(auth::session_token_layer))
         .layer(cors)
         .with_state(state);
 
