@@ -34,4 +34,5 @@ pub mod login;
 pub mod logout;
 pub mod trust;
 pub mod update;
+pub mod version;
 pub mod whoami;

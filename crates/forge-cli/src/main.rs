@@ -380,6 +380,9 @@ enum Commands {
         server: Option<String>,
     },
 
+    /// Print client version; inside a repo, also print the server version.
+    Version,
+
     /// Pin a forge server's self-signed TLS certificate (trust on first use).
     ///
     /// Connects to the given `https://<host>:<port>` URL, captures the
@@ -449,6 +452,7 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Login { server, token, username, password, yes } => commands::login::run(server, token, username, password, yes)?,
         Commands::Logout { server } => commands::logout::run(server)?,
         Commands::Whoami { server } => commands::whoami::run(server)?,
+        Commands::Version => commands::version::run(cli.json)?,
         Commands::Trust { server, yes } => commands::trust::run(server, yes)?,
     }
 
