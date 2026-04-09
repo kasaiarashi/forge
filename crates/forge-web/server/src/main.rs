@@ -6,6 +6,8 @@ mod api_actions;
 mod auth;
 mod config;
 mod grpc_client;
+#[cfg(windows)]
+mod service;
 mod tls_autogen;
 
 use std::path::PathBuf;
@@ -34,16 +36,22 @@ use crate::grpc_client::ForgeGrpcClient;
 #[command(name = "forge-web", about = "Forge VCS Web UI server")]
 struct Cli {
     /// Path to config file
-    #[arg(long, default_value = "forge-web.toml")]
+    #[arg(long, default_value = "forge-web.toml", global = true)]
     config: PathBuf,
 
     /// Address to listen on (overrides config)
-    #[arg(long)]
+    #[arg(long, global = true)]
     listen: Option<String>,
 
     /// gRPC URL of forge-server (overrides config)
-    #[arg(long)]
+    #[arg(long, global = true)]
     grpc_url: Option<String>,
+
+    /// Internal: hand off to the Windows Service Control Manager. The
+    /// installer-registered service has this flag baked into the binPath;
+    /// users should never set it manually.
+    #[arg(long, hide = true, global = true)]
+    as_service: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -53,6 +61,26 @@ struct Cli {
 enum Commands {
     /// Generate a default forge-web.toml config file
     Init,
+    /// Manage the Windows service (Windows only).
+    #[cfg(windows)]
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[cfg(windows)]
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Register forge-web with the Windows Service Control Manager and
+    /// configure it to start automatically on boot.
+    Install,
+    /// Stop and remove the forge-web Windows service.
+    Uninstall,
+    /// Start the installed service.
+    Start,
+    /// Stop the running service.
+    Stop,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,8 +239,10 @@ impl AppState {
 // Main
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+// main is intentionally synchronous for the same reason forge-server's is:
+// the SCM dispatch path inside `service::run_under_scm` builds its own
+// Tokio runtime, and a `#[tokio::main]` outer would prevent nesting one.
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     // Install a rustls crypto provider up-front. See twin comment in
@@ -242,10 +272,35 @@ async fn main() -> anyhow::Result<()> {
             println!("       forge-web");
             return Ok(());
         }
+        #[cfg(windows)]
+        Some(Commands::Service { ref action }) => {
+            return handle_service_command(action, &cli);
+        }
         None => {}
     }
 
-    // Load config.
+    let cfg = load_serve_config(&cli)?;
+
+    #[cfg(windows)]
+    {
+        if cli.as_service {
+            return service::run_under_scm(service::ServicePayload { config: cfg });
+        }
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(serve_inner(cfg, async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Ctrl-C received, shutting down");
+    }))
+}
+
+/// Load the TOML config and apply CLI overrides. Used by both the
+/// interactive serve path and the SCM dispatch path so they pick up
+/// identical configuration.
+fn load_serve_config(cli: &Cli) -> anyhow::Result<Config> {
     let mut cfg = if cli.config.exists() {
         Config::load(&cli.config)?
     } else {
@@ -255,25 +310,35 @@ async fn main() -> anyhow::Result<()> {
         );
         Config::default()
     };
+    if let Some(ref listen) = cli.listen {
+        cfg.web.listen = listen.clone();
+    }
+    if let Some(ref grpc_url) = cli.grpc_url {
+        cfg.server.grpc_url = grpc_url.clone();
+    }
+    Ok(cfg)
+}
 
-    // CLI overrides.
-    if let Some(listen) = cli.listen {
-        cfg.web.listen = listen;
-    }
-    if let Some(grpc_url) = cli.grpc_url {
-        cfg.server.grpc_url = grpc_url;
-    }
+/// Run the web frontend until `shutdown` resolves. Extracted from the
+/// inline body of `main` so the Windows service path can call it with
+/// an SCM-driven shutdown future, and the console path can pass
+/// `ctrl_c().await`.
+pub(crate) async fn serve_inner(
+    cfg: Config,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
 
     let listen_addr = cfg.web.listen.clone();
     let static_dir = PathBuf::from(&cfg.web.static_dir);
     let allowed_origins = cfg.web.allowed_origins.clone();
     let tls_cfg = cfg.web.tls.clone();
+    let tls_enabled = tls_cfg.enabled;
     let rate_limit = cfg.web.rate_limit.clone();
     // Secure cookie attribute: on when forge-web terminates TLS itself OR
     // when the operator explicitly opted in via `secure_cookies = true`. A
     // loopback plaintext dev server is the only scenario where this should
     // be off.
-    let secure_cookies = cfg.web.secure_cookies || tls_cfg.is_some();
+    let secure_cookies = cfg.web.secure_cookies || tls_enabled;
     if !secure_cookies {
         tracing::warn!(
             "secure_cookies is disabled AND no TLS configured — session \
@@ -456,12 +521,14 @@ async fn main() -> anyhow::Result<()> {
             ),
         ));
 
-    let hsts_layer = tls_cfg.as_ref().map(|_| {
-        SetResponseHeaderLayer::if_not_present(
+    let hsts_layer = if tls_enabled {
+        Some(SetResponseHeaderLayer::if_not_present(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-        )
-    });
+        ))
+    } else {
+        None
+    };
 
     // Rate limit layer — applied only to /api/auth/* so legitimate CI/CD
     // clients aren't throttled on push/pull hot paths. Keyed on the peer IP
@@ -517,74 +584,124 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid listen address '{listen_addr}': {e}"))?;
 
-    match tls_cfg {
-        Some(tls) => {
-            // Resolve cert/key paths, with auto-generate fallback under
-            // ./forge-web-certs/ if the operator didn't provide paths.
-            let cert_base = std::path::Path::new("./forge-web-certs");
-            let defaults = tls_autogen::TlsPaths::under(cert_base);
-            let paths = tls_autogen::TlsPaths {
-                ca_cert: defaults.ca_cert.clone(),
-                ca_key: defaults.ca_key.clone(),
-                leaf_cert: tls.cert_path.clone().unwrap_or(defaults.leaf_cert),
-                leaf_key: tls.key_path.clone().unwrap_or(defaults.leaf_key),
-            };
-            if tls.auto_generate {
-                let mut sans = tls.hostnames.clone();
-                let listen_ip = addr.ip();
-                if listen_ip.is_unspecified() {
-                    // Binding to 0.0.0.0 / :: — enumerate every reachable
-                    // non-loopback interface IP so LAN clients don't hit a
-                    // SAN mismatch without extra config.
-                    for local in local_non_loopback_ips() {
-                        let s = local.to_string();
-                        if !sans.iter().any(|h| h == &s) {
-                            sans.push(s);
-                        }
-                    }
-                } else {
-                    let host = listen_ip.to_string();
-                    if !sans.iter().any(|h| h == &host) {
-                        sans.push(host);
-                    }
-                }
-                tls_autogen::ensure(&paths, &sans)
-                    .map_err(|e| anyhow::anyhow!("auto-generating TLS: {e}"))?;
-            }
-
-            tracing::info!("forge-web listening on https://{addr}");
-            if let Some(fp) = tls_autogen::cert_fingerprint(&paths.ca_cert) {
-                tracing::warn!(
-                    "\n*** forge-web CA fingerprint (SHA-256):\n***   {fp}\n\
-                     *** Import {} into your OS trust store to remove the \
-                     browser warning.",
-                    paths.ca_cert.display()
-                );
-            }
-
-            let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-                &paths.leaf_cert,
-                &paths.leaf_key,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to load TLS cert/key ({:?}, {:?}): {e}",
-                    paths.leaf_cert,
-                    paths.leaf_key
-                )
-            })?;
-            axum_server::bind_rustls(addr, rustls)
-                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await?;
-        }
-        None => {
-            tracing::info!("forge-web listening on http://{addr} (plaintext)");
-            axum_server::bind(addr)
-                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await?;
-        }
+    // Single shared graceful-shutdown handle. We hand it to whichever
+    // axum-server `bind*` we end up using, then spawn a task that waits
+    // on the shutdown future and calls `graceful_shutdown` so the server
+    // drains in-flight requests instead of being killed mid-response.
+    let handle = axum_server::Handle::new();
+    {
+        let shutdown_handle = handle.clone();
+        tokio::spawn(async move {
+            shutdown.await;
+            tracing::info!("forge-web received shutdown signal");
+            shutdown_handle
+                .graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        });
     }
 
+    if tls_enabled {
+        let tls = tls_cfg;
+        // Resolve cert/key paths, with auto-generate fallback under
+        // ./forge-web-certs/ if the operator didn't provide paths.
+        let cert_base = std::path::Path::new("./forge-web-certs");
+        let defaults = tls_autogen::TlsPaths::under(cert_base);
+        let paths = tls_autogen::TlsPaths {
+            ca_cert: defaults.ca_cert.clone(),
+            ca_key: defaults.ca_key.clone(),
+            leaf_cert: tls.cert_path.clone().unwrap_or(defaults.leaf_cert),
+            leaf_key: tls.key_path.clone().unwrap_or(defaults.leaf_key),
+        };
+        if tls.auto_generate {
+            let mut sans = tls.hostnames.clone();
+            let listen_ip = addr.ip();
+            if listen_ip.is_unspecified() {
+                // Binding to 0.0.0.0 / :: — enumerate every reachable
+                // non-loopback interface IP so LAN clients don't hit a
+                // SAN mismatch without extra config.
+                for local in local_non_loopback_ips() {
+                    let s = local.to_string();
+                    if !sans.iter().any(|h| h == &s) {
+                        sans.push(s);
+                    }
+                }
+            } else {
+                let host = listen_ip.to_string();
+                if !sans.iter().any(|h| h == &host) {
+                    sans.push(host);
+                }
+            }
+            tls_autogen::ensure(&paths, &sans)
+                .map_err(|e| anyhow::anyhow!("auto-generating TLS: {e}"))?;
+        }
+
+        tracing::info!("forge-web listening on https://{addr}");
+        if let Some(fp) = tls_autogen::cert_fingerprint(&paths.ca_cert) {
+            tracing::warn!(
+                "\n*** forge-web CA fingerprint (SHA-256):\n***   {fp}\n\
+                 *** Import {} into your OS trust store to remove the \
+                 browser warning.",
+                paths.ca_cert.display()
+            );
+        }
+
+        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            &paths.leaf_cert,
+            &paths.leaf_key,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to load TLS cert/key ({:?}, {:?}): {e}",
+                paths.leaf_cert,
+                paths.leaf_key
+            )
+        })?;
+        axum_server::bind_rustls(addr, rustls)
+            .handle(handle)
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await?;
+    } else {
+        tracing::info!("forge-web listening on http://{addr} (plaintext)");
+        axum_server::bind(addr)
+            .handle(handle)
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await?;
+    }
+
+    tracing::info!("forge-web stopped cleanly");
     Ok(())
+}
+
+/// `forge-web service install/uninstall/start/stop` dispatcher.
+#[cfg(windows)]
+fn handle_service_command(action: &ServiceAction, cli: &Cli) -> anyhow::Result<()> {
+    match action {
+        ServiceAction::Install => {
+            let bin = std::env::current_exe()?;
+            let cfg_path = if cli.config.is_absolute() {
+                cli.config.clone()
+            } else {
+                std::env::current_dir()?.join(&cli.config)
+            };
+            service::install(bin, cfg_path)?;
+            println!("Forge VCS Web UI installed as a Windows service.");
+            println!("It will start automatically on boot. Run `forge-web service start` to start it now.");
+            Ok(())
+        }
+        ServiceAction::Uninstall => {
+            service::uninstall()?;
+            println!("Forge VCS Web UI service removed.");
+            Ok(())
+        }
+        ServiceAction::Start => {
+            service::start()?;
+            println!("Forge VCS Web UI service started.");
+            Ok(())
+        }
+        ServiceAction::Stop => {
+            service::stop()?;
+            println!("Forge VCS Web UI service stopped.");
+            Ok(())
+        }
+    }
 }

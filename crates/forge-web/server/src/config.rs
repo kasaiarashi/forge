@@ -32,18 +32,27 @@ pub struct WebConfig {
     #[serde(default)]
     pub allowed_origins: Vec<String>,
 
-    /// Set the `Secure` attribute on session cookies. Default true. Flip to
-    /// false only when developing against plaintext http://127.0.0.1 — any
-    /// other deployment should keep this on.
-    #[serde(default = "default_true")]
+    /// Set the `Secure` attribute on session cookies. **Defaults to false**
+    /// because the binary auto-escalates to true whenever it terminates TLS
+    /// itself (see `secure_cookies = cfg.web.secure_cookies || tls_cfg.is_some()`
+    /// in `main.rs`). Setting this to true while serving plaintext HTTP is
+    /// a footgun: the browser stores the cookie but refuses to send it
+    /// back, so the user can never stay logged in.
+    ///
+    /// Set to true explicitly only if you terminate TLS at a reverse proxy
+    /// (so forge-web sees plaintext but the browser sees HTTPS).
+    #[serde(default)]
     pub secure_cookies: bool,
 
-    /// Optional TLS configuration. When present, the web server terminates
-    /// TLS itself using rustls; when absent, it serves plaintext HTTP (the
-    /// only sensible scenario for that is loopback behind a separate TLS
-    /// reverse proxy).
+    /// TLS configuration. **TLS is on by default.** Even if the operator's
+    /// config file is missing the `[web.tls]` section entirely, the
+    /// `TlsConfig::default()` produces `enabled = true` + `auto_generate
+    /// = true`, so a fresh `./forge-web` start mints a local CA + leaf
+    /// and serves HTTPS. Set `[web.tls] enabled = false` explicitly for
+    /// plaintext (only safe behind a TLS-terminating reverse proxy or on
+    /// loopback).
     #[serde(default)]
-    pub tls: Option<TlsConfig>,
+    pub tls: TlsConfig,
 
     /// Request-rate limits applied to `/api/auth/*`. Absent = defaults.
     #[serde(default)]
@@ -54,16 +63,20 @@ pub struct WebConfig {
 ///
 /// Two modes:
 /// - **Manual**: supply `cert_path` and `key_path` pointing at real PEM
-///   files (e.g. a Let's Encrypt leaf).
-/// - **Auto-generate**: set `auto_generate = true` and leave the paths at
-///   their defaults. On first start, forge-web mints a local CA and a leaf
-///   cert covering `hostnames` + loopback, writes them under
-///   `./forge-web-certs/`, and reuses them on every restart. Browsers will
-///   still prompt for "unknown certificate authority" until the operator
-///   imports the CA into the OS trust store — there is no way around that
-///   without ACME.
+///   files (e.g. a Let's Encrypt leaf). Set `auto_generate = false`.
+/// - **Auto-generate** (the default): on first start, forge-web mints a
+///   local CA and a leaf cert covering `hostnames` + loopback, writes
+///   them under `./forge-web-certs/`, and reuses them on every restart.
+///   Browsers will still prompt for "unknown certificate authority"
+///   until the operator imports the CA into the OS trust store — there
+///   is no way around that without ACME.
+///
+/// To opt out of TLS entirely, set `[web.tls] enabled = false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
+    /// Master switch. Default true.
+    #[serde(default = "default_tls_enabled")]
+    pub enabled: bool,
     /// PEM-encoded certificate chain (leaf first). Defaults to
     /// `./forge-web-certs/server.crt`.
     #[serde(default)]
@@ -72,13 +85,34 @@ pub struct TlsConfig {
     /// `./forge-web-certs/server.key`.
     #[serde(default)]
     pub key_path: Option<PathBuf>,
-    /// When true, generate a CA + leaf on first start if missing.
-    #[serde(default)]
+    /// When true (the default), generate a CA + leaf on first start if
+    /// missing.
+    #[serde(default = "default_tls_autogen")]
     pub auto_generate: bool,
     /// DNS names / IP addresses for the leaf cert's SAN. Loopback entries
-    /// are always added implicitly.
+    /// and every detected non-loopback interface IP are always added
+    /// implicitly.
     #[serde(default)]
     pub hostnames: Vec<String>,
+}
+
+fn default_tls_enabled() -> bool {
+    true
+}
+fn default_tls_autogen() -> bool {
+    true
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_tls_enabled(),
+            cert_path: None,
+            key_path: None,
+            auto_generate: default_tls_autogen(),
+            hostnames: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,9 +155,6 @@ fn default_static_dir() -> String {
 fn default_grpc_url() -> String {
     "http://127.0.0.1:9876".to_string()
 }
-fn default_true() -> bool {
-    true
-}
 fn default_rl_per_second() -> u64 {
     1
 }
@@ -138,8 +169,8 @@ impl Default for Config {
                 listen: default_listen(),
                 static_dir: default_static_dir(),
                 allowed_origins: vec![],
-                secure_cookies: true,
-                tls: None,
+                secure_cookies: false,
+                tls: TlsConfig::default(),
                 rate_limit: RateLimitConfig::default(),
             },
             server: ServerConfig {
