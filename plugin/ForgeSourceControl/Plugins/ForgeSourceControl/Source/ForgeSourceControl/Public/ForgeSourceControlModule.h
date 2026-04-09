@@ -5,6 +5,8 @@
 
 #include "Modules/ModuleInterface.h"
 
+class FForgeSourceControlProvider;
+
 class FForgeSourceControlModule : public IModuleInterface
 {
 public:
@@ -13,7 +15,8 @@ public:
 
 	FForgeSourceControlModule() {}
 
+	FForgeSourceControlProvider& GetProvider() { return *Provider; }
+
 private:
-	/** The provider instance registered with the source control framework. */
-	class FForgeSourceControlProvider* Provider = nullptr;
+	FForgeSourceControlProvider* Provider = nullptr;
 };

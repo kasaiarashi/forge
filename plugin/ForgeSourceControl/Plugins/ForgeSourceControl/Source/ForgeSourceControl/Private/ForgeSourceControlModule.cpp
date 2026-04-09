@@ -3,6 +3,7 @@
 
 #include "ForgeSourceControlModule.h"
 #include "ForgeSourceControlProvider.h"
+#include "ForgeSourceControlWorkers.h"
 #include "Features/IModularFeatures.h"
 #include "Modules/ModuleManager.h"
 
@@ -11,6 +12,25 @@
 void FForgeSourceControlModule::StartupModule()
 {
 	Provider = new FForgeSourceControlProvider();
+
+	// Register workers for each supported operation.
+	Provider->RegisterWorker("Connect",
+		FGetForgeWorker::CreateStatic(&CreateForgeWorker<FForgeConnectWorker>));
+	Provider->RegisterWorker("UpdateStatus",
+		FGetForgeWorker::CreateStatic(&CreateForgeWorker<FForgeUpdateStatusWorker>));
+	Provider->RegisterWorker("CheckOut",
+		FGetForgeWorker::CreateStatic(&CreateForgeWorker<FForgeCheckOutWorker>));
+	Provider->RegisterWorker("CheckIn",
+		FGetForgeWorker::CreateStatic(&CreateForgeWorker<FForgeCheckInWorker>));
+	Provider->RegisterWorker("MarkForAdd",
+		FGetForgeWorker::CreateStatic(&CreateForgeWorker<FForgeMarkForAddWorker>));
+	Provider->RegisterWorker("Revert",
+		FGetForgeWorker::CreateStatic(&CreateForgeWorker<FForgeRevertWorker>));
+	Provider->RegisterWorker("Delete",
+		FGetForgeWorker::CreateStatic(&CreateForgeWorker<FForgeDeleteWorker>));
+	Provider->RegisterWorker("Sync",
+		FGetForgeWorker::CreateStatic(&CreateForgeWorker<FForgeSyncWorker>));
+
 	IModularFeatures::Get().RegisterModularFeature("SourceControl", Provider);
 }
 
