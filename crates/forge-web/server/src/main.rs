@@ -284,6 +284,29 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         if cli.as_service {
+            // The SCM launches every service process with
+            // `cwd = C:\Windows\System32`. That breaks every relative
+            // path in the config — `static_dir = "./ui"`,
+            // `ca_cert_path = "./forge-data/certs/ca.crt"`, the auto-TLS
+            // fallback under `./forge-web-certs/`, etc. Pin cwd to the
+            // binary's parent directory so service-mode matches the
+            // interactive "cd to install dir, run the exe" case.
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    if let Err(e) = std::env::set_current_dir(dir) {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to set cwd to {} before service dispatch",
+                            dir.display()
+                        );
+                    } else {
+                        tracing::info!(
+                            "service mode: cwd pinned to {}",
+                            dir.display()
+                        );
+                    }
+                }
+            }
             return service::run_under_scm(service::ServicePayload { config: cfg });
         }
     }
