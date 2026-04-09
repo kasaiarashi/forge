@@ -1,4 +1,5 @@
 mod commands;
+mod pager;
 
 use clap::{Parser, Subcommand};
 
@@ -77,6 +78,10 @@ enum Commands {
         /// Show commits from all branches
         #[arg(long)]
         all: bool,
+
+        /// Disable the pager and write output directly to stdout
+        #[arg(long)]
+        no_pager: bool,
     },
 
     /// Push commits to the server
@@ -317,7 +322,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Commit { message, all } => commands::snapshot::run(message, all, cli.json)?,
         Commands::Status => commands::status::run(cli.json)?,
         Commands::Diff { commit, staged, stat, extract, paths } => commands::diff::run(commit, staged, stat, extract, paths, cli.json)?,
-        Commands::Log { count, file, oneline, all } => commands::log::run(count, file, oneline, all, cli.json)?,
+        Commands::Log { count, file, oneline, all, no_pager } => commands::log::run(count, file, oneline, all, no_pager, cli.json)?,
         Commands::Push { force } => commands::push::run(force)?,
         Commands::Pull => commands::pull::run()?,
         Commands::Clone { url, repo, path } => commands::clone::run(url, path, repo)?,
