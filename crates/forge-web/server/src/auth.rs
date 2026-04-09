@@ -85,11 +85,24 @@ pub struct UserDto {
 
 #[derive(Debug, Serialize)]
 pub struct LoginOk {
+    /// Kept for backward compatibility with the existing SPA login form which
+    /// checks for `ok: true` to decide whether the call succeeded.
+    pub ok: bool,
+    /// Kept for backward compatibility — the SPA reads this top-level
+    /// `username` field directly. New SPA code should prefer `user.username`.
+    pub username: String,
     pub user: UserDto,
 }
 
 #[derive(Debug, Serialize)]
 pub struct WhoAmIDto {
+    /// Top-level fields the existing SPA reads directly. Do not remove
+    /// without coordinating with `crates/forge-web/ui/src/api.ts`'s `User`
+    /// interface.
+    pub username: String,
+    pub is_admin: bool,
+
+    // Newer shape used by post-rewrite SPA pages (token mgmt, sessions, etc.)
     pub authenticated: bool,
     pub user: Option<UserDto>,
     pub scopes: Vec<String>,
@@ -170,11 +183,14 @@ pub async fn login(State(state): State<Arc<AppState>>, Json(body): Json<LoginBod
         max_age = max_age
     );
 
+    let dto = user_dto(&user);
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
         Json(LoginOk {
-            user: user_dto(&user),
+            ok: true,
+            username: dto.username.clone(),
+            user: dto,
         }),
     )
         .into_response()
@@ -194,7 +210,12 @@ pub async fn logout(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
-/// `GET /api/auth/me` — returns the authenticated user, or `authenticated: false`.
+/// `GET /api/auth/me` — returns the authenticated user.
+///
+/// For anonymous callers we return **401**, not `{authenticated:false}`,
+/// because the existing SPA does `request<User>('/api/auth/me').catch(() => null)`
+/// — it relies on the request rejecting, not on inspecting a JSON body, to
+/// decide that there is no user.
 pub async fn me(State(state): State<Arc<AppState>>) -> Response {
     let mut auth = match state.grpc_auth_client().await {
         Ok(c) => c,
@@ -203,18 +224,23 @@ pub async fn me(State(state): State<Arc<AppState>>) -> Response {
     let resp = match auth.who_am_i(WhoAmIRequest {}).await {
         Ok(r) => r.into_inner(),
         Err(s) if s.code() == tonic::Code::Unauthenticated => {
-            return Json(WhoAmIDto {
-                authenticated: false,
-                user: None,
-                scopes: vec![],
-            })
-            .into_response();
+            return err(StatusCode::UNAUTHORIZED, s.message());
         }
         Err(s) => return err(StatusCode::BAD_GATEWAY, s.message()),
     };
+    if !resp.authenticated {
+        return err(StatusCode::UNAUTHORIZED, "not logged in");
+    }
+    let user = match resp.user.as_ref() {
+        Some(u) => u,
+        None => return err(StatusCode::BAD_GATEWAY, "no user in response"),
+    };
+    let dto = user_dto(user);
     Json(WhoAmIDto {
-        authenticated: resp.authenticated,
-        user: resp.user.as_ref().map(user_dto),
+        username: dto.username.clone(),
+        is_admin: dto.is_server_admin,
+        authenticated: true,
+        user: Some(dto),
         scopes: resp.scopes,
     })
     .into_response()

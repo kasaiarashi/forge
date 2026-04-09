@@ -14,10 +14,53 @@ use crate::AppState;
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn internal_error(msg: impl std::fmt::Display) -> Response {
+/// Error responder. If the underlying error is a tonic Status (the common
+/// case — almost every web handler proxies a gRPC call), translate the gRPC
+/// code to the matching HTTP status so the SPA's interceptor can react
+/// (401 → redirect to /login, 403 → show forbidden, etc.). Falls back to 500
+/// for everything else.
+pub(crate) fn internal_error_public(err: anyhow::Error) -> Response {
+    internal_error(err)
+}
+
+fn internal_error(err: anyhow::Error) -> Response {
+    // anyhow's downcast_ref works on the error chain.
+    if let Some(status) = err.downcast_ref::<tonic::Status>() {
+        return grpc_status_to_response(status);
+    }
+    // Sometimes the gRPC client wraps the Status inside another anyhow::Error
+    // layer; walk the source chain just in case.
+    let mut source: Option<&dyn std::error::Error> = err.source();
+    while let Some(s) = source {
+        if let Some(status) = s.downcast_ref::<tonic::Status>() {
+            return grpc_status_to_response(status);
+        }
+        source = s.source();
+    }
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": msg.to_string()})),
+        Json(serde_json::json!({"error": err.to_string()})),
+    )
+        .into_response()
+}
+
+fn grpc_status_to_response(status: &tonic::Status) -> Response {
+    let http = match status.code() {
+        tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+        tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
+        tonic::Code::NotFound => StatusCode::NOT_FOUND,
+        tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        tonic::Code::AlreadyExists => StatusCode::CONFLICT,
+        tonic::Code::FailedPrecondition => StatusCode::CONFLICT,
+        tonic::Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+        tonic::Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
+        tonic::Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
+        tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        http,
+        Json(serde_json::json!({"error": status.message()})),
     )
         .into_response()
 }
