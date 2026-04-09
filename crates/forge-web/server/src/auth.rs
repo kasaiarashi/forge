@@ -149,8 +149,13 @@ fn user_dto(u: &UserInfo) -> UserDto {
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 /// `POST /api/auth/login` — username + password in, session cookie out.
+///
+/// Uses the anonymous gRPC client so a user who already has a stale or
+/// expired `forge_session` cookie can still log in. If we forwarded the
+/// cookie here, forge-server's bearer interceptor would reject it as
+/// "invalid or expired session" before our handler ever ran.
 pub async fn login(State(state): State<Arc<AppState>>, Json(body): Json<LoginBody>) -> Response {
-    let mut auth = match state.grpc_auth_client().await {
+    let mut auth = match state.grpc_auth_client_anonymous().await {
         Ok(c) => c,
         Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
     };
@@ -247,9 +252,11 @@ pub async fn me(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// `GET /api/auth/initialized` — true once at least one user exists. Used
-/// by the SPA to decide whether to render the setup wizard or the login form.
+/// by the SPA to decide whether to render the setup wizard or the login
+/// form. Anonymous client because a fresh-install browser obviously has no
+/// session.
 pub async fn is_initialized(State(state): State<Arc<AppState>>) -> Response {
-    let mut auth = match state.grpc_auth_client().await {
+    let mut auth = match state.grpc_auth_client_anonymous().await {
         Ok(c) => c,
         Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
     };
@@ -264,12 +271,13 @@ pub async fn is_initialized(State(state): State<Arc<AppState>>) -> Response {
 
 /// `POST /api/auth/bootstrap` — first-admin setup wizard. Forwards directly
 /// to `AuthService::BootstrapAdmin`, which only accepts the call when the
-/// users table is empty.
+/// users table is empty. Anonymous client because the first user has no
+/// session.
 pub async fn bootstrap_admin(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BootstrapBody>,
 ) -> Response {
-    let mut auth = match state.grpc_auth_client().await {
+    let mut auth = match state.grpc_auth_client_anonymous().await {
         Ok(c) => c,
         Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("forge-server: {e}")),
     };

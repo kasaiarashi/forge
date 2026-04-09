@@ -51,6 +51,15 @@ impl ForgeGrpcClient {
             BearerInterceptor::from_task_local(),
         )
     }
+
+    /// Build an [`AuthServiceClient`] that does NOT carry the cookie's
+    /// session token. Used by login / bootstrap / `is_initialized` so a
+    /// stale cookie can't poison the very call that's supposed to issue
+    /// a fresh session — forge-server's interceptor would otherwise reject
+    /// the expired token before our handler ran.
+    pub fn auth_anonymous(&self) -> AuthServiceClient<Channel> {
+        AuthServiceClient::new(self.channel.clone())
+    }
 }
 
 /// Per-request tonic interceptor that injects the session bearer token

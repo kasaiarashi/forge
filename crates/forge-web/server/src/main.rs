@@ -98,6 +98,20 @@ impl AppState {
         let client = self.grpc_client().await?;
         Ok(client.auth())
     }
+
+    /// Build a fresh `AuthServiceClient` with NO bearer token attached. The
+    /// login / bootstrap / is_initialized endpoints have to work for users
+    /// who have a stale or invalid cookie — forwarding that cookie would
+    /// make forge-server reject the call as Unauthenticated before the
+    /// handler even ran.
+    pub async fn grpc_auth_client_anonymous(
+        &self,
+    ) -> anyhow::Result<
+        forge_proto::forge::auth_service_client::AuthServiceClient<tonic::transport::Channel>,
+    > {
+        let client = self.grpc_client().await?;
+        Ok(client.auth_anonymous())
+    }
 }
 
 // ---------------------------------------------------------------------------
