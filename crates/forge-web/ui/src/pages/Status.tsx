@@ -96,8 +96,8 @@ export default function StatusPage() {
               value={String(info.active_locks)}
             />
             <Metric
-              label="Branches (this view)"
-              value={String(info.branches.length)}
+              label="Repositories"
+              value={String(info.repo_count)}
             />
           </Grid>
 

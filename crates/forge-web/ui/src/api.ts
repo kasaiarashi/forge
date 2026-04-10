@@ -138,7 +138,8 @@ export interface ServerInfo {
   uptime_secs: number;
   total_objects: number;
   total_size_bytes: number;
-  branches: string[];
+  repos: string[];
+  repo_count: number;
   active_locks: number;
 }
 

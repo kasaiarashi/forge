@@ -237,7 +237,7 @@ export default function Admin() {
         }}>
           <StatCard icon={ServerIcon} label="Version" value={info.version} />
           <StatCard icon={ClockIcon} label="Uptime" value={formatUptime(info.uptime_secs)} />
-          <StatCard icon={GitBranchIcon} label="Branches" value={String(info.branches.length)} color="var(--fg-accent)" />
+          <StatCard icon={GitBranchIcon} label="Repositories" value={String(info.repo_count)} color="var(--fg-accent)" />
           <StatCard
             icon={LockIcon}
             label="Active Locks"

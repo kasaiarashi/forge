@@ -1107,19 +1107,39 @@ impl ForgeService for ForgeGrpcService {
             .map_err(|e| internal_err("grpc", e))?;
         let repo_names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
 
-        // Count total active locks across all repos (sum per-repo).
+        // Count total active locks and total branches across all repos.
         let mut total_locks = 0i32;
+        let mut total_objects = 0i64;
+        let mut total_size_bytes = 0i64;
         for r in &repos {
             let locks = self.db.list_locks(&r.name, "", "")
                 .map_err(|e| internal_err("grpc", e))?;
             total_locks += locks.len() as i32;
+
+            // Walk the objects directory for this repo to count objects and size.
+            let os = self.object_store(&r.name);
+            let objects_dir = os.objects_dir();
+            if objects_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&objects_dir) {
+                    for prefix_entry in entries.flatten() {
+                        if prefix_entry.path().is_dir() {
+                            if let Ok(inner) = std::fs::read_dir(prefix_entry.path()) {
+                                for obj in inner.flatten() {
+                                    total_objects += 1;
+                                    total_size_bytes += obj.metadata().map(|m| m.len() as i64).unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(Response::new(GetServerInfoResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_secs: uptime,
-            total_objects: 0, // TODO: count objects
-            total_size_bytes: 0,
+            total_objects,
+            total_size_bytes,
             repos: repo_names,
             active_locks: total_locks,
         }))

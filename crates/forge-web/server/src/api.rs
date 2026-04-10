@@ -247,7 +247,8 @@ struct ServerInfoJson {
     uptime_secs: i64,
     total_objects: i64,
     total_size_bytes: i64,
-    branches: Vec<String>,
+    repos: Vec<String>,
+    repo_count: usize,
     active_locks: i32,
 }
 
@@ -735,12 +736,14 @@ pub async fn server_info(State(state): State<Arc<AppState>>) -> Response {
 
     match grpc.get_server_info().await {
         Ok(resp) => {
+            let repo_count = resp.repos.len();
             let body = ServerInfoJson {
                 version: resp.version,
                 uptime_secs: resp.uptime_secs,
                 total_objects: resp.total_objects,
                 total_size_bytes: resp.total_size_bytes,
-                branches: resp.repos,
+                repos: resp.repos,
+                repo_count,
                 active_locks: resp.active_locks,
             };
             (StatusCode::OK, Json(body)).into_response()

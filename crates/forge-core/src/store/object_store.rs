@@ -20,6 +20,11 @@ impl ObjectStore {
         }
     }
 
+    /// Returns the root objects directory path.
+    pub fn objects_dir(&self) -> &std::path::Path {
+        self.chunks.root()
+    }
+
     // -- Snapshot --
 
     pub fn put_snapshot(&self, snap: &Snapshot) -> Result<ForgeHash, ForgeError> {
