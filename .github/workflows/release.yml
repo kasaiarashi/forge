@@ -167,19 +167,44 @@ jobs:
             installers\windows\forge-server.iss
         shell: pwsh
 
-      # ── UE Plugin (Fab zip) ──
-      # Stages the plugin into the directory layout Fab requires
-      # (Config / Content / Resources / Source / Binaries / .uplugin)
-      # and zips it. Binaries/ is intentionally INCLUDED — Fab code
-      # plugins ship pre-built so end users don't need a UE build
-      # environment to install. Only Intermediate/ is excluded since
-      # those are local-only build outputs that UE recreates per host.
-      - name: Package UE Plugin (Fab zip)
+      # ── UE Plugin (Fab zips — one per engine version) ──
+      # Stages the plugin source for Fab code-plugin submission.
+      # Fab compiles the plugin from source, so Binaries/Intermediate/
+      # Build/Saved are excluded — only .uplugin, Config, Content,
+      # Resources, and Source are shipped. Each zip gets its own
+      # EngineVersion stamped into the .uplugin.
+      - name: Package UE Plugin (Fab zips)
         shell: pwsh
         run: |
           $plugin = "plugin\ForgeSourceControl\Plugins\ForgeSourceControl"
-          $stage  = "staging\ForgeSourceControl"
-          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          $versions = @("5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7")
+          foreach ($ver in $versions) {
+            $stage = "staging\ForgeSourceControl-UE$ver\ForgeSourceControl"
+            if (Test-Path "staging\ForgeSourceControl-UE$ver") { Remove-Item -Recurse -Force "staging\ForgeSourceControl-UE$ver" }
+            New-Item -ItemType Directory -Force -Path $stage | Out-Null
+            Copy-Item        "$plugin\ForgeSourceControl.uplugin" $stage
+            Copy-Item -Recurse "$plugin\Config"    $stage
+            Copy-Item -Recurse "$plugin\Content"   $stage
+            Copy-Item -Recurse "$plugin\Resources" $stage
+            Copy-Item -Recurse "$plugin\Source"    $stage
+            # Stamp EngineVersion in the .uplugin for this build
+            $uplugin = "$stage\ForgeSourceControl.uplugin"
+            (Get-Content $uplugin -Raw) -replace '"EngineVersion":\s*"[^"]*"', "`"EngineVersion`": `"$ver`"" | Set-Content $uplugin -NoNewline
+            $zip = "ForgeSourceControl-UE$ver-${{ github.ref_name }}.zip"
+            if (Test-Path $zip) { Remove-Item $zip }
+            Compress-Archive -Path "staging\ForgeSourceControl-UE$ver\ForgeSourceControl" -DestinationPath $zip
+          }
+
+      # ── UE Plugin (general download with pre-built binaries) ──
+      # For direct install via the forge CLI client app. Includes
+      # Source + Binaries so users don't need a UE build environment.
+      # Pinned to UE 5.7 (latest).
+      - name: Package UE Plugin (general download)
+        shell: pwsh
+        run: |
+          $plugin = "plugin\ForgeSourceControl\Plugins\ForgeSourceControl"
+          $stage  = "staging\ForgeSourceControl-general\ForgeSourceControl"
+          if (Test-Path "staging\ForgeSourceControl-general") { Remove-Item -Recurse -Force "staging\ForgeSourceControl-general" }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item        "$plugin\ForgeSourceControl.uplugin" $stage
           Copy-Item -Recurse "$plugin\Config"    $stage
@@ -187,9 +212,12 @@ jobs:
           Copy-Item -Recurse "$plugin\Resources" $stage
           Copy-Item -Recurse "$plugin\Source"    $stage
           Copy-Item -Recurse "$plugin\Binaries"  $stage
+          # Stamp EngineVersion to 5.7
+          $uplugin = "$stage\ForgeSourceControl.uplugin"
+          (Get-Content $uplugin -Raw) -replace '"EngineVersion":\s*"[^"]*"', '"EngineVersion": "5.7"' | Set-Content $uplugin -NoNewline
           $zip = "ForgeSourceControl-${{ github.ref_name }}.zip"
           if (Test-Path $zip) { Remove-Item $zip }
-          Compress-Archive -Path $stage -DestinationPath $zip
+          Compress-Archive -Path "staging\ForgeSourceControl-general\ForgeSourceControl" -DestinationPath $zip
 
       # ── Linux x64 tar.gz ──
       - name: Package Linux x64
@@ -273,6 +301,13 @@ jobs:
             forge-server-linux-amd64.tar.gz
             forge-server-macos-amd64.tar.gz
             forge-server-macos-arm64.tar.gz
+            ForgeSourceControl-UE5.1-${{ github.ref_name }}.zip
+            ForgeSourceControl-UE5.2-${{ github.ref_name }}.zip
+            ForgeSourceControl-UE5.3-${{ github.ref_name }}.zip
+            ForgeSourceControl-UE5.4-${{ github.ref_name }}.zip
+            ForgeSourceControl-UE5.5-${{ github.ref_name }}.zip
+            ForgeSourceControl-UE5.6-${{ github.ref_name }}.zip
+            ForgeSourceControl-UE5.7-${{ github.ref_name }}.zip
             ForgeSourceControl-${{ github.ref_name }}.zip
             forge-windows-x64.exe
             forge-server-windows-x64.exe
