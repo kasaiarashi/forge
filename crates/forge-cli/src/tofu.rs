@@ -51,8 +51,31 @@ pub async fn ensure_trusted(server_url: &str, auto_yes: bool) -> Result<()> {
     if !server_url.starts_with("https://") {
         return Ok(());
     }
+
+    // If a pin already exists, validate it against the server's *current*
+    // certificate before trusting it. A bare `has_pin` check would
+    // silently return Ok here even when forge-server has regenerated its
+    // CA (data dir wiped, reinstall, etc.), pushing the failure downstream
+    // to the real gRPC handshake as a cryptic "invalid peer certificate:
+    // BadSignature". Instead: handshake-test the pin, and if it no longer
+    // validates, delete it and fall through to re-TOFU so the user gets
+    // the normal fingerprint-confirmation flow.
     if has_pin(server_url) {
-        return Ok(());
+        if pinned_handshake_ok(server_url).await {
+            return Ok(());
+        }
+        if let Ok(p) = pin_path(server_url) {
+            let _ = std::fs::remove_file(&p);
+        }
+        eprintln!(
+            "warning: the stored TLS pin for {server_url} no longer matches \
+             the server's certificate."
+        );
+        eprintln!(
+            "         this usually means forge-server regenerated its CA. \
+             re-verifying trust..."
+        );
+        eprintln!();
     }
 
     // Check if the cert is already trusted by the system store. If so,
@@ -480,6 +503,98 @@ async fn strict_handshake_ok(server_url: &str) -> bool {
     .await
     .map(|r| r.is_ok())
     .unwrap_or(false)
+}
+
+/// Try a strict TLS handshake using ONLY the pinned certificate as the
+/// trust anchor. Returns `true` when the stored pin still validates the
+/// server's current cert, `false` on any failure (I/O, parse, TLS). The
+/// caller (`ensure_trusted`) uses `false` as the "pin is stale, re-TOFU"
+/// signal, so we deliberately swallow every error type here rather than
+/// distinguishing them — the recovery path is identical either way.
+async fn pinned_handshake_ok(server_url: &str) -> bool {
+    let parsed = match parse_url(server_url) {
+        Some(p) => p,
+        None => return false,
+    };
+    let pem = match pin_path(server_url)
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+    {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let mut roots = rustls::RootCertStore::empty();
+    let mut cursor = std::io::Cursor::new(pem);
+    for cert in rustls_pemfile::certs(&mut cursor) {
+        match cert {
+            Ok(c) => {
+                if roots.add(c).is_err() {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    if roots.is_empty() {
+        return false;
+    }
+
+    let cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(cfg));
+
+    let stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        TcpStream::connect((parsed.host.as_str(), parsed.port)),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        _ => return false,
+    };
+    let sname = match ServerName::try_from(parsed.host.clone()) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        connector.connect(sname, stream),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
+}
+
+/// Recovery entry point invoked by `client::connect_*` when a real gRPC
+/// handshake fails with a certificate-verification error *and* a pin is
+/// present. We assume the pin has gone stale (forge-server regenerated
+/// its CA after a data-dir wipe / reinstall), delete it, and run the
+/// normal TOFU flow so the user can re-verify the fingerprint
+/// interactively. The caller retries its connect afterward — the freshly
+/// written pin is picked up automatically on `build_endpoint`'s next
+/// call because `load_pinned_trust` re-reads the file.
+pub async fn reverify_after_cert_mismatch(server_url: &str) -> Result<()> {
+    eprintln!();
+    eprintln!(
+        "The server's TLS certificate does not match the stored pin for"
+    );
+    eprintln!("{server_url}.");
+    eprintln!();
+    eprintln!(
+        "This usually means forge-server regenerated its self-signed CA"
+    );
+    eprintln!(
+        "(the data directory was wiped, or the server was reinstalled)."
+    );
+    eprintln!();
+    eprintln!("Re-verifying trust...");
+    eprintln!();
+    if let Ok(p) = pin_path(server_url) {
+        let _ = std::fs::remove_file(&p);
+    }
+    ensure_trusted(server_url, false).await
 }
 
 // ── TLS + cert helpers (lenient verifier, raw TCP + handshake) ──────────────
