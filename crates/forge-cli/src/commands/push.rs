@@ -168,8 +168,10 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         // multi-chunk objects are never interleaved in the stream.
         const CHUNK_SIZE: usize = 4 * 1024 * 1024;
         let repo_name_owned = repo_name.to_string();
-        let (grpc_tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(512);
-        let (read_tx, read_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>)>(64);
+        // gRPC channel holds ≤4 MiB chunks, so 64 slots = 256 MiB max.
+        // Read channel holds full objects — keep small for large assets.
+        let (grpc_tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(64);
+        let (read_tx, read_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>)>(8);
 
         // Stage 1: parallel disk reads.
         let reader_handle = std::thread::spawn(move || {

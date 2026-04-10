@@ -121,22 +121,22 @@ pub(super) async fn fetch_objects_to_tip(
     let mut want: Vec<Vec<u8>> = vec![tip_bytes.to_vec()];
     let mut visited: HashSet<ForgeHash> = HashSet::new();
     let mut received = 0u64;
-    let mut total_discovered = 0u64;
+    let mut received_bytes = 0u64;
 
-    // Progress bar for receiving objects — length updated as we discover more.
-    let pb = ProgressBar::new(0);
+    // Use a byte-based progress bar without a total — the BFS discovers
+    // objects in waves (snapshots → trees → blobs → chunks) so we can't
+    // know the total upfront. Showing bytes + speed avoids the misleading
+    // "almost done" resets that a percentage bar would cause.
+    let pb = ProgressBar::new_spinner();
     pb.set_style(
-        ProgressStyle::default_bar()
-            .template("Receiving objects: [{bar:30}] {pos}/{len} ({percent}%)")
-            .unwrap()
-            .progress_chars("=>-"),
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} Receiving objects: {msg}")
+            .unwrap(),
     );
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    let start = std::time::Instant::now();
 
     while !want.is_empty() {
-        // Dedup the queue against the visited set. Anything we've already
-        // walked (from disk or wire) does not get processed twice — that's
-        // how the BFS terminates.
         let mut to_visit: Vec<ForgeHash> = Vec::with_capacity(want.len());
         for h in want.drain(..) {
             if let Ok(fh) = ForgeHash::from_hex(&hex::encode(&h)) {
@@ -150,14 +150,10 @@ pub(super) async fn fetch_objects_to_tip(
             continue;
         }
 
-        // Split into "already on disk" and "missing". Both groups need
-        // their children walked into `want`; only the missing group is
-        // actually fetched from the server.
         let (missing, present): (Vec<ForgeHash>, Vec<ForgeHash>) = to_visit
             .into_iter()
             .partition(|fh| !ws.object_store.has(fh));
 
-        // Walk children of objects already on disk — the resume-clone fix.
         for fh in &present {
             walk_object_children(ws, fh, &mut want);
         }
@@ -166,8 +162,41 @@ pub(super) async fn fetch_objects_to_tip(
             continue;
         }
 
-        total_discovered += missing.len() as u64;
-        pb.set_length(total_discovered);
+        // Pre-create shard directories so writes skip create_dir_all.
+        ws.object_store.chunks.ensure_shard_dirs()?;
+
+        // Spawn background writer threads (same pattern as push).
+        // Bounded channel limits memory to ~256 objects in flight
+        // regardless of project size.
+        let (write_tx, write_rx) =
+            crossbeam_channel::bounded::<(ForgeHash, Vec<u8>, bool)>(8);
+        let write_rx = std::sync::Arc::new(write_rx);
+        let num_writers = rayon::current_num_threads().min(8);
+        let store = ws.object_store.chunks.clone();
+        let write_error: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut writer_handles = Vec::with_capacity(num_writers);
+        for _ in 0..num_writers {
+            let rx = std::sync::Arc::clone(&write_rx);
+            let s = store.clone();
+            let err = std::sync::Arc::clone(&write_error);
+            writer_handles.push(std::thread::spawn(move || {
+                while let Ok((hash, data, pre_compressed)) = rx.recv() {
+                    let result: Result<(), _> = if pre_compressed {
+                        s.put_raw_direct(&hash, &data)
+                    } else {
+                        s.put(&hash, &data).map(|_| ())
+                    };
+                    if let Err(e) = result {
+                        let mut guard = err.lock().unwrap();
+                        if guard.is_none() {
+                            *guard = Some(e.to_string());
+                        }
+                        break;
+                    }
+                }
+            }));
+        }
 
         const BATCH_SIZE: usize = 5000;
         for batch_chunk in missing.chunks(BATCH_SIZE) {
@@ -186,69 +215,88 @@ pub(super) async fn fetch_objects_to_tip(
 
             let mut current_data = Vec::new();
             let mut current_hash: Option<Vec<u8>> = None;
+            let mut current_type: u32 = 0;
 
             while let Some(chunk) = stream.message().await? {
                 if current_hash.as_ref() != Some(&chunk.hash) {
                     current_data.clear();
                     current_hash = Some(chunk.hash.clone());
+                    current_type = chunk.object_type;
                 }
 
+                received_bytes += chunk.data.len() as u64;
                 current_data.extend_from_slice(&chunk.data);
 
                 if chunk.is_last {
                     let hash_hex = hex::encode(&chunk.hash);
                     let forge_hash = ForgeHash::from_hex(&hash_hex)?;
+                    let pre_compressed = current_type == 1;
 
-                    let computed = ForgeHash::from_bytes(&current_data);
-                    if computed != forge_hash {
-                        pb.finish_and_clear();
-                        anyhow::bail!(
-                            "integrity error: server sent corrupt object (claimed {}, got {})",
-                            forge_hash.short(),
-                            computed.short()
-                        );
+                    // Walk children from in-memory data before handing off
+                    // to writer. Only metadata objects (snapshot/tree/chunked
+                    // blob) need decompression; raw chunks are leaves and
+                    // skip this entirely — so memory stays bounded.
+                    if pre_compressed {
+                        if let Ok(decompressed) = forge_core::compress::decompress(&current_data) {
+                            walk_children_from_data(&decompressed, &mut want);
+                        }
+                    } else {
+                        walk_children_from_data(&current_data, &mut want);
                     }
 
-                    ws.object_store
-                        .chunks
-                        .put(&forge_hash, &current_data)?;
+                    // Hand off to writer threads — bounded channel provides
+                    // backpressure so memory stays at ~256 objects max.
+                    let data = std::mem::take(&mut current_data);
+                    write_tx
+                        .send((forge_hash, data, pre_compressed))
+                        .map_err(|_| anyhow::anyhow!("writer thread crashed"))?;
 
                     received += 1;
-                    pb.set_position(received);
+                    let elapsed = start.elapsed().as_secs_f64().max(0.001);
+                    let speed = received_bytes as f64 / elapsed;
+                    pb.set_message(format_receive_progress(received, received_bytes, speed));
 
-                    // Walk newly-fetched object's children — same helper
-                    // as the already-on-disk path so the two cases stay in
-                    // sync.
-                    walk_object_children(ws, &forge_hash, &mut want);
-
-                    current_data.clear();
                     current_hash = None;
                 }
             }
+
+            // Check for write errors between batches.
+            if let Some(e) = write_error.lock().unwrap().take() {
+                anyhow::bail!("write error: {}", e);
+            }
         }
+
+        // Signal writers to finish and wait.
+        drop(write_tx);
+        for h in writer_handles {
+            let _ = h.join();
+        }
+        if let Some(e) = write_error.lock().unwrap().take() {
+            anyhow::bail!("write error: {}", e);
+        };
     }
 
-    pb.finish_and_clear();
+    let elapsed = start.elapsed().as_secs_f64().max(0.001);
+    let speed = received_bytes as f64 / elapsed;
+    pb.finish_with_message(format!(
+        "{} objects, {} received ({}/s), done.",
+        received,
+        format_bytes(received_bytes),
+        format_bytes(speed as u64),
+    ));
     Ok(received)
 }
 
-/// Push the children of `hash` (referenced object hashes) onto `want` so the
-/// pull BFS keeps walking. Dispatch is by the 1-byte type tag stored at the
-/// start of typed objects (Snapshot/Tree/ChunkedBlob); raw blobs and chunks
-/// are leaves and contribute nothing. Errors during read/parse are silently
-/// swallowed — a corrupt object on disk gets caught later by `read_file`
-/// during checkout, where the error message is more useful to the user.
-fn walk_object_children(ws: &Workspace, hash: &ForgeHash, want: &mut Vec<Vec<u8>>) {
-    let data = match ws.object_store.chunks.get(hash) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    if data.is_empty() {
+/// Walk children from decompressed in-memory data (no disk I/O).
+fn walk_children_from_data(data: &[u8], want: &mut Vec<Vec<u8>>) {
+    if data.len() < 2 {
         return;
     }
     let tag = data[0];
+    // Skip the 1-byte type tag for bincode deserialization.
+    let payload = &data[1..];
     if tag == ObjectType::Snapshot as u8 {
-        if let Ok(snap) = ws.object_store.get_snapshot(hash) {
+        if let Ok(snap) = bincode::deserialize::<forge_core::object::snapshot::Snapshot>(payload) {
             want.push(snap.tree.as_bytes().to_vec());
             for parent in &snap.parents {
                 if !parent.is_zero() {
@@ -257,19 +305,27 @@ fn walk_object_children(ws: &Workspace, hash: &ForgeHash, want: &mut Vec<Vec<u8>
             }
         }
     } else if tag == ObjectType::Tree as u8 {
-        if let Ok(tree) = ws.object_store.get_tree(hash) {
+        if let Ok(tree) = bincode::deserialize::<forge_core::object::tree::Tree>(payload) {
             for entry in &tree.entries {
                 want.push(entry.hash.as_bytes().to_vec());
             }
         }
     } else if tag == ObjectType::ChunkedBlob as u8 {
-        if let Ok(chunked) = ws.object_store.get_chunked_blob(hash) {
+        if let Ok(chunked) = bincode::deserialize::<forge_core::object::blob::ChunkedBlob>(payload) {
             for chunk_ref in &chunked.chunks {
                 want.push(chunk_ref.hash.as_bytes().to_vec());
             }
         }
     }
-    // ObjectType::Blob (tag=1) and raw chunk bytes are leaves — no children.
+}
+
+/// Walk children from disk (used for resume — objects already on disk).
+fn walk_object_children(ws: &Workspace, hash: &ForgeHash, want: &mut Vec<Vec<u8>>) {
+    let data = match ws.object_store.chunks.get(hash) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    walk_children_from_data(&data, want);
 }
 
 /// Write the commit's tree contents into the working directory and update the index.
@@ -353,4 +409,28 @@ fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
 
     index.save(&ws.forge_dir().join("index"))?;
     Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_receive_progress(objects: u64, bytes: u64, speed: f64) -> String {
+    format!(
+        "{} objects, {} ({}/s)",
+        objects,
+        format_bytes(bytes),
+        format_bytes(speed as u64),
+    )
 }

@@ -96,7 +96,7 @@ impl ForgeService for ForgeGrpcService {
 
         // Channel for handing completed objects to background disk writers.
         // The stream loop validates and reassembles; writers do the slow I/O.
-        let (write_tx, write_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>, bool)>(256);
+        let (write_tx, write_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>, bool)>(8);
 
         // Spawn a pool of blocking writer threads (one per CPU core, capped at 8).
         let num_writers = rayon::current_num_threads().min(8);
@@ -244,45 +244,62 @@ impl ForgeService for ForgeGrpcService {
 
         let store = self.fs.repo_store(&repo);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        // Two-stage pipeline (same idea as push):
+        //   Stage 1: rayon reads compressed objects from disk in parallel
+        //   Stage 2: single thread chunks and sends to gRPC stream
+        let (read_tx, read_rx) =
+            crossbeam_channel::bounded::<(Vec<u8>, Vec<u8>)>(8);
+        // Holds ≤4 MiB ObjectChunks, so 64 slots = 256 MiB max.
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
 
-        tokio::spawn(async move {
-            for hash_bytes in req.want_hashes {
-                let hash_hex = hex::encode(&hash_bytes);
-                let forge_hash = match ForgeHash::from_hex(&hash_hex) {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                };
-
-                match store.get(&forge_hash) {
-                    Ok(data) => {
-                        // Send in chunks of 2MB to stay under gRPC message limits.
-                        let chunk_size = 2 * 1024 * 1024;
-                        let total = data.len() as u64;
-                        let mut offset = 0usize;
-
-                        while offset < data.len() {
-                            let end = (offset + chunk_size).min(data.len());
-                            let is_last = end == data.len();
-
-                            let msg = ObjectChunk {
-                                hash: hash_bytes.clone(),
-                                object_type: 0,
-                                total_size: total,
-                                offset: offset as u64,
-                                data: data[offset..end].to_vec(),
-                                is_last,
-                                repo: String::new(),
-                            };
-
-                            if tx.send(Ok(msg)).await.is_err() {
-                                return;
-                            }
-                            offset = end;
-                        }
+        // Stage 1: parallel disk reads on OS threads.
+        let hashes = req.want_hashes;
+        std::thread::spawn(move || {
+            use rayon::prelude::*;
+            hashes.par_iter().for_each(|hash_bytes| {
+                let hash_hex = hex::encode(hash_bytes);
+                if let Ok(fh) = ForgeHash::from_hex(&hash_hex) {
+                    if let Ok(data) = store.get_raw(&fh) {
+                        let _ = read_tx.send((hash_bytes.clone(), data));
                     }
-                    Err(_) => {
-                        // Object not found — skip silently.
+                }
+            });
+        });
+
+        // Stage 2: single thread chunks and sends (preserves per-object ordering).
+        std::thread::spawn(move || {
+            const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+            while let Ok((hash_bytes, compressed)) = read_rx.recv() {
+                let total = compressed.len() as u64;
+                if compressed.len() <= CHUNK_SIZE {
+                    let msg = ObjectChunk {
+                        hash: hash_bytes,
+                        object_type: 1, // pre-compressed
+                        total_size: total,
+                        offset: 0,
+                        data: compressed,
+                        is_last: true,
+                        repo: String::new(),
+                    };
+                    if tx.blocking_send(Ok(msg)).is_err() {
+                        return;
+                    }
+                } else {
+                    for (i, slice) in compressed.chunks(CHUNK_SIZE).enumerate() {
+                        let off = (i * CHUNK_SIZE) as u64;
+                        let is_last = off + slice.len() as u64 == total;
+                        let msg = ObjectChunk {
+                            hash: hash_bytes.clone(),
+                            object_type: 1,
+                            total_size: total,
+                            offset: off,
+                            data: slice.to_vec(),
+                            is_last,
+                            repo: String::new(),
+                        };
+                        if tx.blocking_send(Ok(msg)).is_err() {
+                            return;
+                        }
                     }
                 }
             }

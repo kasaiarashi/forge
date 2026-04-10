@@ -6,6 +6,7 @@ use crate::hash::ForgeHash;
 
 /// Content-addressable store on disk.
 /// Objects are stored in shard directories: `objects/ab/cd1234...`
+#[derive(Clone)]
 pub struct ChunkStore {
     root: PathBuf,
 }

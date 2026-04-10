@@ -1,5 +1,5 @@
 ; Forge VCS Server Installer for Windows
-; Installs forge-server, forge-web, UI assets, and config templates
+; Installs forge-server, forge-web, forge CLI, UI assets, and config templates
 
 #ifndef AppVersion
   #define AppVersion "0.0.0-dev"
@@ -38,6 +38,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Server binaries
 Source: "{#ArtifactDir}\forge-server-windows\forge-server.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ArtifactDir}\forge-server-windows\forge-web.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; CLI client (server admins need it too)
+Source: "{#ArtifactDir}\forge-windows-client\forge.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Web UI assets
 Source: "{#ArtifactDir}\forge-web-ui-dist\*"; DestDir: "{app}\ui"; Flags: ignoreversion recursesubdirs createallsubdirs
