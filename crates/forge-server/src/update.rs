@@ -40,7 +40,7 @@ fn web_asset_name() -> &'static str {
     { "forge-web-macos-x64" }
 }
 
-pub fn run(check_only: bool) -> Result<()> {
+pub fn run(check_only: bool, force: bool) -> Result<()> {
     let current = parse_version(CURRENT_VERSION)?;
 
     let api_url = format!(
@@ -52,17 +52,25 @@ pub fn run(check_only: bool) -> Result<()> {
         serde_json::from_str(&body).context("Failed to parse release JSON")?;
 
     let latest = parse_version(&release.tag_name)?;
+    let needs_update = latest > current || force;
 
-    if latest <= current {
+    if !needs_update {
         println!("forge-server is up to date (v{})", format_version(&current));
         return Ok(());
     }
 
-    println!(
-        "Update available: v{} -> v{}",
-        format_version(&current),
-        format_version(&latest)
-    );
+    if force && latest <= current {
+        println!(
+            "Forcing re-download of v{} (same version)",
+            format_version(&latest)
+        );
+    } else {
+        println!(
+            "Update available: v{} -> v{}",
+            format_version(&current),
+            format_version(&latest)
+        );
+    }
     if check_only {
         println!("Release: {}", release.html_url);
         println!("\nRun `forge-server update` to install.");

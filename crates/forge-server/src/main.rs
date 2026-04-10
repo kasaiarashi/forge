@@ -75,6 +75,10 @@ enum Commands {
         /// Only check for updates without installing
         #[arg(long)]
         check: bool,
+
+        /// Force re-download even if already on the latest version
+        #[arg(short, long)]
+        force: bool,
     },
     /// Manage the Windows service (Windows only).
     #[cfg(windows)]
@@ -171,8 +175,8 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Update { check }) => {
-            update::run(check)?;
+        Some(Commands::Update { check, force }) => {
+            update::run(check, force)?;
             return Ok(());
         }
         Some(Commands::Init) => {
