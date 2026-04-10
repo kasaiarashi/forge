@@ -127,11 +127,7 @@ pub async fn connect_auth_anonymous(server_url: &str) -> Result<AuthServiceClien
     // `url_resolver` for the threat-model rationale (probe is lenient
     // TLS; actual gRPC connect still enforces pinned trust below).
     let server_url = url_resolver::resolve(server_url).await;
-    let endpoint = build_endpoint(&server_url)?;
-    let channel = endpoint
-        .connect()
-        .await
-        .map_err(|e| format_connect_error(&server_url, e))?;
+    let channel = connect_channel_with_trust_recovery(&server_url).await?;
     Ok(AuthServiceClient::new(channel))
 }
 
@@ -141,12 +137,61 @@ async fn connect_with_auth(server_url: &str) -> Result<(Channel, AuthInterceptor
     // `forge push` — which starts from a workspace origin pointing at the
     // web URL — finds the same token that `forge login` stored.
     let cred = credentials::load(&server_url)?;
-    let endpoint = build_endpoint(&server_url)?;
-    let channel = endpoint
-        .connect()
-        .await
-        .map_err(|e| format_connect_error(&server_url, e))?;
+    let channel = connect_channel_with_trust_recovery(&server_url).await?;
     Ok((channel, AuthInterceptor::new(cred)))
+}
+
+/// Connect the gRPC channel, and if the handshake fails with a cert
+/// verification error, run the TOFU re-verify flow interactively and
+/// retry once. This covers both stale local pins (forge-server
+/// regenerated its CA after the pin was written) and stale OS trust
+/// store entries (an earlier `forge trust` installed the CA via
+/// certutil/security and the server has since rotated). Zero overhead
+/// on the happy path — the recovery dance only runs after a confirmed
+/// cert-validation failure — and prevents the cryptic
+/// "invalid peer certificate: BadSignature" error from blocking users
+/// when trust state drifts out of sync with the server.
+async fn connect_channel_with_trust_recovery(server_url: &str) -> Result<Channel> {
+    let endpoint = build_endpoint(server_url)?;
+    match endpoint.connect().await {
+        Ok(ch) => Ok(ch),
+        Err(e) if is_cert_verification_error(&e) => {
+            // Delegate to tofu to run the full re-verify flow (delete
+            // stale pin if present, prompt for new fingerprint, write
+            // fresh pin). Then rebuild the endpoint so `load_pinned_trust`
+            // picks up the fresh pin file and retry once. A second
+            // failure propagates normally.
+            crate::tofu::reverify_after_cert_mismatch(server_url).await?;
+            build_endpoint(server_url)?
+                .connect()
+                .await
+                .map_err(|e| format_connect_error(server_url, e))
+        }
+        Err(e) => Err(format_connect_error(server_url, e)),
+    }
+}
+
+/// Walk the error source chain looking for rustls certificate-verification
+/// failure signatures. tonic wraps the underlying rustls error several
+/// layers deep (tonic::transport::Error → hyper → h2 → rustls), so we
+/// have to inspect every cause rather than just the top-level message
+/// (which is just "transport error"). We match on narrow substrings that
+/// only appear in cert-verification paths to avoid false positives on
+/// unrelated transport errors.
+fn is_cert_verification_error(err: &tonic::transport::Error) -> bool {
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(s) = src {
+        let m = s.to_string();
+        if m.contains("invalid peer certificate")
+            || m.contains("InvalidCertificate")
+            || m.contains("BadSignature")
+            || m.contains("UnknownIssuer")
+        {
+            return true;
+        }
+        src = s.source();
+    }
+    false
 }
 
 /// Produce a connect-error message that includes the full `std::error::Error`
