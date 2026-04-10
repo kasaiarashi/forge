@@ -43,6 +43,8 @@ Source: "{#ArtifactDir}\forge-windows-client\forge.exe"; DestDir: "{app}"; Flags
 ; UE Plugin files (only installed if user selects local install)
 Source: "{#PluginDir}\ForgeSourceControl.uplugin"; DestDir: "{code:GetUEPluginDestDir}"; Flags: ignoreversion; Check: ShouldInstallPlugin
 Source: "{#PluginDir}\Source\*"; DestDir: "{code:GetUEPluginDestDir}\Source"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallPlugin
+Source: "{#PluginDir}\Binaries\*"; DestDir: "{code:GetUEPluginDestDir}\Binaries"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallPlugin
+Source: "{#PluginDir}\Resources\*"; DestDir: "{code:GetUEPluginDestDir}\Resources"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallPlugin
 
 [Registry]
 ; Add {app} to system PATH
