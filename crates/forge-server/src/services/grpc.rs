@@ -88,11 +88,54 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<PushResponse>, Status> {
         let caller = caller_of(&request);
         let mut stream = request.into_inner();
-        let mut received = Vec::new();
+        let mut received: Vec<Vec<u8>> = Vec::new();
         // Buffer for reassembling multi-chunk objects.
         let mut current_buf: Vec<u8> = Vec::new();
         let mut current_hash: Option<Vec<u8>> = None;
-        let mut store = None;
+        let mut store: Option<forge_core::store::chunk_store::ChunkStore> = None;
+
+        // Channel for handing completed objects to background disk writers.
+        // The stream loop validates and reassembles; writers do the slow I/O.
+        let (write_tx, write_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>, bool)>(8);
+
+        // Spawn a pool of blocking writer threads (one per CPU core, capped at 8).
+        let num_writers = rayon::current_num_threads().min(8);
+        let write_rx = Arc::new(write_rx);
+        let write_error: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let mut writer_handles = Vec::with_capacity(num_writers);
+        // Store is set on first chunk; writers wait on the channel so this is fine.
+        let store_slot: Arc<tokio::sync::OnceCell<forge_core::store::chunk_store::ChunkStore>> =
+            Arc::new(tokio::sync::OnceCell::new());
+
+        for _ in 0..num_writers {
+            let rx = Arc::clone(&write_rx);
+            let err = Arc::clone(&write_error);
+            let slot = Arc::clone(&store_slot);
+            writer_handles.push(std::thread::spawn(move || {
+                while let Ok((hash, data, pre_compressed)) = rx.recv() {
+                    // Wait for store to be set (happens on first chunk).
+                    let s = loop {
+                        if let Some(s) = slot.get() {
+                            break s;
+                        }
+                        std::thread::yield_now();
+                    };
+                    let result: Result<(), _> = if pre_compressed {
+                        s.put_raw_direct(&hash, &data)
+                    } else {
+                        s.put(&hash, &data).map(|_| ())
+                    };
+                    if let Err(e) = result {
+                        let mut guard = err.lock().unwrap();
+                        if guard.is_none() {
+                            *guard = Some(e.to_string());
+                        }
+                        break;
+                    }
+                }
+            }));
+        }
 
         while let Some(chunk) = stream
             .message()
@@ -102,28 +145,29 @@ impl ForgeService for ForgeGrpcService {
             // Read repo from the first chunk.
             if store.is_none() {
                 let repo = resolve_repo(&chunk.repo, &caller)?;
-                // Authz happens once, on the first chunk (after we know the repo).
                 require_repo_write(&caller, &self.user_store, &repo)?;
-                // Auto-register repo if it doesn't exist.
                 self.db.create_repo(&repo, "")
                     .map_err(|e| internal_err("failed to register repo", e))?;
-                store = Some(self.fs.repo_store(&repo));
+                let s = self.fs.repo_store(&repo);
+                // Pre-create all 256 shard dirs so writers skip create_dir_all per object.
+                s.ensure_shard_dirs()
+                    .map_err(|e| internal_err("shard dirs", e))?;
+                let _ = store_slot.set(self.fs.repo_store(&repo));
+                store = Some(s);
             }
 
             if current_hash.as_ref() != Some(&chunk.hash) {
-                // New object starting.
                 current_buf.clear();
                 current_hash = Some(chunk.hash.clone());
             }
 
-            const MAX_OBJECT_SIZE: usize = 512 * 1024 * 1024; // 512 MiB per object
+            const MAX_OBJECT_SIZE: usize = 512 * 1024 * 1024;
             if current_buf.len() + chunk.data.len() > MAX_OBJECT_SIZE {
                 return Err(Status::resource_exhausted("object exceeds maximum size"));
             }
             current_buf.extend_from_slice(&chunk.data);
 
             if chunk.is_last {
-                // Object complete — store it.
                 let hash_bytes: [u8; 32] = chunk
                     .hash
                     .as_slice()
@@ -132,10 +176,8 @@ impl ForgeService for ForgeGrpcService {
                 let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
                     .map_err(|e| internal_err("grpc", e))?;
 
-                let s = store.as_ref().ok_or_else(|| Status::internal("no repo specified in stream"))?;
-
-                if chunk.object_type == 1 {
-                    // Pre-compressed data — verify zstd magic bytes (0xFD2FB528).
+                let pre_compressed = chunk.object_type == 1;
+                if pre_compressed {
                     if current_buf.len() < 4
                         || current_buf[0] != 0x28
                         || current_buf[1] != 0xB5
@@ -147,18 +189,34 @@ impl ForgeService for ForgeGrpcService {
                             hex::encode(&hash_bytes)
                         )));
                     }
-                    s.put_raw(&forge_hash, &current_buf)
-                        .map_err(|e| internal_err("grpc", e))?;
-                } else {
-                    // Uncompressed data — compress and store.
-                    s.put(&forge_hash, &current_buf)
-                        .map_err(|e| internal_err("grpc", e))?;
                 }
 
+                // Hand off to writer threads — non-blocking unless channel is full,
+                // which provides natural backpressure.
+                let data = std::mem::take(&mut current_buf);
+                write_tx
+                    .send((forge_hash, data, pre_compressed))
+                    .map_err(|_| Status::internal("writer thread crashed"))?;
+
                 received.push(chunk.hash.clone());
-                current_buf.clear();
                 current_hash = None;
+
+                // Check for write errors periodically.
+                if let Some(e) = write_error.lock().unwrap().take() {
+                    return Err(internal_err("grpc", e));
+                }
             }
+        }
+
+        // Drop sender to signal writers to finish, then wait for them.
+        drop(write_tx);
+        for h in writer_handles {
+            let _ = h.join();
+        }
+
+        // Final error check.
+        if let Some(e) = write_error.lock().unwrap().take() {
+            return Err(internal_err("grpc", e));
         }
 
         Ok(Response::new(PushResponse {
@@ -186,45 +244,62 @@ impl ForgeService for ForgeGrpcService {
 
         let store = self.fs.repo_store(&repo);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        // Two-stage pipeline (same idea as push):
+        //   Stage 1: rayon reads compressed objects from disk in parallel
+        //   Stage 2: single thread chunks and sends to gRPC stream
+        let (read_tx, read_rx) =
+            crossbeam_channel::bounded::<(Vec<u8>, Vec<u8>)>(8);
+        // Holds ≤4 MiB ObjectChunks, so 64 slots = 256 MiB max.
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
 
-        tokio::spawn(async move {
-            for hash_bytes in req.want_hashes {
-                let hash_hex = hex::encode(&hash_bytes);
-                let forge_hash = match ForgeHash::from_hex(&hash_hex) {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                };
-
-                match store.get(&forge_hash) {
-                    Ok(data) => {
-                        // Send in chunks of 2MB to stay under gRPC message limits.
-                        let chunk_size = 2 * 1024 * 1024;
-                        let total = data.len() as u64;
-                        let mut offset = 0usize;
-
-                        while offset < data.len() {
-                            let end = (offset + chunk_size).min(data.len());
-                            let is_last = end == data.len();
-
-                            let msg = ObjectChunk {
-                                hash: hash_bytes.clone(),
-                                object_type: 0,
-                                total_size: total,
-                                offset: offset as u64,
-                                data: data[offset..end].to_vec(),
-                                is_last,
-                                repo: String::new(),
-                            };
-
-                            if tx.send(Ok(msg)).await.is_err() {
-                                return;
-                            }
-                            offset = end;
-                        }
+        // Stage 1: parallel disk reads on OS threads.
+        let hashes = req.want_hashes;
+        std::thread::spawn(move || {
+            use rayon::prelude::*;
+            hashes.par_iter().for_each(|hash_bytes| {
+                let hash_hex = hex::encode(hash_bytes);
+                if let Ok(fh) = ForgeHash::from_hex(&hash_hex) {
+                    if let Ok(data) = store.get_raw(&fh) {
+                        let _ = read_tx.send((hash_bytes.clone(), data));
                     }
-                    Err(_) => {
-                        // Object not found — skip silently.
+                }
+            });
+        });
+
+        // Stage 2: single thread chunks and sends (preserves per-object ordering).
+        std::thread::spawn(move || {
+            const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+            while let Ok((hash_bytes, compressed)) = read_rx.recv() {
+                let total = compressed.len() as u64;
+                if compressed.len() <= CHUNK_SIZE {
+                    let msg = ObjectChunk {
+                        hash: hash_bytes,
+                        object_type: 1, // pre-compressed
+                        total_size: total,
+                        offset: 0,
+                        data: compressed,
+                        is_last: true,
+                        repo: String::new(),
+                    };
+                    if tx.blocking_send(Ok(msg)).is_err() {
+                        return;
+                    }
+                } else {
+                    for (i, slice) in compressed.chunks(CHUNK_SIZE).enumerate() {
+                        let off = (i * CHUNK_SIZE) as u64;
+                        let is_last = off + slice.len() as u64 == total;
+                        let msg = ObjectChunk {
+                            hash: hash_bytes.clone(),
+                            object_type: 1,
+                            total_size: total,
+                            offset: off,
+                            data: slice.to_vec(),
+                            is_last,
+                            repo: String::new(),
+                        };
+                        if tx.blocking_send(Ok(msg)).is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -243,16 +318,25 @@ impl ForgeService for ForgeGrpcService {
         let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let store = self.fs.repo_store(repo);
-        let mut has = Vec::with_capacity(req.hashes.len());
 
-        for hash_bytes in &req.hashes {
-            let hash_hex = hex::encode(hash_bytes);
-            let exists = match ForgeHash::from_hex(&hash_hex) {
-                Ok(h) => store.has(&h),
-                Err(_) => false,
-            };
-            has.push(exists);
-        }
+        // Parallelize filesystem stat calls — checking 100K+ paths
+        // sequentially is the dominant cost on large pushes.
+        let hashes = req.hashes;
+        let has = tokio::task::spawn_blocking(move || {
+            use rayon::prelude::*;
+            hashes
+                .par_iter()
+                .map(|hash_bytes| {
+                    let hash_hex = hex::encode(hash_bytes);
+                    match ForgeHash::from_hex(&hash_hex) {
+                        Ok(h) => store.has(&h),
+                        Err(_) => false,
+                    }
+                })
+                .collect::<Vec<bool>>()
+        })
+        .await
+        .map_err(|e| internal_err("has_objects", e))?;
 
         Ok(Response::new(HasObjectsResponse { has }))
     }
@@ -496,8 +580,12 @@ impl ForgeService for ForgeGrpcService {
                 .collect();
             let branch_count = branches.len() as i32;
 
-            // Try to get last commit info from the default branch (main).
-            let default_branch = "main".to_string();
+            // Try to get last commit info from the default branch.
+            let default_branch = if r.default_branch.is_empty() {
+                "main".to_string()
+            } else {
+                r.default_branch
+            };
             let mut last_commit_message = String::new();
             let mut last_commit_author = String::new();
             let mut last_commit_time = 0i64;
@@ -651,6 +739,18 @@ impl ForgeService for ForgeGrpcService {
                 return Ok(Response::new(UpdateRepoResponse {
                     success: false,
                     error: "visibility update failed".into(),
+                }));
+            }
+        }
+
+        // Apply default_branch change if provided.
+        if !req.default_branch.is_empty() {
+            let effective = if new_name.is_empty() { repo.clone() } else { new_name.clone() };
+            if let Err(e) = self.db.set_default_branch(&effective, &req.default_branch) {
+                tracing::error!(error = %e, "set_default_branch failed");
+                return Ok(Response::new(UpdateRepoResponse {
+                    success: false,
+                    error: "default branch update failed".into(),
                 }));
             }
         }
@@ -1007,19 +1107,39 @@ impl ForgeService for ForgeGrpcService {
             .map_err(|e| internal_err("grpc", e))?;
         let repo_names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
 
-        // Count total active locks across all repos (sum per-repo).
+        // Count total active locks and total branches across all repos.
         let mut total_locks = 0i32;
+        let mut total_objects = 0i64;
+        let mut total_size_bytes = 0i64;
         for r in &repos {
             let locks = self.db.list_locks(&r.name, "", "")
                 .map_err(|e| internal_err("grpc", e))?;
             total_locks += locks.len() as i32;
+
+            // Walk the objects directory for this repo to count objects and size.
+            let os = self.object_store(&r.name);
+            let objects_dir = os.objects_dir();
+            if objects_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&objects_dir) {
+                    for prefix_entry in entries.flatten() {
+                        if prefix_entry.path().is_dir() {
+                            if let Ok(inner) = std::fs::read_dir(prefix_entry.path()) {
+                                for obj in inner.flatten() {
+                                    total_objects += 1;
+                                    total_size_bytes += obj.metadata().map(|m| m.len() as i64).unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(Response::new(GetServerInfoResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_secs: uptime,
-            total_objects: 0, // TODO: count objects
-            total_size_bytes: 0,
+            total_objects,
+            total_size_bytes,
             repos: repo_names,
             active_locks: total_locks,
         }))
@@ -1556,6 +1676,77 @@ impl ForgeService for ForgeGrpcService {
                 labels, created_at: pr.created_at, updated_at: pr.updated_at,
                 comment_count: pr.comment_count, assignee: pr.assignee,
             }),
+        }))
+    }
+
+    // ── Comments ────────────────────────────────────────────────────────────
+
+    async fn list_comments(
+        &self,
+        request: Request<ListCommentsRequest>,
+    ) -> Result<Response<ListCommentsResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo = resolve_repo(&req.repo, &caller)?;
+        require_repo_read(&caller, &self.user_store, &repo, self.db.is_repo_public(&repo))?;
+        let comments = self.db.list_comments(&repo, req.issue_id, &req.kind)
+            .map_err(|e| internal_err("grpc", e))?;
+        Ok(Response::new(ListCommentsResponse {
+            comments: comments.into_iter().map(|c| CommentInfo {
+                id: c.id, repo: c.repo, issue_id: c.issue_id, kind: c.kind,
+                author: c.author, body: c.body, created_at: c.created_at,
+                updated_at: c.updated_at,
+            }).collect(),
+        }))
+    }
+
+    async fn create_comment(
+        &self,
+        request: Request<CreateCommentRequest>,
+    ) -> Result<Response<CreateCommentResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo = resolve_repo(&req.repo, &caller)?;
+        require_repo_write(&caller, &self.user_store, &repo)?;
+        let id = self.db.create_comment(&repo, req.issue_id, &req.kind, &req.author, &req.body)
+            .map_err(|e| internal_err("grpc", e))?;
+        Ok(Response::new(CreateCommentResponse {
+            success: true, error: String::new(), id,
+        }))
+    }
+
+    async fn update_comment(
+        &self,
+        request: Request<UpdateCommentRequest>,
+    ) -> Result<Response<UpdateCommentResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        // Get the comment to find the repo for authz
+        let comment = self.db.get_comment(req.id)
+            .map_err(|e| internal_err("grpc", e))?
+            .ok_or_else(|| Status::not_found("comment not found"))?;
+        require_repo_write(&caller, &self.user_store, &comment.repo)?;
+        let ok = self.db.update_comment(req.id, &req.body)
+            .map_err(|e| internal_err("grpc", e))?;
+        Ok(Response::new(UpdateCommentResponse {
+            success: ok, error: String::new(),
+        }))
+    }
+
+    async fn delete_comment(
+        &self,
+        request: Request<DeleteCommentRequest>,
+    ) -> Result<Response<DeleteCommentResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let comment = self.db.get_comment(req.id)
+            .map_err(|e| internal_err("grpc", e))?
+            .ok_or_else(|| Status::not_found("comment not found"))?;
+        require_repo_write(&caller, &self.user_store, &comment.repo)?;
+        let ok = self.db.delete_comment(req.id)
+            .map_err(|e| internal_err("grpc", e))?;
+        Ok(Response::new(DeleteCommentResponse {
+            success: ok, error: String::new(),
         }))
     }
 }

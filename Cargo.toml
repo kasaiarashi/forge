@@ -48,6 +48,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 hex = "0.4"
 walkdir = "2"
 rayon = "1"
+crossbeam-channel = "0.5"
 toml = "0.8"
 globset = "0.4"
 bytes = "1"

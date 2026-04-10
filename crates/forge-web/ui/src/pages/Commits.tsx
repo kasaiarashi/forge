@@ -114,8 +114,8 @@ export default function Commits() {
     <div>
       <RepoHeader repo={repo} currentTab="commits" activeBranch={branch} />
 
-      <div style={{ marginTop: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)', marginTop: 'var(--space-4)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
           <h2 style={{ fontSize: '20px', fontWeight: 600, margin: 0 }}>
             Commits
           </h2>
@@ -136,9 +136,9 @@ export default function Commits() {
         </div>
 
         {Array.from(groups.entries()).map(([date, commits]) => (
-          <div key={date} style={{ marginBottom: '16px' }}>
+          <div key={date} style={{ marginBottom: 'var(--space-4)' }}>
             {/* Date heading */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
               <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><GitCommitIcon size={16} /></span>
               <span style={{ fontWeight: 600, fontSize: '14px', color: 'var(--fg-default)' }}>
                 Commits on {date}
@@ -147,17 +147,14 @@ export default function Commits() {
 
             {/* Commit list for this date */}
             <div className="forge-card">
-              {commits.map((commit, i) => (
+              {commits.map((commit) => (
                 <div
                   key={commit.hash}
                   className="file-row"
                   style={{
                     display: 'flex',
-                    alignItems: 'center',
                     justifyContent: 'space-between',
-                    padding: '8px 16px',
-                    borderBottom: i < commits.length - 1 ? '1px solid var(--border-muted)' : 'none',
-                    gap: '16px',
+                    gap: 'var(--space-4)',
                   }}
                 >
                   {/* Left side: avatar + message */}
@@ -227,7 +224,7 @@ export default function Commits() {
 
         {/* Pagination */}
         {totalPages > 1 && (
-          <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', marginTop: '24px', alignItems: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 'var(--space-2)', marginTop: 'var(--space-6)', alignItems: 'center' }}>
             <Button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
               Newer
             </Button>

@@ -17,6 +17,42 @@ export interface UserSummary {
   is_server_admin: boolean;
 }
 
+export interface RepoMember {
+  user: UserSummary;
+  role: string; // "read" | "write" | "admin"
+}
+
+export interface PatInfo {
+  id: number;
+  name: string;
+  user_id: number;
+  scopes: string[];
+  created_at: number;
+  last_used_at: number;
+  expires_at: number; // 0 = never
+}
+
+export interface CommentInfo {
+  id: number;
+  repo: string;
+  issue_id: number;
+  kind: string; // "issue" | "pull_request"
+  author: string;
+  body: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SessionInfo {
+  id: number;
+  user_id: number;
+  created_at: number;
+  last_used_at: number;
+  expires_at: number;
+  user_agent: string;
+  ip: string;
+}
+
 export interface RepoInfo {
   name: string;
   description: string;
@@ -26,6 +62,7 @@ export interface RepoInfo {
   last_commit_message: string;
   last_commit_author: string;
   last_commit_time: number;
+  visibility: string; // "private" | "public"
 }
 
 export interface Branch {
@@ -101,7 +138,8 @@ export interface ServerInfo {
   uptime_secs: number;
   total_objects: number;
   total_size_bytes: number;
-  branches: string[];
+  repos: string[];
+  repo_count: number;
   active_locks: number;
 }
 
@@ -270,10 +308,16 @@ const api = {
       .catch(() => false);
   },
   listUsers() {
-    // Server-admin only — non-admins get a 401/403, which the caller is
-    // expected to handle gracefully. Used by the Contact page to surface
-    // every active server admin's email.
     return request<UserSummary[]>('/api/auth/users');
+  },
+  createUser(input: { username: string; email: string; display_name: string; password: string; is_server_admin: boolean }) {
+    return request<{ user: UserSummary }>('/api/auth/users', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+  deleteUser(id: number) {
+    return request<{ success: boolean }>(`/api/auth/users/${id}`, { method: 'DELETE' });
   },
   bootstrapAdmin(input: {
     username: string;
@@ -285,6 +329,28 @@ const api = {
       method: 'POST',
       body: JSON.stringify(input),
     });
+  },
+
+  // Personal Access Tokens
+  listTokens() {
+    return request<PatInfo[]>('/api/auth/tokens');
+  },
+  createToken(name: string, scopes: string[], expiresAt = 0) {
+    return request<{ plaintext_token: string; pat: PatInfo }>('/api/auth/tokens', {
+      method: 'POST',
+      body: JSON.stringify({ name, scopes, expires_at: expiresAt }),
+    });
+  },
+  deleteToken(id: number) {
+    return request<{ success: boolean }>(`/api/auth/tokens/${id}`, { method: 'DELETE' });
+  },
+
+  // Sessions
+  listSessions() {
+    return request<SessionInfo[]>('/api/auth/sessions');
+  },
+  deleteSession(id: number) {
+    return request<{ success: boolean }>(`/api/auth/sessions/${id}`, { method: 'DELETE' });
   },
 
   // Repos
@@ -334,13 +400,62 @@ const api = {
       method: 'DELETE',
     });
   },
+  acquireLock(repo: string, path: string, reason = '') {
+    return request<{ granted: boolean }>(`/api/repos/${enc(repo)}/locks/acquire`, {
+      method: 'POST',
+      body: JSON.stringify({ path, owner: 'web-user', workspace_id: 'web', reason }),
+    });
+  },
 
   // Repo management
-  updateRepo(repo: string, data: { new_name?: string; description?: string }): Promise<{ success: boolean }> {
+  updateRepo(repo: string, data: { new_name?: string; description?: string; visibility?: string; default_branch?: string }): Promise<{ success: boolean }> {
     return request(`/api/repos/${enc(repo)}`, { method: 'PUT', body: JSON.stringify(data) });
   },
   deleteRepo(repo: string): Promise<{ success: boolean }> {
     return request(`/api/repos/${enc(repo)}`, { method: 'DELETE' });
+  },
+
+  // Repo members (ACL)
+  listRepoMembers(repo: string) {
+    return request<RepoMember[]>(`/api/auth/repos/${enc(repo)}/members`);
+  },
+  addRepoMember(repo: string, userId: number, role: string) {
+    return request<{ success: boolean }>(`/api/auth/repos/${enc(repo)}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId, role }),
+    });
+  },
+  removeRepoMember(repo: string, userId: number) {
+    return request<{ success: boolean }>(`/api/auth/repos/${enc(repo)}/members/${userId}`, {
+      method: 'DELETE',
+    });
+  },
+
+  // User lookup (any authenticated user)
+  lookupUser(username: string) {
+    return request<UserSummary>(`/api/auth/users/lookup?username=${encodeURIComponent(username)}`);
+  },
+
+  // Comments
+  listComments(repo: string, issueId: number, kind: 'issue' | 'pull_request' = 'issue') {
+    return request<CommentInfo[]>(`/api/repos/${enc(repo)}/comments?issue_id=${issueId}&kind=${kind}`);
+  },
+  createComment(repo: string, issueId: number, body: string, kind: 'issue' | 'pull_request' = 'issue') {
+    return request<{ success: boolean; id: number }>(`/api/repos/${enc(repo)}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({ issue_id: issueId, kind, body }),
+    });
+  },
+  updateComment(repo: string, commentId: number, body: string) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/comments/${commentId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ body }),
+    });
+  },
+  deleteComment(repo: string, commentId: number) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/comments/${commentId}`, {
+      method: 'DELETE',
+    });
   },
 
   // Server info

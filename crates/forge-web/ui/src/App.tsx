@@ -13,6 +13,7 @@ import CommitDetail from './pages/CommitDetail';
 import Locks from './pages/Locks';
 import RepoSettings from './pages/RepoSettings';
 import Admin from './pages/Admin';
+import AccountSettings from './pages/AccountSettings';
 import Workflows from './pages/Workflows';
 import WorkflowEdit from './pages/WorkflowEdit';
 import WorkflowRuns from './pages/WorkflowRuns';
@@ -124,6 +125,7 @@ export default function App() {
 
         <Route path="/" element={<Authenticated><Dashboard /></Authenticated>} />
         <Route path="/admin" element={<Authenticated><Admin /></Authenticated>} />
+        <Route path="/account" element={<Authenticated><AccountSettings /></Authenticated>} />
 
         {/* User-namespaced repo routes: /<owner>/<repo>/... — all gated. */}
         <Route path="/:owner/:repo" element={<Authenticated><RepoTree /></Authenticated>} />

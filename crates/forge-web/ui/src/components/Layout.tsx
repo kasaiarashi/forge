@@ -27,6 +27,12 @@ export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
   const location = useLocation();
 
+  const pathParts = location.pathname.split('/').filter(Boolean);
+  const nonRepoRoots = ['login', 'admin', 'account', 'settings', 'new'];
+  const isRepoUrl = pathParts.length >= 2 && !nonRepoRoots.includes(pathParts[0]);
+  const repoOwner = isRepoUrl ? pathParts[0] : null;
+  const repoName = isRepoUrl ? pathParts[1] : null;
+
   const handleLogout = async () => {
     await logout();
     navigate('/login');
@@ -40,7 +46,7 @@ export default function Layout({ children }: LayoutProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-      <Header style={{ background: 'var(--header-bg)', padding: '16px', borderBottom: 'none' }}>
+      <Header style={{ background: 'var(--header-bg)', padding: 'var(--space-4) var(--space-6)', borderBottom: 'none' }}>
         <Header.Item>
           <Header.Link as={Link} to="/" style={{ color: 'var(--header-logo)', display: 'flex', alignItems: 'center' }}>
             {/* Compact 48x48 brand mark. The navbar background is always
@@ -57,6 +63,20 @@ export default function Layout({ children }: LayoutProps) {
             />
           </Header.Link>
         </Header.Item>
+
+        {isRepoUrl && (
+          <Header.Item>
+            <div style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+              <Link to={`/${repoOwner}`} style={{ color: 'var(--header-logo)', textDecoration: 'none' }}>
+                {repoOwner}
+              </Link>
+              <span style={{ color: 'var(--header-fg)', opacity: 0.5, margin: '0 var(--space-2)' }}>/</span>
+              <Link to={`/${repoOwner}/${repoName}`} style={{ color: 'var(--header-logo)', textDecoration: 'none', fontWeight: 600 }}>
+                {repoName}
+              </Link>
+            </div>
+          </Header.Item>
+        )}
 
         <Header.Item>
           <div style={{ display: 'flex', alignItems: 'center', background: 'var(--header-search-bg)', border: '1px solid var(--header-search-border)', borderRadius: '6px', padding: '4px 8px', width: '272px' }}>
@@ -127,6 +147,9 @@ export default function Layout({ children }: LayoutProps) {
                   <ActionList.Item onSelect={() => navigate('/')}>
                     Your repositories
                   </ActionList.Item>
+                  <ActionList.Item onSelect={() => navigate('/account')}>
+                    Account settings
+                  </ActionList.Item>
                   {user?.is_admin && (
                     <ActionList.Item onSelect={() => navigate('/admin')}>
                       Server administration
@@ -148,7 +171,7 @@ export default function Layout({ children }: LayoutProps) {
         </Header.Item>
       </Header>
 
-      <main style={{ flex: 1, maxWidth: 1280, margin: '0 auto', width: '100%', padding: '24px 16px' }}>
+      <main style={{ flex: 1, width: '100%' }}>
         {children}
       </main>
 
@@ -156,7 +179,7 @@ export default function Layout({ children }: LayoutProps) {
           row from kissing on wide screens AND lets them stack cleanly on
           narrow ones. `space-between` still expands the gap to fill the
           row when there's room. */}
-      <footer className="forge-footer" style={{ borderTop: 'none', marginTop: '40px', paddingTop: '40px', paddingBottom: '40px', maxWidth: '1012px', margin: '40px auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '32px', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
+      <footer className="forge-footer" style={{ borderTop: 'none', paddingTop: 'var(--space-12)', paddingBottom: 'var(--space-12)', maxWidth: '1012px', margin: 'var(--space-12) auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 'var(--space-8)', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginRight: '24px' }}>
           {/* Footer glyph swaps with the active theme — BW on the day
               theme's white-ish background, WB on the night theme's dark

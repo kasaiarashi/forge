@@ -2,7 +2,9 @@
 # =====================================
 
 [web]
-listen = "0.0.0.0:3000"
+listen = "0.0.0.0"
+http_port = 80
+https_port = 443
 static_dir = "/srv/forge-web/ui"
 
 [server]

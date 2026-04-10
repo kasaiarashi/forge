@@ -71,7 +71,7 @@ export default function Issues() {
   return (
     <div>
       <RepoHeader repo={repo} currentTab="issues" />
-      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 16px' }}>
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
         {error && <Flash variant="danger" style={{ marginBottom: 16 }}>{error}</Flash>}
 
         {/* Header Bar */}
@@ -92,8 +92,8 @@ export default function Issues() {
         </div>
 
         {/* Issue List */}
-        <div className="forge-card" style={{ border: '1px solid var(--border-default)', borderRadius: '6px' }}>
-          <div className="forge-card-header" style={{ display: 'flex', backgroundColor: 'var(--bg-subtle)', padding: '16px', borderBottom: '1px solid var(--border-default)', justifyContent: 'space-between' }}>
+        <div className="forge-card">
+          <div className="forge-card-header" style={{ justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', gap: '16px', fontWeight: 600 }}>
               <span
                 style={{ display: 'flex', alignItems: 'center', gap: '8px', color: statusFilter === 'open' ? 'var(--fg-default)' : 'var(--fg-muted)', cursor: 'pointer' }}
@@ -116,13 +116,13 @@ export default function Issues() {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {filtered.length === 0 ? (
-              <div style={{ padding: 48, textAlign: 'center', color: 'var(--fg-muted)' }}>
+              <div style={{ padding: 'var(--space-12) var(--space-8)', textAlign: 'center', color: 'var(--fg-muted)' }}>
                 {issues.length === 0
                   ? 'No issues yet. Create one to get started.'
                   : 'No issues match the current filter.'}
               </div>
-            ) : filtered.map((issue, idx) => (
-              <div key={issue.id} className="file-row" style={{ display: 'flex', padding: '12px 16px', borderBottom: idx < filtered.length - 1 ? '1px solid var(--border-muted)' : 'none' }}>
+            ) : filtered.map((issue) => (
+              <div key={issue.id} className="file-row" style={{ display: 'flex' }}>
                 <div style={{ color: issue.status === 'open' ? 'var(--fg-success)' : 'var(--fg-danger)', marginRight: '8px', paddingTop: '4px' }}>
                   {issue.status === 'open' ? <IssueOpenedIcon /> : <IssueClosedIcon />}
                 </div>

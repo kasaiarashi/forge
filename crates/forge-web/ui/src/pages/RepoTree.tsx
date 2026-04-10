@@ -179,7 +179,7 @@ export default function RepoTree() {
     ];
     return (
       <div>
-        <RepoHeader repo={repo} currentTab="code" activeBranch="main" />
+        <RepoHeader repo={repo} currentTab="code" activeBranch="main" visibility={repoInfo?.visibility} />
         <div className="forge-card" style={{ marginTop: '16px' }}>
           <div className="forge-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <CodeIcon size={16} />
@@ -223,10 +223,11 @@ export default function RepoTree() {
 
   return (
     <div>
-      <RepoHeader repo={repo} currentTab="code" activeBranch={activeBranch} />
+      <RepoHeader repo={repo} currentTab="code" activeBranch={activeBranch} visibility={repoInfo?.visibility} />
 
       {/* Main content: left file browser + right sidebar */}
-      <div style={{ display: 'flex', gap: '24px', marginTop: '16px' }}>
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
+        <div style={{ display: 'flex', gap: '24px', marginTop: '16px' }}>
         {/* Left: file browser */}
         <div style={{ flex: 1, minWidth: 0 }}>
 
@@ -322,7 +323,7 @@ export default function RepoTree() {
           <div className="forge-card">
             {/* Latest commit header row — like GitHub */}
             {latestCommit && (
-              <div className="forge-card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 16px' }}>
+              <div className="forge-card-header" style={{ justifyContent: 'space-between', borderBottom: '1px solid var(--border-muted)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
                   {/* Avatar */}
                   <div className="avatar-circle avatar-circle-sm">
@@ -374,8 +375,7 @@ export default function RepoTree() {
                 to={pathParts.length > 1 ? buildPath(pathParts.length - 2) : `/${encRepo}/tree/${encBranch}`}
                 className="file-row"
                 style={{
-                  display: 'grid', gridTemplateColumns: '20px 1fr',
-                  padding: '6px 16px', borderBottom: '1px solid var(--border-muted)',
+                  display: 'grid', gridTemplateColumns: '24px 1fr', gap: 'var(--space-2)',
                   textDecoration: 'none', color: 'var(--fg-accent)', fontSize: '14px',
                 }}
               >
@@ -385,17 +385,14 @@ export default function RepoTree() {
             )}
 
             {/* File rows — 3 columns: icon+name, last commit msg, time ago */}
-            {entries.map((entry, i) => (
+            {entries.map((entry) => (
               <div
                 key={entry.name}
                 className="file-row"
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: '20px minmax(120px, 1fr) minmax(200px, 2fr) 100px',
-                  gap: '8px',
-                  alignItems: 'center',
-                  padding: '6px 16px',
-                  borderBottom: i < entries.length - 1 ? '1px solid var(--border-muted)' : 'none',
+                  gridTemplateColumns: '24px minmax(150px, 1.5fr) minmax(200px, 2fr) 120px',
+                  gap: 'var(--space-2)',
                   fontSize: '14px',
                 }}
               >
@@ -489,12 +486,9 @@ export default function RepoTree() {
             <div style={{ marginBottom: '24px' }}>
               <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 8px 0' }}>Clone</h3>
               <div style={{ display: 'flex', gap: '4px' }}>
-                <TextInput value={cloneUrl} readOnly block monospace size="small" />
-                <Button size="small" onClick={(e: React.MouseEvent) => {
-                  e.preventDefault();
-                  copyToClipboard(cloneUrl);
-                }}>
-                  <CopyIcon size={14} />
+                <TextInput value={`forge clone ${cloneUrl}`} readOnly block monospace size="small" />
+                <Button size="small" onClick={copyCloneUrl}>
+                  {cloneCopied ? 'Copied!' : <CopyIcon size={14} />}
                 </Button>
               </div>
             </div>
@@ -550,6 +544,7 @@ export default function RepoTree() {
             </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   );

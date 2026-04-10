@@ -161,6 +161,20 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Pin cwd so relative paths in the config resolve predictably.
+    // When --config points at a real file, use its parent directory;
+    // otherwise fall back to the binary's directory.
+    let config_path = std::path::Path::new(&cli.config);
+    if config_path.exists() {
+        if let Some(dir) = config_path.canonicalize().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            let _ = std::env::set_current_dir(&dir);
+        }
+    } else if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = std::env::set_current_dir(dir);
+        }
+    }
+
     match cli.command {
         Some(Commands::Update { check }) => {
             update::run(check)?;
@@ -236,36 +250,6 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     {
         if cli.as_service {
-            // The SCM launches every service process with
-            // `cwd = C:\Windows\System32`, not the binary's directory.
-            // That breaks any relative path in the config
-            // (`static_dir = "./ui"`, `base_path = "./forge-data"`, the
-            // TLS `cert_path`, etc.) because they end up resolving
-            // against System32 where nothing lives. Pin cwd to the
-            // binary's parent directory so the service mode matches the
-            // interactive "cd to install dir and run the exe" case.
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(dir) = exe.parent() {
-                    if let Err(e) = std::env::set_current_dir(dir) {
-                        warn!(
-                            error = %e,
-                            "failed to set cwd to {} before service dispatch",
-                            dir.display()
-                        );
-                    } else {
-                        info!(
-                            "service mode: cwd pinned to {}",
-                            dir.display()
-                        );
-                    }
-                }
-            }
-
-            // Hand control to the SCM. The dispatcher blocks until the
-            // service stops. If we're not actually running under the SCM
-            // (someone typed `--as-service` by hand), the dispatcher
-            // returns ERROR_FAILED_SERVICE_CONTROLLER_CONNECT which we
-            // surface as a clear error.
             return service::run_under_scm(service::ServicePayload { config });
         }
     }
@@ -412,7 +396,12 @@ pub(crate) async fn serve_inner(
         bootstrap_token_path: bootstrap_token_path.clone(),
     });
 
-    let mut builder = Server::builder();
+    // Raise HTTP/2 flow-control windows from the 65 KB default so a single
+    // stream can saturate a fast LAN link without stalling on window updates.
+    let mut builder = Server::builder()
+        .initial_connection_window_size(Some(16 * 1024 * 1024))
+        .initial_stream_window_size(Some(16 * 1024 * 1024))
+        .tcp_nodelay(true);
     if config.server.tls.enabled {
         let tls = std::mem::take(&mut config.server.tls);
         let paths = resolve_tls_paths(&tls, &base);

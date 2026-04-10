@@ -141,9 +141,27 @@ impl MetadataDb {
             ",
         )?;
 
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                issue_id INTEGER NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'issue' CHECK(kind IN ('issue','pull_request')),
+                author TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(repo, issue_id, kind);
+            ",
+        )?;
+
         // Migrate: add assignee column if missing
         let _ = conn.execute("ALTER TABLE issues ADD COLUMN assignee TEXT NOT NULL DEFAULT ''", []);
         let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN assignee TEXT NOT NULL DEFAULT ''", []);
+        // Migrate: add default_branch column if missing
+        let _ = conn.execute("ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''", []);
 
         let db = Self {
             conn: Mutex::new(conn),
@@ -157,13 +175,14 @@ impl MetadataDb {
     pub fn list_repos(&self) -> Result<Vec<RepoRecord>> {
         let conn = self.conn()?;
         let mut stmt =
-            conn.prepare("SELECT name, description, created_at, visibility FROM repos")?;
+            conn.prepare("SELECT name, description, created_at, visibility, default_branch FROM repos")?;
         let rows = stmt.query_map([], |row| {
             Ok(RepoRecord {
                 name: row.get(0)?,
                 description: row.get(1)?,
                 created_at: row.get(2)?,
                 visibility: row.get(3)?,
+                default_branch: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
             })
         })?;
         let mut result = Vec::new();
@@ -608,6 +627,120 @@ impl MetadataDb {
         Ok(affected > 0)
     }
 
+    // -- Default branch --
+
+    pub fn get_default_branch(&self, repo: &str) -> Result<String> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT default_branch FROM repos WHERE name = ?1")?;
+        let result = stmt
+            .query_row([repo], |row| row.get::<_, String>(0))
+            .ok()
+            .unwrap_or_default();
+        Ok(result)
+    }
+
+    pub fn set_default_branch(&self, repo: &str, branch: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE repos SET default_branch = ?1 WHERE name = ?2",
+            rusqlite::params![branch, repo],
+        )?;
+        Ok(n > 0)
+    }
+
+    // -- Comments --
+
+    pub fn list_comments(&self, repo: &str, issue_id: i64, kind: &str) -> Result<Vec<CommentRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, repo, issue_id, kind, author, body, created_at, updated_at
+             FROM comments WHERE repo = ?1 AND issue_id = ?2 AND kind = ?3
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![repo, issue_id, kind], |row| {
+            Ok(CommentRecord {
+                id: row.get(0)?,
+                repo: row.get(1)?,
+                issue_id: row.get(2)?,
+                kind: row.get(3)?,
+                author: row.get(4)?,
+                body: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn create_comment(&self, repo: &str, issue_id: i64, kind: &str, author: &str, body: &str) -> Result<i64> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO comments (repo, issue_id, kind, author, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![repo, issue_id, kind, author, body, now, now],
+        )?;
+        let id = conn.last_insert_rowid();
+        // Increment comment_count on the parent
+        let table = if kind == "pull_request" { "pull_requests" } else { "issues" };
+        conn.execute(
+            &format!("UPDATE {table} SET comment_count = comment_count + 1 WHERE id = ?1"),
+            [issue_id],
+        )?;
+        Ok(id)
+    }
+
+    pub fn update_comment(&self, id: i64, body: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        let n = conn.execute(
+            "UPDATE comments SET body = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![body, now, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn delete_comment(&self, id: i64) -> Result<bool> {
+        let conn = self.conn()?;
+        // Get the comment first to decrement the parent's count
+        let comment: Option<(String, i64, String)> = conn
+            .prepare("SELECT repo, issue_id, kind FROM comments WHERE id = ?1")?
+            .query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .ok();
+        let n = conn.execute("DELETE FROM comments WHERE id = ?1", [id])?;
+        if n > 0 {
+            if let Some((_repo, issue_id, kind)) = comment {
+                let table = if kind == "pull_request" { "pull_requests" } else { "issues" };
+                conn.execute(
+                    &format!("UPDATE {table} SET comment_count = CASE WHEN comment_count > 0 THEN comment_count - 1 ELSE 0 END WHERE id = ?1"),
+                    [issue_id],
+                )?;
+            }
+        }
+        Ok(n > 0)
+    }
+
+    pub fn get_comment(&self, id: i64) -> Result<Option<CommentRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, repo, issue_id, kind, author, body, created_at, updated_at FROM comments WHERE id = ?1",
+        )?;
+        let result = stmt
+            .query_row([id], |row| {
+                Ok(CommentRecord {
+                    id: row.get(0)?,
+                    repo: row.get(1)?,
+                    issue_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    author: row.get(4)?,
+                    body: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .ok();
+        Ok(result)
+    }
+
     fn map_pr(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequestRecord> {
         Ok(PullRequestRecord {
             id: row.get(0)?,
@@ -674,6 +807,19 @@ pub struct RepoRecord {
     pub description: String,
     pub created_at: i64,
     pub visibility: String,
+    pub default_branch: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommentRecord {
+    pub id: i64,
+    pub repo: String,
+    pub issue_id: i64,
+    pub kind: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[cfg(test)]

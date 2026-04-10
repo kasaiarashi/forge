@@ -39,7 +39,14 @@ use crate::url_resolver;
 /// a one-time `forge trust https://…`.
 fn build_endpoint(server_url: &str) -> Result<Endpoint> {
     let endpoint = Endpoint::from_shared(server_url.to_string())
-        .with_context(|| format!("invalid server url '{server_url}'"))?;
+        .with_context(|| format!("invalid server url '{server_url}'"))?
+        // Raise HTTP/2 flow-control windows so push/pull can saturate fast links.
+        .initial_connection_window_size(16 * 1024 * 1024)
+        .initial_stream_window_size(16 * 1024 * 1024)
+        .http2_adaptive_window(true)
+        .tcp_nodelay(true)
+        .http2_keep_alive_interval(std::time::Duration::from_secs(10))
+        .keep_alive_timeout(std::time::Duration::from_secs(20));
     if !server_url.starts_with("https://") {
         return Ok(endpoint);
     }
@@ -101,7 +108,9 @@ pub async fn connect_forge(
     server_url: &str,
 ) -> Result<ForgeServiceClient<InterceptedService<Channel, AuthInterceptor>>> {
     let (channel, interceptor) = connect_with_auth(server_url).await?;
-    Ok(ForgeServiceClient::with_interceptor(channel, interceptor))
+    Ok(ForgeServiceClient::with_interceptor(channel, interceptor)
+        .max_encoding_message_size(256 * 1024 * 1024)
+        .max_decoding_message_size(256 * 1024 * 1024))
 }
 
 /// Same as [`connect_forge`] but for the `AuthService` (used by login,

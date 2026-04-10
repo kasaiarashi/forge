@@ -131,18 +131,13 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
     if !missing.is_empty() {
         let store = forge_core::store::chunk_store::ChunkStore::new(ws.forge_dir().join("objects"));
 
-        // Read objects in parallel from disk.
-        let raw_objects: Vec<(ForgeHash, Vec<u8>)> = {
-            use rayon::prelude::*;
-            missing
-                .par_iter()
-                .filter_map(|hash| store.get_raw(hash).ok().map(|data| (*hash, data)))
-                .collect()
-        };
-        let total_bytes: u64 = raw_objects.iter().map(|(_, d)| d.len() as u64).sum();
-
-        let obj_count = raw_objects.len();
-        let show_progress = total_bytes > 1024 * 1024; // progress bar for >1 MiB
+        // Stat files to get total size without reading them all into memory.
+        let obj_count = missing.len();
+        let total_bytes: u64 = missing
+            .iter()
+            .filter_map(|h| store.file_size(h))
+            .sum();
+        let show_progress = total_bytes > 1024 * 1024;
 
         if show_progress {
             println!(
@@ -166,32 +161,69 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
             ProgressBar::hidden()
         };
 
+        // Two-stage pipeline on dedicated OS threads:
+        //   Stage 1: rayon reads objects from disk in parallel → crossbeam channel
+        //   Stage 2: single thread chunks and sends to tokio channel (preserves ordering)
+        // This keeps blocking I/O off the tokio runtime while ensuring
+        // multi-chunk objects are never interleaved in the stream.
+        const CHUNK_SIZE: usize = 4 * 1024 * 1024;
         let repo_name_owned = repo_name.to_string();
-        let chunks: Vec<ObjectChunk> = raw_objects
-            .into_iter()
-            .map(|(hash, compressed_data)| ObjectChunk {
-                hash: hash.as_bytes().to_vec(),
-                object_type: 1, // 1 = pre-compressed
-                total_size: compressed_data.len() as u64,
-                offset: 0,
-                data: compressed_data,
-                is_last: true,
-                repo: repo_name_owned.clone(),
-            })
-            .collect();
+        // gRPC channel holds ≤4 MiB chunks, so 64 slots = 256 MiB max.
+        // Read channel holds full objects — keep small for large assets.
+        let (grpc_tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(64);
+        let (read_tx, read_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>)>(8);
 
-        let mut sent_bytes: u64 = 0;
-        let mut sent_objs: usize = 0;
-        let (tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(64);
-
-        let pb_clone = pb.clone();
-        let send_handle = tokio::spawn(async move {
-            for chunk in chunks {
-                let data_len = chunk.total_size;
-                if tx.send(chunk).await.is_err() {
-                    break;
+        // Stage 1: parallel disk reads.
+        let reader_handle = std::thread::spawn(move || {
+            use rayon::prelude::*;
+            missing.par_iter().for_each(|hash| {
+                if let Ok(data) = store.get_raw(hash) {
+                    let _ = read_tx.send((*hash, data));
                 }
-                sent_bytes += data_len;
+            });
+        });
+
+        // Stage 2: single thread does chunking + sends to gRPC stream.
+        let pb_clone = pb.clone();
+        let sender_handle = std::thread::spawn(move || {
+            let mut sent_bytes: u64 = 0;
+            let mut sent_objs: usize = 0;
+            while let Ok((hash, data)) = read_rx.recv() {
+                let hash_bytes = hash.as_bytes().to_vec();
+                if data.len() <= CHUNK_SIZE {
+                    let data_len = data.len() as u64;
+                    if grpc_tx.blocking_send(ObjectChunk {
+                        hash: hash_bytes,
+                        object_type: 1,
+                        total_size: data_len,
+                        offset: 0,
+                        data,
+                        is_last: true,
+                        repo: repo_name_owned.clone(),
+                    }).is_err() {
+                        break;
+                    }
+                    sent_bytes += data_len;
+                } else {
+                    let total = data.len() as u64;
+                    for (i, slice) in data.chunks(CHUNK_SIZE).enumerate() {
+                        let off = (i * CHUNK_SIZE) as u64;
+                        let is_last = off + slice.len() as u64 == total;
+                        let slice_len = slice.len() as u64;
+                        if grpc_tx.blocking_send(ObjectChunk {
+                            hash: hash_bytes.clone(),
+                            object_type: 1,
+                            total_size: total,
+                            offset: off,
+                            data: slice.to_vec(),
+                            is_last,
+                            repo: repo_name_owned.clone(),
+                        }).is_err() {
+                            break;
+                        }
+                        sent_bytes += slice_len;
+                    }
+                }
                 sent_objs += 1;
                 pb_clone.set_position(sent_bytes);
                 pb_clone.set_message(format!("Writing objects: {sent_objs}/{obj_count} objects"));
@@ -200,7 +232,8 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         client.push_objects(stream).await?;
-        send_handle.abort();
+        let _ = reader_handle.join();
+        let _ = sender_handle.join();
 
         pb.set_position(total_bytes);
         if show_progress {

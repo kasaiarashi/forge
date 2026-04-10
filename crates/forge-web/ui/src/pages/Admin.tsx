@@ -6,6 +6,8 @@ import {
   Flash,
   Label,
   Button,
+  TextInput,
+  FormControl,
 } from '@primer/react';
 import {
   GearIcon,
@@ -17,8 +19,10 @@ import {
   DatabaseIcon,
   SignInIcon,
   ShieldLockIcon,
+  PeopleIcon,
+  TrashIcon,
 } from '@primer/octicons-react';
-import type { ServerInfo } from '../api';
+import type { ServerInfo, UserSummary } from '../api';
 import api from '../api';
 import { useAuth } from '../context/AuthContext';
 
@@ -69,6 +73,16 @@ export default function Admin() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // User management state
+  const [users, setUsers] = useState<UserSummary[]>([]);
+  const [usersLoading, setUsersLoading] = useState(true);
+  const [usersError, setUsersError] = useState('');
+  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [newUser, setNewUser] = useState({ username: '', email: '', display_name: '', password: '', is_server_admin: false });
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [createUserError, setCreateUserError] = useState('');
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+
   useEffect(() => {
     if (authLoading) return;
     if (!user || !user.is_admin) {
@@ -80,7 +94,38 @@ export default function Admin() {
       .then(setInfo)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
+
+    api.listUsers()
+      .then(setUsers)
+      .catch((e) => setUsersError(e.message))
+      .finally(() => setUsersLoading(false));
   }, [user, authLoading]);
+
+  const handleCreateUser = async () => {
+    if (!newUser.username.trim() || !newUser.email.trim() || !newUser.password) return;
+    setCreatingUser(true);
+    setCreateUserError('');
+    try {
+      const res = await api.createUser(newUser);
+      setUsers((prev) => [...prev, res.user]);
+      setNewUser({ username: '', email: '', display_name: '', password: '', is_server_admin: false });
+      setShowCreateUser(false);
+    } catch (e) {
+      setCreateUserError(e instanceof Error ? e.message : 'Failed to create user');
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
+  const handleDeleteUser = async (id: number) => {
+    try {
+      await api.deleteUser(id);
+      setUsers((prev) => prev.filter((u) => u.id !== id));
+      setDeleteConfirmId(null);
+    } catch (e) {
+      setUsersError(e instanceof Error ? e.message : 'Failed to delete user');
+    }
+  };
 
   if (authLoading || loading) {
     return (
@@ -192,7 +237,7 @@ export default function Admin() {
         }}>
           <StatCard icon={ServerIcon} label="Version" value={info.version} />
           <StatCard icon={ClockIcon} label="Uptime" value={formatUptime(info.uptime_secs)} />
-          <StatCard icon={GitBranchIcon} label="Branches" value={String(info.branches.length)} color="var(--fg-accent)" />
+          <StatCard icon={GitBranchIcon} label="Repositories" value={String(info.repo_count)} color="var(--fg-accent)" />
           <StatCard
             icon={LockIcon}
             label="Active Locks"
@@ -270,6 +315,142 @@ export default function Admin() {
             <Label variant="success">Enabled</Label>
           </div>
         </div>
+      </div>
+
+      {/* Users section */}
+      <div style={{ marginBottom: '24px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ color: 'var(--fg-muted)', display: 'inline-flex' }}><PeopleIcon size={20} /></span>
+            <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0 }}>Users</h3>
+            {!usersLoading && <Label size="small" variant="secondary">{users.length}</Label>}
+          </div>
+          <Button size="small" variant="primary" onClick={() => setShowCreateUser(!showCreateUser)}>
+            {showCreateUser ? 'Cancel' : 'New user'}
+          </Button>
+        </div>
+
+        {/* Create user form */}
+        {showCreateUser && (
+          <div className="forge-card" style={{ marginBottom: '16px' }}>
+            <div className="forge-card-header"><h4 style={{ margin: 0, fontSize: '14px' }}>Create user</h4></div>
+            <div style={{ padding: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                <FormControl>
+                  <FormControl.Label>Username</FormControl.Label>
+                  <TextInput
+                    value={newUser.username}
+                    onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
+                    placeholder="alice"
+                    size="small"
+                    block
+                  />
+                </FormControl>
+                <FormControl>
+                  <FormControl.Label>Email</FormControl.Label>
+                  <TextInput
+                    value={newUser.email}
+                    onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                    placeholder="alice@example.com"
+                    size="small"
+                    block
+                  />
+                </FormControl>
+                <FormControl>
+                  <FormControl.Label>Display name</FormControl.Label>
+                  <TextInput
+                    value={newUser.display_name}
+                    onChange={(e) => setNewUser({ ...newUser, display_name: e.target.value })}
+                    placeholder="Alice Smith"
+                    size="small"
+                    block
+                  />
+                </FormControl>
+                <FormControl>
+                  <FormControl.Label>Password</FormControl.Label>
+                  <TextInput
+                    type="password"
+                    value={newUser.password}
+                    onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                    placeholder="Initial password"
+                    size="small"
+                    block
+                  />
+                </FormControl>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px' }}>
+                  <input
+                    type="checkbox"
+                    checked={newUser.is_server_admin}
+                    onChange={(e) => setNewUser({ ...newUser, is_server_admin: e.target.checked })}
+                  />
+                  Server administrator
+                </label>
+                <Button
+                  variant="primary"
+                  size="small"
+                  onClick={handleCreateUser}
+                  disabled={creatingUser || !newUser.username.trim() || !newUser.email.trim() || !newUser.password}
+                >
+                  {creatingUser ? 'Creating...' : 'Create user'}
+                </Button>
+              </div>
+              {createUserError && <Flash variant="danger" style={{ marginTop: '8px' }}>{createUserError}</Flash>}
+            </div>
+          </div>
+        )}
+
+        {/* User list */}
+        {usersLoading ? (
+          <Spinner size="small" />
+        ) : usersError ? (
+          <Flash variant="danger">{usersError}</Flash>
+        ) : (
+          <div className="forge-card">
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border-muted)' }}>
+                  <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: '12px', color: 'var(--fg-muted)', fontWeight: 600 }}>Username</th>
+                  <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: '12px', color: 'var(--fg-muted)', fontWeight: 600 }}>Email</th>
+                  <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: '12px', color: 'var(--fg-muted)', fontWeight: 600 }}>Display Name</th>
+                  <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: '12px', color: 'var(--fg-muted)', fontWeight: 600 }}>Role</th>
+                  <th style={{ width: '40px' }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map((u) => (
+                  <tr key={u.id} style={{ borderBottom: '1px solid var(--border-muted)' }}>
+                    <td style={{ padding: '10px 16px', fontWeight: 600, fontSize: '14px' }}>{u.username}</td>
+                    <td style={{ padding: '10px 16px', fontSize: '14px', color: 'var(--fg-muted)' }}>{u.email}</td>
+                    <td style={{ padding: '10px 16px', fontSize: '14px' }}>{u.display_name}</td>
+                    <td style={{ padding: '10px 16px' }}>
+                      <Label size="small" variant={u.is_server_admin ? 'accent' : 'secondary'}>
+                        {u.is_server_admin ? 'Admin' : 'User'}
+                      </Label>
+                    </td>
+                    <td style={{ padding: '10px 16px', textAlign: 'right' }}>
+                      {deleteConfirmId === u.id ? (
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                          <Button variant="danger" size="small" onClick={() => handleDeleteUser(u.id)}>
+                            Confirm
+                          </Button>
+                          <Button size="small" onClick={() => setDeleteConfirmId(null)}>
+                            Cancel
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button variant="danger" size="small" onClick={() => setDeleteConfirmId(u.id)}>
+                          <TrashIcon size={14} />
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

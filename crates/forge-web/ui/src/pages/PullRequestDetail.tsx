@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Spinner, Flash, Label } from '@primer/react';
-import { GitPullRequestIcon, GitMergeIcon, GitPullRequestClosedIcon } from '@primer/octicons-react';
+import { GitPullRequestIcon, GitMergeIcon, GitPullRequestClosedIcon, TrashIcon } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
 import api, { repoPath } from '../api';
-import type { PullRequestInfo } from '../api';
+import type { PullRequestInfo, CommentInfo } from '../api';
 import { getLabelColor } from '../utils';
 
 function timeAgo(epoch: number): string {
@@ -49,6 +49,9 @@ export default function PullRequestDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [updating, setUpdating] = useState(false);
+  const [comments, setComments] = useState<CommentInfo[]>([]);
+  const [newComment, setNewComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!repo || isNaN(prId)) return;
@@ -57,7 +60,29 @@ export default function PullRequestDetail() {
       .then(setPr)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
+    api.listComments(repo, prId, 'pull_request')
+      .then(setComments)
+      .catch(() => {});
   }, [repo, prId]);
+
+  const handleAddComment = async () => {
+    if (!newComment.trim()) return;
+    setSubmitting(true);
+    try {
+      await api.createComment(repo, prId, newComment.trim(), 'pull_request');
+      setNewComment('');
+      const updated = await api.listComments(repo, prId, 'pull_request');
+      setComments(updated);
+    } catch {}
+    setSubmitting(false);
+  };
+
+  const handleDeleteComment = async (commentId: number) => {
+    try {
+      await api.deleteComment(repo, commentId);
+      setComments(prev => prev.filter(c => c.id !== commentId));
+    } catch {}
+  };
 
   const updateStatus = async (newStatus: string) => {
     if (!pr) return;
@@ -114,7 +139,7 @@ export default function PullRequestDetail() {
   return (
     <div>
       <RepoHeader repo={repo} currentTab="pulls" />
-      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 16px' }}>
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
         
         {/* Header */}
         <div style={{ marginBottom: '24px' }}>
@@ -157,28 +182,60 @@ export default function PullRequestDetail() {
               </div>
             </div>
 
-            <hr style={{ border: 'none', borderBottom: '2px solid var(--border-muted)', margin: '32px 0' }} />
+            {/* Comments */}
+            {comments.map(c => (
+              <div key={c.id} className="forge-card" style={{ border: '1px solid var(--border-default)', borderRadius: '6px', marginTop: '16px' }}>
+                <div className="forge-card-header" style={{ backgroundColor: 'var(--bg-subtle)', padding: '12px 16px', borderBottom: '1px solid var(--border-default)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>{c.author}</span>
+                    <span style={{ color: 'var(--fg-muted)', marginLeft: '8px' }}>commented {timeAgo(c.created_at)}</span>
+                  </div>
+                  <Button variant="invisible" size="small" onClick={() => handleDeleteComment(c.id)}>
+                    <TrashIcon size={14} />
+                  </Button>
+                </div>
+                <div style={{ padding: '16px', color: 'var(--fg-default)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
+                  {c.body}
+                </div>
+              </div>
+            ))}
+
+            {/* New comment + merge section */}
+            <div style={{ marginTop: '24px' }}>
+              <textarea
+                value={newComment}
+                onChange={e => setNewComment(e.target.value)}
+                placeholder="Leave a comment..."
+                rows={4}
+                style={{ width: '100%', padding: '12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)', fontSize: '14px', resize: 'vertical', boxSizing: 'border-box' }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>
+                {pr.status === 'open' && (
+                  <Button onClick={() => updateStatus('closed')} disabled={updating}>
+                    Close pull request
+                  </Button>
+                )}
+                {pr.status === 'closed' && (
+                  <Button onClick={() => updateStatus('open')} disabled={updating}>
+                    Reopen pull request
+                  </Button>
+                )}
+                <Button variant="primary" onClick={handleAddComment} disabled={submitting || !newComment.trim()}>
+                  {submitting ? 'Submitting...' : 'Comment'}
+                </Button>
+              </div>
+            </div>
+
+            <hr style={{ border: 'none', borderBottom: '2px solid var(--border-muted)', margin: '24px 0' }} />
 
             <div style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px', padding: '16px', backgroundColor: 'var(--bg-subtle)', border: '1px solid var(--border-default)', borderRadius: '6px' }}>
               <span style={{ color: 'var(--fg-muted)', marginTop: '8px' }}><GitMergeIcon size={24} /></span>
               <div>
                 <h4 style={{ margin: '0 0 4px 0' }}>Merge pull request</h4>
                 <p style={{ margin: '0 0 16px 0', fontSize: '14px', color: 'var(--fg-muted)' }}>You can merge this pull request manually.</p>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <Button variant="primary" onClick={handleMerge} disabled={updating || pr.status !== 'open'}>
-                    Merge pull request
-                  </Button>
-                  {pr.status === 'open' && (
-                    <Button onClick={() => updateStatus('closed')} disabled={updating}>
-                      Close pull request
-                    </Button>
-                  )}
-                  {pr.status === 'closed' && (
-                    <Button onClick={() => updateStatus('open')} disabled={updating}>
-                      Reopen pull request
-                    </Button>
-                  )}
-                </div>
+                <Button variant="primary" onClick={handleMerge} disabled={updating || pr.status !== 'open'}>
+                  Merge pull request
+                </Button>
               </div>
             </div>
           </div>

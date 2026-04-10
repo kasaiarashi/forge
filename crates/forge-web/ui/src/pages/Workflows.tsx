@@ -118,7 +118,7 @@ export default function Workflows() {
   return (
     <div>
       <RepoHeader repo={repo || ''} currentTab="actions" />
-
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
       {/* Page header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, marginTop: 16 }}>
         <h2 style={{ fontSize: '24px', fontWeight: 400, margin: 0 }}>Actions</h2>
@@ -295,6 +295,7 @@ export default function Workflows() {
             )}
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

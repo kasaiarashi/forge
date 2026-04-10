@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useRepoParam } from '../hooks/useRepoParam';
 import { Button, Spinner, Flash, Label } from '@primer/react';
-import { IssueOpenedIcon, IssueClosedIcon } from '@primer/octicons-react';
+import { IssueOpenedIcon, IssueClosedIcon, TrashIcon } from '@primer/octicons-react';
 import RepoHeader from '../components/RepoHeader';
 import api, { repoPath } from '../api';
-import type { IssueInfo } from '../api';
+import type { IssueInfo, CommentInfo } from '../api';
 import { getLabelColor } from '../utils';
 
 function timeAgo(epoch: number): string {
@@ -33,6 +33,9 @@ export default function IssueDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [updating, setUpdating] = useState(false);
+  const [comments, setComments] = useState<CommentInfo[]>([]);
+  const [newComment, setNewComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!repo || isNaN(issueId)) return;
@@ -41,7 +44,29 @@ export default function IssueDetail() {
       .then(setIssue)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
+    api.listComments(repo, issueId, 'issue')
+      .then(setComments)
+      .catch(() => {});
   }, [repo, issueId]);
+
+  const handleAddComment = async () => {
+    if (!newComment.trim()) return;
+    setSubmitting(true);
+    try {
+      await api.createComment(repo, issueId, newComment.trim(), 'issue');
+      setNewComment('');
+      const updated = await api.listComments(repo, issueId, 'issue');
+      setComments(updated);
+    } catch {}
+    setSubmitting(false);
+  };
+
+  const handleDeleteComment = async (commentId: number) => {
+    try {
+      await api.deleteComment(repo, commentId);
+      setComments(prev => prev.filter(c => c.id !== commentId));
+    } catch {}
+  };
 
   const toggleStatus = async () => {
     if (!issue) return;
@@ -84,7 +109,7 @@ export default function IssueDetail() {
   return (
     <div>
       <RepoHeader repo={repo} currentTab="issues" />
-      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 16px' }}>
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
         
         {/* Header */}
         <div style={{ marginBottom: '24px' }}>
@@ -115,22 +140,50 @@ export default function IssueDetail() {
         <div style={{ display: 'flex', gap: '24px' }}>
           {/* Main timeline/body */}
           <div style={{ flex: 1 }}>
-            <div className="forge-card" style={{ border: '1px solid var(--border-default)', borderRadius: '6px' }}>
-              <div className="forge-card-header" style={{ backgroundColor: 'var(--bg-subtle)', padding: '16px', borderBottom: '1px solid var(--border-default)' }}>
+            <div className="forge-card">
+              <div className="forge-card-header">
                 <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>{issue.author}</span>
                 <span style={{ color: 'var(--fg-muted)', marginLeft: '8px' }}>commented {timeAgo(issue.created_at)}</span>
               </div>
-              <div style={{ padding: '16px', color: 'var(--fg-default)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
+              <div style={{ padding: 'var(--space-4)', color: 'var(--fg-default)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
                 {issue.body || <span style={{ color: 'var(--fg-muted)', fontStyle: 'italic' }}>No description provided.</span>}
               </div>
             </div>
 
-            <hr style={{ border: 'none', borderBottom: '2px solid var(--border-muted)', margin: '32px 0' }} />
+            {/* Comments */}
+            {comments.map(c => (
+              <div key={c.id} className="forge-card" style={{ marginTop: 'var(--space-4)' }}>
+                <div className="forge-card-header" style={{ justifyContent: 'space-between' }}>
+                  <div>
+                    <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>{c.author}</span>
+                    <span style={{ color: 'var(--fg-muted)', marginLeft: '8px' }}>commented {timeAgo(c.created_at)}</span>
+                  </div>
+                  <Button variant="invisible" size="small" onClick={() => handleDeleteComment(c.id)}>
+                    <TrashIcon size={14} />
+                  </Button>
+                </div>
+                <div style={{ padding: 'var(--space-4)', color: 'var(--fg-default)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
+                  {c.body}
+                </div>
+              </div>
+            ))}
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-              <Button onClick={toggleStatus} disabled={updating}>
-                {updating ? 'Updating...' : (isOpen ? 'Close issue' : 'Reopen issue')}
-              </Button>
+            <div style={{ marginTop: 'var(--space-6)' }}>
+              <textarea
+                value={newComment}
+                onChange={e => setNewComment(e.target.value)}
+                placeholder="Leave a comment..."
+                rows={4}
+                style={{ width: '100%', padding: '12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)', fontSize: '14px', resize: 'vertical', boxSizing: 'border-box' }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>
+                <Button onClick={toggleStatus} disabled={updating}>
+                  {updating ? 'Updating...' : (isOpen ? 'Close issue' : 'Reopen issue')}
+                </Button>
+                <Button variant="primary" onClick={handleAddComment} disabled={submitting || !newComment.trim()}>
+                  {submitting ? 'Submitting...' : 'Comment'}
+                </Button>
+              </div>
             </div>
           </div>
 

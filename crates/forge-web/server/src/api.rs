@@ -145,6 +145,7 @@ pub struct UpdateRepoBody {
     pub description: Option<String>,
     /// "private" | "public" | None (no change)
     pub visibility: Option<String>,
+    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,7 +247,8 @@ struct ServerInfoJson {
     uptime_secs: i64,
     total_objects: i64,
     total_size_bytes: i64,
-    branches: Vec<String>,
+    repos: Vec<String>,
+    repo_count: usize,
     active_locks: i32,
 }
 
@@ -329,8 +331,9 @@ pub async fn update_repo(
     let new_name = body.new_name.unwrap_or_default();
     let description = body.description.unwrap_or_default();
     let visibility = body.visibility.unwrap_or_default();
+    let default_branch = body.default_branch.unwrap_or_default();
 
-    match grpc.update_repo(&repo, &new_name, &description, &visibility).await {
+    match grpc.update_repo(&repo, &new_name, &description, &visibility, &default_branch).await {
         Ok(resp) => {
             if resp.success {
                 (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
@@ -733,12 +736,14 @@ pub async fn server_info(State(state): State<Arc<AppState>>) -> Response {
 
     match grpc.get_server_info().await {
         Ok(resp) => {
+            let repo_count = resp.repos.len();
             let body = ServerInfoJson {
                 version: resp.version,
                 uptime_secs: resp.uptime_secs,
                 total_objects: resp.total_objects,
                 total_size_bytes: resp.total_size_bytes,
-                branches: resp.repos,
+                repos: resp.repos,
+                repo_count,
                 active_locks: resp.active_locks,
             };
             (StatusCode::OK, Json(body)).into_response()
@@ -1154,6 +1159,91 @@ pub async fn language_stats(
     languages.sort_by(|a, b| b.percentage.partial_cmp(&a.percentage).unwrap_or(std::cmp::Ordering::Equal));
 
     (StatusCode::OK, Json(serde_json::json!({ "languages": languages }))).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CommentQuery {
+    pub issue_id: Option<i64>,
+    pub kind: Option<String>,
+}
+
+pub async fn list_comments(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Query(q): Query<CommentQuery>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.list_comments(&repo, q.issue_id.unwrap_or(0), q.kind.as_deref().unwrap_or("issue")).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(resp.comments).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateCommentBody {
+    pub issue_id: i64,
+    pub kind: Option<String>,
+    pub body: String,
+}
+
+pub async fn create_comment(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Json(body): Json<CreateCommentBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.create_comment(&repo, body.issue_id, body.kind.as_deref().unwrap_or("issue"), "web-user", &body.body).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(serde_json::json!({ "success": resp.success, "id": resp.id })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCommentBody {
+    pub body: String,
+}
+
+pub async fn update_comment(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, id)): Path<(String, i64)>,
+    Json(body): Json<UpdateCommentBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.update_comment(id, &body.body).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(serde_json::json!({ "success": resp.success })).into_response()
+}
+
+pub async fn delete_comment(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, id)): Path<(String, i64)>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let resp = match grpc.delete_comment(id).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+    Json(serde_json::json!({ "success": resp.success })).into_response()
 }
 
 // ---------------------------------------------------------------------------
