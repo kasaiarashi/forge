@@ -96,7 +96,7 @@ enum Commands {
     /// Show commit history
     Log {
         /// Number of commits to show
-        #[arg(short, long, default_value_t = 20)]
+        #[arg(short = 'n', long, default_value_t = 20)]
         count: u32,
 
         /// Show history for a specific file
