@@ -1,0 +1,5 @@
+# Shell scripts must always use LF, even on Windows checkouts. A CRLF
+# install.sh served from raw.githubusercontent.com breaks `curl | bash`
+# because bash reads `set -euo pipefail\r` and rejects `pipefail\r` as
+# an invalid option — we hit that bug once, never again.
+*.sh text eol=lf
