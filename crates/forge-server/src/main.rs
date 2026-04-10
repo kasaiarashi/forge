@@ -412,7 +412,12 @@ pub(crate) async fn serve_inner(
         bootstrap_token_path: bootstrap_token_path.clone(),
     });
 
-    let mut builder = Server::builder();
+    // Raise HTTP/2 flow-control windows from the 65 KB default so a single
+    // stream can saturate a fast LAN link without stalling on window updates.
+    let mut builder = Server::builder()
+        .initial_connection_window_size(Some(16 * 1024 * 1024))
+        .initial_stream_window_size(Some(16 * 1024 * 1024))
+        .tcp_nodelay(true);
     if config.server.tls.enabled {
         let tls = std::mem::take(&mut config.server.tls);
         let paths = resolve_tls_paths(&tls, &base);

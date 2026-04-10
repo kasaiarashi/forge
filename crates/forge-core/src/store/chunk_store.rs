@@ -85,6 +85,34 @@ impl ChunkStore {
         Ok(true)
     }
 
+    /// Fast bulk write — skips exists() check, dir creation, and atomic rename.
+    ///
+    /// Caller must call `ensure_shard_dirs()` first and must have already
+    /// verified the object is missing (e.g. via `has_objects`).
+    /// Content-addressable stores are self-verifying: a partial write
+    /// produces a hash mismatch on read.
+    pub fn put_raw_direct(&self, hash: &ForgeHash, compressed: &[u8]) -> Result<(), ForgeError> {
+        let path = self.object_path(hash);
+        std::fs::write(&path, compressed)?;
+        Ok(())
+    }
+
+    /// Pre-create all 256 shard directories so per-object writes skip
+    /// the `create_dir_all` overhead.
+    pub fn ensure_shard_dirs(&self) -> Result<(), ForgeError> {
+        for i in 0u8..=255 {
+            let dir = self.root.join(format!("{:02x}", i));
+            std::fs::create_dir_all(&dir)?;
+        }
+        Ok(())
+    }
+
+    /// Return the on-disk size of a stored object (compressed), or `None`
+    /// if the object doesn't exist.  Uses metadata, no file read.
+    pub fn file_size(&self, hash: &ForgeHash) -> Option<u64> {
+        std::fs::metadata(self.object_path(hash)).ok().map(|m| m.len())
+    }
+
     /// Check if an object exists in the store.
     pub fn has(&self, hash: &ForgeHash) -> bool {
         self.object_path(hash).exists()

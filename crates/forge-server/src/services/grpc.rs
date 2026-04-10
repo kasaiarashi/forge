@@ -88,11 +88,54 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<PushResponse>, Status> {
         let caller = caller_of(&request);
         let mut stream = request.into_inner();
-        let mut received = Vec::new();
+        let mut received: Vec<Vec<u8>> = Vec::new();
         // Buffer for reassembling multi-chunk objects.
         let mut current_buf: Vec<u8> = Vec::new();
         let mut current_hash: Option<Vec<u8>> = None;
-        let mut store = None;
+        let mut store: Option<forge_core::store::chunk_store::ChunkStore> = None;
+
+        // Channel for handing completed objects to background disk writers.
+        // The stream loop validates and reassembles; writers do the slow I/O.
+        let (write_tx, write_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>, bool)>(256);
+
+        // Spawn a pool of blocking writer threads (one per CPU core, capped at 8).
+        let num_writers = rayon::current_num_threads().min(8);
+        let write_rx = Arc::new(write_rx);
+        let write_error: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let mut writer_handles = Vec::with_capacity(num_writers);
+        // Store is set on first chunk; writers wait on the channel so this is fine.
+        let store_slot: Arc<tokio::sync::OnceCell<forge_core::store::chunk_store::ChunkStore>> =
+            Arc::new(tokio::sync::OnceCell::new());
+
+        for _ in 0..num_writers {
+            let rx = Arc::clone(&write_rx);
+            let err = Arc::clone(&write_error);
+            let slot = Arc::clone(&store_slot);
+            writer_handles.push(std::thread::spawn(move || {
+                while let Ok((hash, data, pre_compressed)) = rx.recv() {
+                    // Wait for store to be set (happens on first chunk).
+                    let s = loop {
+                        if let Some(s) = slot.get() {
+                            break s;
+                        }
+                        std::thread::yield_now();
+                    };
+                    let result: Result<(), _> = if pre_compressed {
+                        s.put_raw_direct(&hash, &data)
+                    } else {
+                        s.put(&hash, &data).map(|_| ())
+                    };
+                    if let Err(e) = result {
+                        let mut guard = err.lock().unwrap();
+                        if guard.is_none() {
+                            *guard = Some(e.to_string());
+                        }
+                        break;
+                    }
+                }
+            }));
+        }
 
         while let Some(chunk) = stream
             .message()
@@ -102,28 +145,29 @@ impl ForgeService for ForgeGrpcService {
             // Read repo from the first chunk.
             if store.is_none() {
                 let repo = resolve_repo(&chunk.repo, &caller)?;
-                // Authz happens once, on the first chunk (after we know the repo).
                 require_repo_write(&caller, &self.user_store, &repo)?;
-                // Auto-register repo if it doesn't exist.
                 self.db.create_repo(&repo, "")
                     .map_err(|e| internal_err("failed to register repo", e))?;
-                store = Some(self.fs.repo_store(&repo));
+                let s = self.fs.repo_store(&repo);
+                // Pre-create all 256 shard dirs so writers skip create_dir_all per object.
+                s.ensure_shard_dirs()
+                    .map_err(|e| internal_err("shard dirs", e))?;
+                let _ = store_slot.set(self.fs.repo_store(&repo));
+                store = Some(s);
             }
 
             if current_hash.as_ref() != Some(&chunk.hash) {
-                // New object starting.
                 current_buf.clear();
                 current_hash = Some(chunk.hash.clone());
             }
 
-            const MAX_OBJECT_SIZE: usize = 512 * 1024 * 1024; // 512 MiB per object
+            const MAX_OBJECT_SIZE: usize = 512 * 1024 * 1024;
             if current_buf.len() + chunk.data.len() > MAX_OBJECT_SIZE {
                 return Err(Status::resource_exhausted("object exceeds maximum size"));
             }
             current_buf.extend_from_slice(&chunk.data);
 
             if chunk.is_last {
-                // Object complete — store it.
                 let hash_bytes: [u8; 32] = chunk
                     .hash
                     .as_slice()
@@ -132,10 +176,8 @@ impl ForgeService for ForgeGrpcService {
                 let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
                     .map_err(|e| internal_err("grpc", e))?;
 
-                let s = store.as_ref().ok_or_else(|| Status::internal("no repo specified in stream"))?;
-
-                if chunk.object_type == 1 {
-                    // Pre-compressed data — verify zstd magic bytes (0xFD2FB528).
+                let pre_compressed = chunk.object_type == 1;
+                if pre_compressed {
                     if current_buf.len() < 4
                         || current_buf[0] != 0x28
                         || current_buf[1] != 0xB5
@@ -147,18 +189,34 @@ impl ForgeService for ForgeGrpcService {
                             hex::encode(&hash_bytes)
                         )));
                     }
-                    s.put_raw(&forge_hash, &current_buf)
-                        .map_err(|e| internal_err("grpc", e))?;
-                } else {
-                    // Uncompressed data — compress and store.
-                    s.put(&forge_hash, &current_buf)
-                        .map_err(|e| internal_err("grpc", e))?;
                 }
 
+                // Hand off to writer threads — non-blocking unless channel is full,
+                // which provides natural backpressure.
+                let data = std::mem::take(&mut current_buf);
+                write_tx
+                    .send((forge_hash, data, pre_compressed))
+                    .map_err(|_| Status::internal("writer thread crashed"))?;
+
                 received.push(chunk.hash.clone());
-                current_buf.clear();
                 current_hash = None;
+
+                // Check for write errors periodically.
+                if let Some(e) = write_error.lock().unwrap().take() {
+                    return Err(internal_err("grpc", e));
+                }
             }
+        }
+
+        // Drop sender to signal writers to finish, then wait for them.
+        drop(write_tx);
+        for h in writer_handles {
+            let _ = h.join();
+        }
+
+        // Final error check.
+        if let Some(e) = write_error.lock().unwrap().take() {
+            return Err(internal_err("grpc", e));
         }
 
         Ok(Response::new(PushResponse {
@@ -243,16 +301,25 @@ impl ForgeService for ForgeGrpcService {
         let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
         let store = self.fs.repo_store(repo);
-        let mut has = Vec::with_capacity(req.hashes.len());
 
-        for hash_bytes in &req.hashes {
-            let hash_hex = hex::encode(hash_bytes);
-            let exists = match ForgeHash::from_hex(&hash_hex) {
-                Ok(h) => store.has(&h),
-                Err(_) => false,
-            };
-            has.push(exists);
-        }
+        // Parallelize filesystem stat calls — checking 100K+ paths
+        // sequentially is the dominant cost on large pushes.
+        let hashes = req.hashes;
+        let has = tokio::task::spawn_blocking(move || {
+            use rayon::prelude::*;
+            hashes
+                .par_iter()
+                .map(|hash_bytes| {
+                    let hash_hex = hex::encode(hash_bytes);
+                    match ForgeHash::from_hex(&hash_hex) {
+                        Ok(h) => store.has(&h),
+                        Err(_) => false,
+                    }
+                })
+                .collect::<Vec<bool>>()
+        })
+        .await
+        .map_err(|e| internal_err("has_objects", e))?;
 
         Ok(Response::new(HasObjectsResponse { has }))
     }
