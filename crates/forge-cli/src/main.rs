@@ -361,6 +361,10 @@ enum Commands {
         /// Only check for updates without installing
         #[arg(long)]
         check: bool,
+
+        /// Force re-download even if already on the latest version
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Authenticate against a forge server and store the credential
@@ -474,7 +478,7 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Revert { commit } => commands::revert::run(commit)?,
         Commands::AssetInfo { path } => commands::asset_info::run(path, cli.json)?,
         Commands::Gc { dry_run } => commands::gc::run(dry_run)?,
-        Commands::Update { check } => commands::update::run(check, cli.json)?,
+        Commands::Update { check, force } => commands::update::run(check, force, cli.json)?,
         Commands::Login { server, token, username, password, yes } => commands::login::run(server, token, username, password, yes)?,
         Commands::Logout { server } => commands::logout::run(server)?,
         Commands::Whoami { server } => commands::whoami::run(server)?,
