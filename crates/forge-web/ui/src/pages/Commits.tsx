@@ -179,7 +179,7 @@ export default function Commits() {
                         onMouseOver={(e) => (e.currentTarget.style.color = 'var(--fg-accent)')}
                         onMouseOut={(e) => (e.currentTarget.style.color = 'var(--fg-default)')}
                       >
-                        {commit.message}
+                        {commit.message.split('\n')[0]}
                       </Link>
                       <span style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
                         {commit.author_name} committed {timeAgo(commit.timestamp)}

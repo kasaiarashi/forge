@@ -1,16 +1,13 @@
-//! Pager helper for long-form CLI output (like `git log` piping to `less`).
+//! Pager helper for long-form CLI output.
 //!
-//! Routes content through the cross-platform `minus` pager when stdout is a
-//! terminal and the caller hasn't opted out, otherwise writes directly.
+//! When content exceeds the terminal height, prints it to stdout first (for
+//! scrollback persistence) then opens the minus pager on the alternate screen.
+//! Since minus calls process::exit on quit, the pre-printed content is what
+//! the user sees after exiting. When content fits on screen, prints directly
+//! without invoking the pager.
 
 use std::io::{IsTerminal, Write};
 
-/// Display `content` to the user. If stdout is a TTY and `no_pager`/`json` are
-/// false, hands off to the `minus` pager (supports scrolling, search, `q`/`:q`
-/// to exit). Otherwise writes straight to stdout.
-///
-/// Falls back to direct stdout if the pager fails to start, so the caller never
-/// loses output.
 pub fn show(content: String, no_pager: bool, json: bool) {
     let use_pager = !no_pager && !json && std::io::stdout().is_terminal();
 
@@ -20,13 +17,36 @@ pub fn show(content: String, no_pager: bool, json: bool) {
         return;
     }
 
-    // Try paging via minus. If it errors at any step, fall back to direct print
-    // so the user always sees their output.
-    let pager = minus::Pager::new();
-    if pager.set_text(content.clone()).is_ok() && minus::page_all(pager).is_ok() {
+    // Check if content fits on screen — if so, just print directly.
+    let line_count = content.lines().count();
+    let term_rows = crossterm::terminal::size()
+        .map(|(_, rows)| rows as usize)
+        .unwrap_or(24);
+
+    if line_count < term_rows {
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(content.as_bytes());
+        if !content.ends_with('\n') {
+            let _ = stdout.write_all(b"\n");
+        }
         return;
     }
 
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(content.as_bytes());
+    // Content is longer than the terminal — use the pager.
+    // Print to stdout first so it lands in scrollback. The pager's alternate
+    // screen will hide it while active, and when minus exits (via
+    // process::exit), the main screen with the content is restored.
+    {
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(content.as_bytes());
+        if !content.ends_with('\n') {
+            let _ = stdout.write_all(b"\n");
+        }
+        let _ = stdout.flush();
+    }
+
+    let pager = minus::Pager::new();
+    if pager.set_text(content).is_ok() {
+        let _ = minus::page_all(pager);
+    }
 }

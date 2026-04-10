@@ -33,6 +33,7 @@ similar.workspace = true
 indicatif.workspace = true
 self-replace.workspace = true
 minus = { version = "5", features = ["static_output"] }
+crossterm = "0.27"
 keyring = "2"
 rpassword = "7"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }

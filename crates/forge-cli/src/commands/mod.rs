@@ -37,3 +37,4 @@ pub mod trust;
 pub mod update;
 pub mod version;
 pub mod whoami;
+pub mod cat_object;

@@ -344,8 +344,21 @@ export default function CommitDetail() {
           borderBottom: '1px solid var(--border-default)',
         }}>
           <h2 style={{ fontSize: '20px', fontWeight: 600, margin: '0 0 8px 0', wordBreak: 'break-word' }}>
-            {info.message}
+            {info.message.split('\n')[0]}
           </h2>
+          {info.message.includes('\n') && (
+            <pre style={{
+              fontSize: '14px',
+              color: 'var(--fg-muted)',
+              margin: '0 0 8px 0',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              fontFamily: 'inherit',
+              lineHeight: 1.5,
+            }}>
+              {info.message.split('\n').slice(1).join('\n').replace(/^\n+/, '')}
+            </pre>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             <div className="avatar-circle avatar-circle-sm">
               {info.author_name.charAt(0).toUpperCase()}

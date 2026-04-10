@@ -277,12 +277,13 @@ fn print_commit(
     let decorations = format_decorations(hash, ref_map, current_branch, head_hash);
 
     if oneline {
+        let subject = snapshot.message.lines().next().unwrap_or("");
         let _ = writeln!(
             out,
             "\x1b[33m{}\x1b[0m{} {}",
             hash.short(),
             decorations,
-            snapshot.message
+            subject
         );
     } else {
         let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m{}", hash.short(), decorations);
@@ -297,7 +298,9 @@ fn print_commit(
             snapshot.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         );
         let _ = writeln!(out);
-        let _ = writeln!(out, "    {}", snapshot.message);
+        for line in snapshot.message.lines() {
+            let _ = writeln!(out, "    {}", line);
+        }
         let _ = writeln!(out);
     }
 }

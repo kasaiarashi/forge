@@ -30,53 +30,82 @@ fn collect_tree_paths(
     }
 }
 
-/// Fetch active locks from the server (best-effort with 1s timeout, returns empty on failure).
-fn fetch_locks(ws: &Workspace) -> Vec<(String, String)> {
+/// Server-fetched status info: locks and the remote tip for the current branch.
+struct ServerInfo {
+    locks: Vec<(String, String)>,
+    /// Remote tip hash for the current branch, if available from the server.
+    remote_tip: Option<ForgeHash>,
+}
+
+/// Fetch locks and the remote branch tip from the server in one connection.
+/// Best-effort with a 2s timeout — returns defaults on failure.
+fn fetch_server_info(ws: &Workspace, branch: Option<&str>) -> ServerInfo {
     let config = match ws.config() {
         Ok(c) => c,
-        Err(_) => return vec![],
+        Err(_) => return ServerInfo { locks: vec![], remote_tip: None },
     };
     let server_url = match config.default_remote_url() {
         Some(u) => u.to_string(),
-        None => return vec![],
+        None => return ServerInfo { locks: vec![], remote_tip: None },
+    };
+    let repo = if config.repo.is_empty() {
+        "default".to_string()
+    } else {
+        config.repo.clone()
     };
 
     let rt = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
-        Err(_) => return vec![],
+        Err(_) => return ServerInfo { locks: vec![], remote_tip: None },
     };
+
+    let branch_owned = branch.map(|b| b.to_string());
 
     rt.block_on(async {
         use forge_proto::forge::*;
 
-        // Timeout the entire lock fetch to avoid slowing down status.
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             let mut client = crate::client::connect_forge(&server_url).await?;
 
-            let repo = if config.repo.is_empty() {
-                "default".into()
-            } else {
-                config.repo.clone()
-            };
-
-            let resp = client
+            // Fetch locks.
+            let locks_resp = client
                 .list_locks(ListLocksRequest {
-                    repo,
+                    repo: repo.clone(),
                     path_prefix: String::new(),
                     owner: String::new(),
                 })
                 .await?
                 .into_inner();
+            let locks: Vec<(String, String)> = locks_resp
+                .locks
+                .into_iter()
+                .map(|l| (l.path, l.owner))
+                .collect();
 
-            Ok::<Vec<(String, String)>, Box<dyn std::error::Error>>(
-                resp.locks.into_iter().map(|l| (l.path, l.owner)).collect(),
-            )
+            // Fetch remote refs to get the current branch tip.
+            let remote_tip = if let Some(ref branch) = branch_owned {
+                let refs_resp = client
+                    .get_refs(GetRefsRequest { repo: repo.clone() })
+                    .await?
+                    .into_inner();
+                let ref_name = format!("refs/heads/{}", branch);
+                refs_resp
+                    .refs
+                    .get(&ref_name)
+                    .and_then(|bytes| {
+                        ForgeHash::from_hex(&hex::encode(bytes)).ok()
+                    })
+            } else {
+                None
+            };
+
+            Ok::<ServerInfo, Box<dyn std::error::Error>>(ServerInfo { locks, remote_tip })
         })
         .await;
 
         match result {
-            Ok(Ok(locks)) => locks,
-            _ => vec![],
+            Ok(Ok(info)) => info,
+            _ => ServerInfo { locks: vec![], remote_tip: None },
         }
     })
 }
@@ -231,10 +260,37 @@ pub fn run(json: bool) -> Result<()> {
         }
     }
 
-    // Fetch locks from server (best-effort).
-    let locks = fetch_locks(&ws);
-
     let has_staged = !staged_new.is_empty() || !staged_modified.is_empty() || !staged_deleted.is_empty();
+
+    // Compute ahead/behind relative to the remote-tracking branch.
+    let branch_name = ws.current_branch()?;
+    let config = ws.config()?;
+    let remote_name = config
+        .default_remote()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "origin".into());
+
+    // Fetch locks + remote branch tip from the server in one call.
+    // If the server is offline, falls back to local remote-tracking refs.
+    let server_info = fetch_server_info(&ws, branch_name.as_deref());
+    let locks = server_info.locks;
+
+    let (ahead, behind, remote_label) = if let Some(ref branch) = branch_name {
+        // Prefer the live server tip; fall back to local remote-tracking ref.
+        let remote_tip = server_info.remote_tip.or_else(|| {
+            ws.get_remote_ref(&remote_name, branch).ok()
+        });
+        match remote_tip {
+            Some(tip) if !tip.is_zero() => {
+                let local_tip = ws.get_branch_tip(branch).unwrap_or(ForgeHash::ZERO);
+                let (a, b) = count_ahead_behind(&ws, &local_tip, &tip);
+                (a, b, Some(format!("{}/{}", remote_name, branch)))
+            }
+            _ => (0, 0, None),
+        }
+    } else {
+        (0, 0, None)
+    };
 
     if json {
         let lock_entries: Vec<serde_json::Value> = locks
@@ -249,11 +305,34 @@ pub fn run(json: bool) -> Result<()> {
             "deleted": deleted,
             "untracked": untracked,
             "locked": lock_entries,
+            "ahead": ahead,
+            "behind": behind,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        if let Some(branch) = ws.current_branch()? {
+        if let Some(ref branch) = branch_name {
             println!("On branch {}", branch);
+        }
+        if let Some(ref label) = remote_label {
+            if ahead == 0 && behind == 0 {
+                println!("Your branch is up to date with '{}'.", label);
+            } else if ahead > 0 && behind == 0 {
+                println!(
+                    "Your branch is ahead of '{}' by {} commit{}.",
+                    label, ahead, if ahead == 1 { "" } else { "s" }
+                );
+            } else if behind > 0 && ahead == 0 {
+                println!(
+                    "Your branch is behind '{}' by {} commit{}, and can be fast-forwarded.",
+                    label, behind, if behind == 1 { "" } else { "s" }
+                );
+            } else {
+                println!(
+                    "Your branch and '{}' have diverged,\n\
+                     and have {} and {} different commit{} each, respectively.",
+                    label, ahead, behind, if ahead + behind == 2 { "" } else { "s" }
+                );
+            }
         }
         println!();
 
@@ -311,4 +390,50 @@ pub fn run(json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Count how many commits `local` is ahead of and behind `remote`.
+///
+/// Walks both chains back to find the common ancestor (merge base), then
+/// counts commits on each side. Caps the walk at 1000 to avoid runaway
+/// traversals on very long histories.
+fn count_ahead_behind(ws: &Workspace, local: &ForgeHash, remote: &ForgeHash) -> (usize, usize) {
+    if local == remote {
+        return (0, 0);
+    }
+
+    // Collect ancestors of each side.
+    let local_ancestors = collect_ancestors(ws, local, 1000);
+    let remote_ancestors = collect_ancestors(ws, remote, 1000);
+
+    let ahead = local_ancestors
+        .iter()
+        .take_while(|h| !remote_ancestors.contains(h))
+        .count();
+    let behind = remote_ancestors
+        .iter()
+        .take_while(|h| !local_ancestors.contains(h))
+        .count();
+
+    (ahead, behind)
+}
+
+/// Walk the first-parent chain from `start`, returning an ordered list of
+/// commit hashes (newest first). Stops after `limit` commits.
+fn collect_ancestors(ws: &Workspace, start: &ForgeHash, limit: usize) -> Vec<ForgeHash> {
+    let mut result = Vec::new();
+    let mut current = *start;
+    for _ in 0..limit {
+        if current.is_zero() {
+            break;
+        }
+        result.push(current);
+        match ws.object_store.get_snapshot(&current) {
+            Ok(snap) => {
+                current = snap.parents.first().copied().unwrap_or(ForgeHash::ZERO);
+            }
+            Err(_) => break,
+        }
+    }
+    result
 }

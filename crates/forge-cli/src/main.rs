@@ -398,6 +398,13 @@ enum Commands {
         server: Option<String>,
     },
 
+    /// Inspect a raw object (snapshot, tree, blob)
+    #[command(name = "cat-object")]
+    CatObject {
+        /// Object hash (full or short) or ref name
+        object: String,
+    },
+
     /// Print client version; inside a repo, also print the server version.
     Version,
 
@@ -471,6 +478,7 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Login { server, token, username, password, yes } => commands::login::run(server, token, username, password, yes)?,
         Commands::Logout { server } => commands::logout::run(server)?,
         Commands::Whoami { server } => commands::whoami::run(server)?,
+        Commands::CatObject { object } => commands::cat_object::run(object)?,
         Commands::Version => commands::version::run(cli.json)?,
         Commands::Trust { server, yes } => commands::trust::run(server, yes)?,
     }
