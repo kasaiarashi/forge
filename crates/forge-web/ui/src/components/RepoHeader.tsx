@@ -23,9 +23,10 @@ interface RepoHeaderProps {
   repo: string;
   currentTab: Tab;
   activeBranch?: string;
+  visibility?: string; // "public" | "private"
 }
 
-export default function RepoHeader({ repo, currentTab, activeBranch }: RepoHeaderProps) {
+export default function RepoHeader({ repo, currentTab, activeBranch, visibility }: RepoHeaderProps) {
   // `repo` is the full `owner/name` path. Build navigation links via
   // repoPath() so each segment is encoded but the / between them stays
   // literal (so React Router's :owner/:repo can match). Split into halves
@@ -61,7 +62,7 @@ export default function RepoHeader({ repo, currentTab, activeBranch }: RepoHeade
               </Link>
             </div>
             <Label size="small" variant="secondary" style={{ marginLeft: '4px', alignSelf: 'center' }}>
-              Public
+              {visibility === 'public' ? 'Public' : 'Private'}
             </Label>
           </div>
 

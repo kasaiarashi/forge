@@ -58,14 +58,16 @@ pub struct WebConfig {
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
 
-    /// If set (and TLS is enabled), spawn a sibling listener on this port
-    /// that 308-redirects every request to the HTTPS URL. Bound on the
-    /// same interface as `listen`, so a config like
-    /// `listen = "0.0.0.0:3000"` + `http_redirect_port = 80` gives you
-    /// `http://host/...` → `https://host:3000/...` out of the box.
-    /// Absent = no redirect listener.
-    #[serde(default)]
-    pub http_redirect_port: Option<u16>,
+    /// Plain HTTP port. When TLS is enabled, requests on this port are
+    /// 308-redirected to the HTTPS URL on `https_port`. When TLS is off,
+    /// this is the port the server listens on. Bound on the same interface
+    /// as `listen`. Default: 80.
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+
+    /// HTTPS port. Only used when TLS is enabled. Default: 443.
+    #[serde(default = "default_https_port")]
+    pub https_port: u16,
 }
 
 /// TLS settings for the HTTPS listener.
@@ -156,7 +158,13 @@ pub struct ServerConfig {
 }
 
 fn default_listen() -> String {
-    "127.0.0.1:3000".to_string()
+    "0.0.0.0".to_string()
+}
+fn default_http_port() -> u16 {
+    80
+}
+fn default_https_port() -> u16 {
+    443
 }
 fn default_static_dir() -> String {
     "./crates/forge-web/ui/dist".to_string()
@@ -181,7 +189,8 @@ impl Default for Config {
                 secure_cookies: false,
                 tls: TlsConfig::default(),
                 rate_limit: RateLimitConfig::default(),
-                http_redirect_port: None,
+                http_port: default_http_port(),
+                https_port: default_https_port(),
             },
             server: ServerConfig {
                 grpc_url: default_grpc_url(),

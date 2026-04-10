@@ -606,6 +606,37 @@ pub async fn revoke_repo_role(
     }
 }
 
+/// `GET /api/auth/users/lookup` — lookup user by username (any authenticated user).
+pub async fn lookup_user(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let username = match params.get("username") {
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => return err(StatusCode::BAD_REQUEST, "username query parameter is required"),
+    };
+    let mut auth = match state.grpc_auth_client().await {
+        Ok(c) => c,
+        Err(e) => { tracing::error!(error = %e, "gRPC client unavailable"); return err(StatusCode::BAD_GATEWAY, "auth service unavailable"); },
+    };
+    match auth.lookup_user(LookupUserRequest { username }).await {
+        Ok(r) => {
+            let resp = r.into_inner();
+            match resp.user {
+                Some(u) => Json(user_dto(&u)).into_response(),
+                None => err(StatusCode::NOT_FOUND, "user not found"),
+            }
+        }
+        Err(s) if s.code() == tonic::Code::Unauthenticated => {
+            err(StatusCode::UNAUTHORIZED, s.message())
+        }
+        Err(s) if s.code() == tonic::Code::NotFound => {
+            err(StatusCode::NOT_FOUND, s.message())
+        }
+        Err(s) => { tracing::error!(code = ?s.code(), msg = s.message(), "upstream auth error"); err(StatusCode::BAD_GATEWAY, "auth service error") },
+    }
+}
+
 /// `GET /api/auth/repos/:repo/members` — list repo members.
 pub async fn list_repo_members(
     State(state): State<Arc<AppState>>,

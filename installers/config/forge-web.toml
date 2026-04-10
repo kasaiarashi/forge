@@ -2,9 +2,14 @@
 # =========================
 
 [web]
-# Address and port for the web UI. Bind to 0.0.0.0 to expose it on the
-# network — [web.tls] below keeps browser traffic encrypted.
-listen = "0.0.0.0:3000"
+# Bind address for the web UI. Use 0.0.0.0 to expose on the network.
+listen = "0.0.0.0"
+
+# HTTP port — plain HTTP requests are redirected to HTTPS when TLS is on.
+http_port = 80
+
+# HTTPS port — used when TLS is enabled (the default).
+https_port = 443
 
 # Path to the built React UI assets (relative to wherever forge-web is
 # launched from — the installer drops these next to the binary).

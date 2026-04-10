@@ -351,13 +351,21 @@ pub(crate) async fn serve_inner(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
 
-    let listen_addr = cfg.web.listen.clone();
+    let listen_host = cfg.web.listen.clone();
+    let http_port = cfg.web.http_port;
+    let https_port = cfg.web.https_port;
     let static_dir = PathBuf::from(&cfg.web.static_dir);
     let allowed_origins = cfg.web.allowed_origins.clone();
     let tls_cfg = cfg.web.tls.clone();
     let tls_enabled = tls_cfg.enabled;
     let rate_limit = cfg.web.rate_limit.clone();
-    let http_redirect_port = cfg.web.http_redirect_port;
+    // When TLS is on, HTTPS listens on https_port and HTTP redirects on http_port.
+    // When TLS is off, HTTP listens on http_port directly.
+    let listen_addr = if tls_enabled {
+        format!("{listen_host}:{https_port}")
+    } else {
+        format!("{listen_host}:{http_port}")
+    };
     // Secure cookie attribute: on when forge-web terminates TLS itself OR
     // when the operator explicitly opted in via `secure_cookies = true`. A
     // loopback plaintext dev server is the only scenario where this should
@@ -409,6 +417,7 @@ pub(crate) async fn serve_inner(
             get(auth::list_users).post(auth::create_user),
         )
         .route("/users/:id", delete(auth::delete_user))
+        .route("/users/lookup", get(auth::lookup_user))
         .route(
             "/repos/:repo/members",
             get(auth::list_repo_members).post(auth::grant_repo_role),
@@ -431,6 +440,8 @@ pub(crate) async fn serve_inner(
         .route("/repos/:repo/issues/:id", get(api::get_issue))
         .route("/repos/:repo/pulls", get(api::list_pull_requests))
         .route("/repos/:repo/pulls/:id", get(api::get_pull_request))
+        // Comments (public read)
+        .route("/repos/:repo/comments", get(api::list_comments))
         // Actions (public read)
         .route("/repos/:repo/workflows", get(api_actions::list_workflows))
         .route("/repos/:repo/runs", get(api_actions::list_runs))
@@ -453,6 +464,9 @@ pub(crate) async fn serve_inner(
         .route("/repos/:repo/pulls", post(api::create_pull_request))
         .route("/repos/:repo/pulls/:id", put(api::update_pull_request))
         .route("/repos/:repo/pulls/:id/merge", post(api::merge_pull_request))
+        // Comments (writes)
+        .route("/repos/:repo/comments", post(api::create_comment))
+        .route("/repos/:repo/comments/:id", put(api::update_comment).delete(api::delete_comment))
         .route("/repos/:repo/locks/acquire", post(api::acquire_lock))
         .route("/repos/:repo/locks/:path", delete(api::release_lock))
         .route("/server/info", get(api::server_info))
@@ -719,18 +733,15 @@ pub(crate) async fn serve_inner(
             )
         })?;
 
-        // Optional sibling listener that 308-redirects every HTTP request
-        // to the matching HTTPS URL. Spawned under the same graceful
-        // shutdown handle as the main HTTPS server so Ctrl+C tears both
-        // down cleanly.
-        if let Some(http_port) = http_redirect_port {
+        // Sibling HTTP listener that 308-redirects to the HTTPS URL.
+        {
             let redirect_addr =
                 std::net::SocketAddr::new(addr.ip(), http_port);
-            let https_port = addr.port();
+            let redir_https_port = addr.port();
             let redirect_handle = handle.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    run_http_redirect(redirect_addr, https_port, redirect_handle).await
+                    run_http_redirect(redirect_addr, redir_https_port, redirect_handle).await
                 {
                     tracing::warn!(
                         "HTTP→HTTPS redirect listener on {redirect_addr} exited: {e}"

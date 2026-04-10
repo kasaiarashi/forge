@@ -18,6 +18,7 @@ export default function NewPullRequest() {
   // Create state variables
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
+  const [labels, setLabels] = useState('');
   const [commits, setCommits] = useState<CommitSummary[]>([]);
   
   // UI states
@@ -59,7 +60,8 @@ export default function NewPullRequest() {
     setSubmitting(true);
     setError('');
     try {
-      await api.createPullRequest(repo, title.trim(), compareBranch, baseBranch, body, []);
+      const labelList = labels.split(',').map(l => l.trim()).filter(Boolean);
+      await api.createPullRequest(repo, title.trim(), compareBranch, baseBranch, body, labelList);
       navigate(`/${repoPath(repo)}/pulls`);
     } catch (e: any) {
       setError(e.message || 'Failed to create pull request');
@@ -264,7 +266,13 @@ export default function NewPullRequest() {
                     <span style={{ fontWeight: 600 }}>Labels</span>
                     <GearIcon />
                   </div>
-                  <span>None yet</span>
+                  <input
+                    type="text"
+                    value={labels}
+                    onChange={e => setLabels(e.target.value)}
+                    placeholder="bug, feature, ..."
+                    style={{ width: '100%', padding: '4px 8px', fontSize: '12px', borderRadius: '4px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)', boxSizing: 'border-box' }}
+                  />
                 </div>
 
                 <div style={{ borderBottom: '1px solid var(--border-muted)', paddingBottom: '16px' }}>

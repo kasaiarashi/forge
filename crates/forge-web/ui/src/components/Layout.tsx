@@ -127,6 +127,9 @@ export default function Layout({ children }: LayoutProps) {
                   <ActionList.Item onSelect={() => navigate('/')}>
                     Your repositories
                   </ActionList.Item>
+                  <ActionList.Item onSelect={() => navigate('/account')}>
+                    Account settings
+                  </ActionList.Item>
                   {user?.is_admin && (
                     <ActionList.Item onSelect={() => navigate('/admin')}>
                       Server administration

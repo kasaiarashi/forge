@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   TextInput,
   Spinner,
@@ -71,6 +71,7 @@ function CopyableCodeBlock({ lines, label }: { lines: string[]; label: string })
 }
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -107,12 +108,11 @@ export default function Dashboard() {
     try {
       const repoName = newName.trim();
       await api.createRepo(repoName, newDesc.trim());
-      const updated = await api.listRepos();
-      setRepos(updated);
       setShowCreate(false);
-      setCreatedRepo(repoName);
       setNewName('');
       setNewDesc('');
+      const fullPath = user?.username ? `${user.username}/${repoName}` : repoName;
+      navigate(`/${repoPath(fullPath)}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to create repository');
     } finally {

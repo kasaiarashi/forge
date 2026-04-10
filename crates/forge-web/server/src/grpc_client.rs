@@ -194,6 +194,7 @@ impl ForgeGrpcClient {
         new_name: &str,
         description: &str,
         visibility: &str,
+        default_branch: &str,
     ) -> anyhow::Result<UpdateRepoResponse> {
         let mut client = self.forge();
         let resp = client
@@ -202,6 +203,7 @@ impl ForgeGrpcClient {
                 new_name: new_name.to_string(),
                 description: description.to_string(),
                 visibility: visibility.to_string(),
+                default_branch: default_branch.to_string(),
             })
             .await?;
         Ok(resp.into_inner())
@@ -518,6 +520,34 @@ impl ForgeGrpcClient {
     pub async fn merge_pull_request(&self, id: i64) -> anyhow::Result<MergePullRequestResponse> {
         let mut client = self.forge();
         let resp = client.merge_pull_request(MergePullRequestRequest { id }).await?;
+        Ok(resp.into_inner())
+    }
+
+    // ── Comments ────────────────────────────────────────────────────────────
+
+    pub async fn list_comments(&self, repo: &str, issue_id: i64, kind: &str) -> anyhow::Result<ListCommentsResponse> {
+        let mut client = self.forge();
+        let resp = client.list_comments(ListCommentsRequest { repo: repo.to_string(), issue_id, kind: kind.to_string() }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn create_comment(&self, repo: &str, issue_id: i64, kind: &str, author: &str, body: &str) -> anyhow::Result<CreateCommentResponse> {
+        let mut client = self.forge();
+        let resp = client.create_comment(CreateCommentRequest {
+            repo: repo.to_string(), issue_id, kind: kind.to_string(), author: author.to_string(), body: body.to_string(),
+        }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn update_comment(&self, id: i64, body: &str) -> anyhow::Result<UpdateCommentResponse> {
+        let mut client = self.forge();
+        let resp = client.update_comment(UpdateCommentRequest { id, body: body.to_string() }).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn delete_comment(&self, id: i64) -> anyhow::Result<DeleteCommentResponse> {
+        let mut client = self.forge();
+        let resp = client.delete_comment(DeleteCommentRequest { id }).await?;
         Ok(resp.into_inner())
     }
 }

@@ -348,6 +348,33 @@ impl AuthService for ForgeAuthService {
         Ok(Response::new(DeleteUserResponse { success: removed }))
     }
 
+    // ── User lookup (any authenticated user) ──────────────────────────────
+
+    async fn lookup_user(
+        &self,
+        request: Request<LookupUserRequest>,
+    ) -> Result<Response<LookupUserResponse>, Status> {
+        let caller = caller_of(&request);
+        authorize::require_authenticated(&caller)?;
+        let req = request.into_inner();
+        if req.username.is_empty() {
+            return Err(Status::invalid_argument("username is required"));
+        }
+        let user = self
+            .store
+            .find_user_by_username(&req.username)
+            .map_err(|e| internal_err("grpc", e))?;
+        match user {
+            Some(u) => Ok(Response::new(LookupUserResponse {
+                user: Some(user_to_proto(&u)),
+            })),
+            None => Err(Status::not_found(format!(
+                "user '{}' not found",
+                req.username
+            ))),
+        }
+    }
+
     // ── Repo ACLs ───────────────────────────────────────────────────────────
 
     async fn grant_repo_role(

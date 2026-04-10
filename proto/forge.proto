@@ -35,6 +35,9 @@ service AuthService {
     rpc RevokeRepoRole(RevokeRepoRoleRequest) returns (RevokeRepoRoleResponse);
     rpc ListRepoMembers(ListRepoMembersRequest) returns (ListRepoMembersResponse);
 
+    // User lookup (any authenticated user)
+    rpc LookupUser(LookupUserRequest) returns (LookupUserResponse);
+
     // Server bootstrap (unauthenticated; rejects after first user exists)
     rpc IsServerInitialized(IsServerInitializedRequest) returns (IsServerInitializedResponse);
     rpc BootstrapAdmin(BootstrapAdminRequest) returns (BootstrapAdminResponse);
@@ -132,6 +135,9 @@ message ListUsersResponse { repeated UserInfo users = 1; }
 
 message DeleteUserRequest { int64 id = 1; }
 message DeleteUserResponse { bool success = 1; }
+
+message LookupUserRequest { string username = 1; }
+message LookupUserResponse { UserInfo user = 1; }
 
 message GrantRepoRoleRequest {
     string repo = 1;
@@ -231,6 +237,12 @@ service ForgeService {
     // Single item getters
     rpc GetIssue(GetIssueRequest) returns (GetIssueResponse);
     rpc GetPullRequest(GetPullRequestRequest) returns (GetPullRequestResponse);
+
+    // Comments (shared by issues and PRs)
+    rpc ListComments(ListCommentsRequest) returns (ListCommentsResponse);
+    rpc CreateComment(CreateCommentRequest) returns (CreateCommentResponse);
+    rpc UpdateComment(UpdateCommentRequest) returns (UpdateCommentResponse);
+    rpc DeleteComment(DeleteCommentRequest) returns (DeleteCommentResponse);
 }
 
 // ============================================================
@@ -390,6 +402,7 @@ message UpdateRepoRequest {
     string new_name = 2;       // new name (empty = no rename)
     string description = 3;    // new description
     string visibility = 4;     // "private" | "public" — empty = no change
+    string default_branch = 5; // empty = no change
 }
 
 message UpdateRepoResponse {
@@ -763,3 +776,43 @@ message MergePullRequestResponse {
     bool success = 1;
     string error = 2;
 }
+
+// ============================================================
+// Comments (shared by issues and pull requests)
+// ============================================================
+
+message CommentInfo {
+    int64 id = 1;
+    string repo = 2;
+    int64 issue_id = 3;       // issue or PR id
+    string kind = 4;          // "issue" or "pull_request"
+    string author = 5;
+    string body = 6;
+    int64 created_at = 7;
+    int64 updated_at = 8;
+}
+
+message ListCommentsRequest {
+    string repo = 1;
+    int64 issue_id = 2;       // issue or PR id
+    string kind = 3;          // "issue" or "pull_request"
+}
+message ListCommentsResponse { repeated CommentInfo comments = 1; }
+
+message CreateCommentRequest {
+    string repo = 1;
+    int64 issue_id = 2;
+    string kind = 3;          // "issue" or "pull_request"
+    string author = 4;
+    string body = 5;
+}
+message CreateCommentResponse { bool success = 1; string error = 2; int64 id = 3; }
+
+message UpdateCommentRequest {
+    int64 id = 1;
+    string body = 2;
+}
+message UpdateCommentResponse { bool success = 1; string error = 2; }
+
+message DeleteCommentRequest { int64 id = 1; }
+message DeleteCommentResponse { bool success = 1; string error = 2; }

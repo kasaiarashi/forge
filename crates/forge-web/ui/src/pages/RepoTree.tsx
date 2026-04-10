@@ -179,7 +179,7 @@ export default function RepoTree() {
     ];
     return (
       <div>
-        <RepoHeader repo={repo} currentTab="code" activeBranch="main" />
+        <RepoHeader repo={repo} currentTab="code" activeBranch="main" visibility={repoInfo?.visibility} />
         <div className="forge-card" style={{ marginTop: '16px' }}>
           <div className="forge-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <CodeIcon size={16} />
@@ -223,7 +223,7 @@ export default function RepoTree() {
 
   return (
     <div>
-      <RepoHeader repo={repo} currentTab="code" activeBranch={activeBranch} />
+      <RepoHeader repo={repo} currentTab="code" activeBranch={activeBranch} visibility={repoInfo?.visibility} />
 
       {/* Main content: left file browser + right sidebar */}
       <div style={{ display: 'flex', gap: '24px', marginTop: '16px' }}>

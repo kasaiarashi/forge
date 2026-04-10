@@ -580,8 +580,12 @@ impl ForgeService for ForgeGrpcService {
                 .collect();
             let branch_count = branches.len() as i32;
 
-            // Try to get last commit info from the default branch (main).
-            let default_branch = "main".to_string();
+            // Try to get last commit info from the default branch.
+            let default_branch = if r.default_branch.is_empty() {
+                "main".to_string()
+            } else {
+                r.default_branch
+            };
             let mut last_commit_message = String::new();
             let mut last_commit_author = String::new();
             let mut last_commit_time = 0i64;
@@ -735,6 +739,18 @@ impl ForgeService for ForgeGrpcService {
                 return Ok(Response::new(UpdateRepoResponse {
                     success: false,
                     error: "visibility update failed".into(),
+                }));
+            }
+        }
+
+        // Apply default_branch change if provided.
+        if !req.default_branch.is_empty() {
+            let effective = if new_name.is_empty() { repo.clone() } else { new_name.clone() };
+            if let Err(e) = self.db.set_default_branch(&effective, &req.default_branch) {
+                tracing::error!(error = %e, "set_default_branch failed");
+                return Ok(Response::new(UpdateRepoResponse {
+                    success: false,
+                    error: "default branch update failed".into(),
                 }));
             }
         }
@@ -1640,6 +1656,77 @@ impl ForgeService for ForgeGrpcService {
                 labels, created_at: pr.created_at, updated_at: pr.updated_at,
                 comment_count: pr.comment_count, assignee: pr.assignee,
             }),
+        }))
+    }
+
+    // ── Comments ────────────────────────────────────────────────────────────
+
+    async fn list_comments(
+        &self,
+        request: Request<ListCommentsRequest>,
+    ) -> Result<Response<ListCommentsResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo = resolve_repo(&req.repo, &caller)?;
+        require_repo_read(&caller, &self.user_store, &repo, self.db.is_repo_public(&repo))?;
+        let comments = self.db.list_comments(&repo, req.issue_id, &req.kind)
+            .map_err(|e| internal_err("grpc", e))?;
+        Ok(Response::new(ListCommentsResponse {
+            comments: comments.into_iter().map(|c| CommentInfo {
+                id: c.id, repo: c.repo, issue_id: c.issue_id, kind: c.kind,
+                author: c.author, body: c.body, created_at: c.created_at,
+                updated_at: c.updated_at,
+            }).collect(),
+        }))
+    }
+
+    async fn create_comment(
+        &self,
+        request: Request<CreateCommentRequest>,
+    ) -> Result<Response<CreateCommentResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo = resolve_repo(&req.repo, &caller)?;
+        require_repo_write(&caller, &self.user_store, &repo)?;
+        let id = self.db.create_comment(&repo, req.issue_id, &req.kind, &req.author, &req.body)
+            .map_err(|e| internal_err("grpc", e))?;
+        Ok(Response::new(CreateCommentResponse {
+            success: true, error: String::new(), id,
+        }))
+    }
+
+    async fn update_comment(
+        &self,
+        request: Request<UpdateCommentRequest>,
+    ) -> Result<Response<UpdateCommentResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        // Get the comment to find the repo for authz
+        let comment = self.db.get_comment(req.id)
+            .map_err(|e| internal_err("grpc", e))?
+            .ok_or_else(|| Status::not_found("comment not found"))?;
+        require_repo_write(&caller, &self.user_store, &comment.repo)?;
+        let ok = self.db.update_comment(req.id, &req.body)
+            .map_err(|e| internal_err("grpc", e))?;
+        Ok(Response::new(UpdateCommentResponse {
+            success: ok, error: String::new(),
+        }))
+    }
+
+    async fn delete_comment(
+        &self,
+        request: Request<DeleteCommentRequest>,
+    ) -> Result<Response<DeleteCommentResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let comment = self.db.get_comment(req.id)
+            .map_err(|e| internal_err("grpc", e))?
+            .ok_or_else(|| Status::not_found("comment not found"))?;
+        require_repo_write(&caller, &self.user_store, &comment.repo)?;
+        let ok = self.db.delete_comment(req.id)
+            .map_err(|e| internal_err("grpc", e))?;
+        Ok(Response::new(DeleteCommentResponse {
+            success: ok, error: String::new(),
         }))
     }
 }
