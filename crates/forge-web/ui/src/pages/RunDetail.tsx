@@ -149,7 +149,7 @@ export default function RunDetail() {
   return (
     <div>
       <RepoHeader repo={repo!} currentTab="actions" />
-
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
       {/* Back breadcrumb */}
       <Link
         to={`/${encRepo}/actions/${run.workflow_id}/runs`}
@@ -359,6 +359,7 @@ export default function RunDetail() {
             </div>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

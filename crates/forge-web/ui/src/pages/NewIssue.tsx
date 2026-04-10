@@ -63,7 +63,7 @@ export default function NewIssue() {
                 onChange={(e) => setBody(e.target.value)}
                 style={{
                   width: '100%',
-                  minHeight: '200px',
+                  minHeight: '400px',
                   padding: '12px',
                   borderRadius: '6px',
                   border: '1px solid var(--border-default)',

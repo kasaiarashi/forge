@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useRepoParam } from '../hooks/useRepoParam';
 import {
   TextInput,
+  Textarea,
   Button,
   FormControl,
   Flash,
@@ -205,297 +206,293 @@ export default function RepoSettings() {
   return (
     <div>
       <RepoHeader repo={repo} currentTab="settings" activeBranch={defaultBranch} visibility={repoInfo?.visibility} />
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
+        <div style={{ marginTop: '24px', maxWidth: '720px' }}>
+          {/* General Settings */}
+          <div className="forge-card" style={{ marginBottom: '24px' }}>
+            <div className="forge-card-header"><h3>General Configuration</h3></div>
+            <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
 
-      <div style={{ marginTop: '24px', maxWidth: '720px' }}>
-        <h2 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '24px', color: 'var(--fg-default)' }}>
-          General
-        </h2>
-
-        {/* Repository name */}
-        <div style={{ marginBottom: '24px' }}>
-          <FormControl>
-            <FormControl.Label>Repository name</FormControl.Label>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-              <TextInput
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                block
-              />
-              <Button
-                onClick={handleRename}
-                disabled={renaming || !newName.trim() || newName === repo}
-              >
-                {renaming ? 'Renaming...' : 'Rename'}
-              </Button>
-            </div>
-          </FormControl>
-          {renameStatus && (
-            <Flash variant={renameStatus.type} style={{ marginTop: '8px' }}>
-              {renameStatus.msg}
-            </Flash>
-          )}
-        </div>
-
-        {/* Description */}
-        <div style={{ marginBottom: '24px' }}>
-          <FormControl>
-            <FormControl.Label>Description</FormControl.Label>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-              <TextInput
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Short description of this repository"
-                block
-              />
-              <Button onClick={handleSaveDescription} disabled={savingDesc}>
-                {savingDesc ? 'Saving...' : 'Save'}
-              </Button>
-            </div>
-          </FormControl>
-          {descStatus && (
-            <Flash variant={descStatus.type} style={{ marginTop: '8px' }}>
-              {descStatus.msg}
-            </Flash>
-          )}
-        </div>
-
-        {/* Clone URL */}
-        <div style={{ marginBottom: '32px' }}>
-          <FormControl>
-            <FormControl.Label>Remote URL</FormControl.Label>
-            <div style={{ display: 'flex', gap: '4px' }}>
-              <TextInput
-                value={`forge clone ${cloneUrl}`}
-                readOnly
-                block
-                monospace
-                size="small"
-              />
-              <Button size="small" onClick={handleCopyClone}>
-                {copied ? 'Copied!' : <CopyIcon size={16} />}
-              </Button>
-            </div>
-          </FormControl>
-        </div>
-
-        {/* Visibility */}
-        <div className="forge-card" style={{ marginBottom: '24px' }}>
-          <div className="forge-card-header"><h3>Visibility</h3></div>
-          <div style={{ padding: '16px' }}>
-            <p style={{ color: 'var(--fg-muted)', marginBottom: '12px' }}>
-              Public repositories are visible to anyone. Private repositories require explicit access.
-            </p>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <select
-                value={visibility}
-                onChange={(e) => handleVisibilityChange(e.target.value)}
-                disabled={savingVis}
-                style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)' }}
-              >
-                <option value="private">Private</option>
-                <option value="public">Public</option>
-              </select>
-              {savingVis && <Spinner size="small" />}
-            </div>
-            {visStatus && (
-              <Flash variant={visStatus.type} style={{ marginTop: '8px' }}>{visStatus.msg}</Flash>
-            )}
-          </div>
-        </div>
-
-        {/* Default Branch */}
-        <div className="forge-card" style={{ marginBottom: '24px' }}>
-          <div className="forge-card-header"><h3>Default Branch</h3></div>
-          <div style={{ padding: '16px' }}>
-            <p style={{ color: 'var(--fg-muted)', marginBottom: '12px' }}>The default branch is the base for new pull requests and code browsing.</p>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <select value={defaultBranch} onChange={e => setDefaultBranch(e.target.value)} style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)' }}>
-                {branches.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
-              </select>
-              <Button size="small" onClick={async () => {
-                try {
-                  await api.updateRepo(repo, { default_branch: defaultBranch });
-                } catch {}
-              }}>
-                Save
-              </Button>
-            </div>
-          </div>
-        </div>
-
-        {/* Lock Policy */}
-        <div className="forge-card" style={{ marginBottom: '24px' }}>
-          <div className="forge-card-header"><h3>File Lock Policy</h3></div>
-          <div style={{ padding: '16px' }}>
-            <p style={{ color: 'var(--fg-muted)', marginBottom: '12px' }}>Binary files matching these patterns require exclusive locks before editing.</p>
-            <div style={{ fontFamily: 'monospace', fontSize: '13px', padding: '12px', backgroundColor: 'var(--bg-inset)', borderRadius: '6px', border: '1px solid var(--border-muted)' }}>
-              *.uasset<br/>*.umap<br/>*.uexp<br/>*.ubulk
-            </div>
-          </div>
-        </div>
-
-        {/* Collaborators */}
-        <div className="forge-card" style={{ marginBottom: '24px' }}>
-          <div className="forge-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <PeopleIcon size={16} />
-            <h3>Collaborators</h3>
-          </div>
-          <div style={{ padding: '16px' }}>
-            {membersLoading ? (
-              <Spinner size="small" />
-            ) : membersError ? (
-              <Flash variant="danger">{membersError}</Flash>
-            ) : (
-              <>
-                {members.length === 0 ? (
-                  <p style={{ color: 'var(--fg-muted)', marginBottom: '16px' }}>
-                    No collaborators yet. Add users to grant them access to this repository.
-                  </p>
-                ) : (
-                  <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '16px' }}>
-                    <thead>
-                      <tr style={{ borderBottom: '1px solid var(--border-muted)' }}>
-                        <th style={{ textAlign: 'left', padding: '8px 0', fontSize: '12px', color: 'var(--fg-muted)', fontWeight: 600 }}>User</th>
-                        <th style={{ textAlign: 'left', padding: '8px 0', fontSize: '12px', color: 'var(--fg-muted)', fontWeight: 600 }}>Role</th>
-                        <th style={{ width: '40px' }}></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {members.map((m) => (
-                        <tr key={m.user.id} style={{ borderBottom: '1px solid var(--border-muted)' }}>
-                          <td style={{ padding: '8px 0' }}>
-                            <span style={{ fontWeight: 600 }}>{m.user.username}</span>
-                            {m.user.display_name && (
-                              <span style={{ color: 'var(--fg-muted)', marginLeft: '8px' }}>{m.user.display_name}</span>
-                            )}
-                          </td>
-                          <td style={{ padding: '8px 0' }}>
-                            <select
-                              value={m.role}
-                              onChange={(e) => handleChangeRole(m.user.id, e.target.value)}
-                              style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)', fontSize: '13px' }}
-                            >
-                              <option value="read">Read</option>
-                              <option value="write">Write</option>
-                              <option value="admin">Admin</option>
-                            </select>
-                          </td>
-                          <td style={{ padding: '8px 0', textAlign: 'right' }}>
-                            <Button variant="danger" size="small" onClick={() => handleRemoveMember(m.user.id)}>
-                              <TrashIcon size={14} />
-                            </Button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-
-                {/* Add collaborator form */}
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
-                  <FormControl>
-                    <FormControl.Label>Username</FormControl.Label>
+              {/* Repository name */}
+              <div>
+                <FormControl>
+                  <FormControl.Label>Repository name</FormControl.Label>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
                     <TextInput
-                      value={newUsername}
-                      onChange={(e) => setNewUsername(e.target.value)}
-                      placeholder="Enter username"
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      block
+                    />
+                    <Button
+                      onClick={handleRename}
+                      disabled={renaming || !newName.trim() || newName === repo}
+                    >
+                      {renaming ? 'Renaming...' : 'Rename'}
+                    </Button>
+                  </div>
+                </FormControl>
+                {renameStatus && (
+                  <Flash variant={renameStatus.type} style={{ marginTop: '8px' }}>
+                    {renameStatus.msg}
+                  </Flash>
+                )}
+              </div>
+
+              {/* Description */}
+              <div>
+                <FormControl>
+                  <FormControl.Label>Description</FormControl.Label>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+                    <Textarea
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                      placeholder="Short description of this repository"
+                      block
+                      resize="vertical"
+                      style={{ minHeight: '100px' }}
+                    />
+                    <Button onClick={handleSaveDescription} disabled={savingDesc}>
+                      {savingDesc ? 'Saving...' : 'Save'}
+                    </Button>
+                  </div>
+                </FormControl>
+                {descStatus && (
+                  <Flash variant={descStatus.type} style={{ marginTop: '8px' }}>
+                    {descStatus.msg}
+                  </Flash>
+                )}
+              </div>
+
+              {/* Clone URL */}
+              <div>
+                <FormControl>
+                  <FormControl.Label>Remote URL</FormControl.Label>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    <TextInput
+                      value={`forge clone ${cloneUrl}`}
+                      readOnly
+                      block
+                      monospace
                       size="small"
                     />
-                  </FormControl>
-                  <FormControl>
-                    <FormControl.Label>Role</FormControl.Label>
-                    <select
-                      value={newRole}
-                      onChange={(e) => setNewRole(e.target.value)}
-                      style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)' }}
-                    >
-                      <option value="read">Read</option>
-                      <option value="write">Write</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                  </FormControl>
-                  <Button onClick={handleAddMember} disabled={adding || !newUsername.trim()} size="small">
-                    {adding ? 'Adding...' : 'Add'}
+                    <Button size="small" onClick={handleCopyClone}>
+                      {copied ? 'Copied!' : <CopyIcon size={16} />}
+                    </Button>
+                  </div>
+                </FormControl>
+              </div>
+
+            </div>
+          </div>
+
+          {/* Visibility */}
+          <div className="forge-card" style={{ marginBottom: '24px' }}>
+            <div className="forge-card-header"><h3>Visibility</h3></div>
+            <div style={{ padding: '16px' }}>
+              <p style={{ color: 'var(--fg-muted)', marginBottom: '12px' }}>
+                Public repositories are visible to anyone. Private repositories require explicit access.
+              </p>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <select
+                  value={visibility}
+                  onChange={(e) => handleVisibilityChange(e.target.value)}
+                  disabled={savingVis}
+                  style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)' }}
+                >
+                  <option value="private">Private</option>
+                  <option value="public">Public</option>
+                </select>
+                {savingVis && <Spinner size="small" />}
+              </div>
+              {visStatus && (
+                <Flash variant={visStatus.type} style={{ marginTop: '8px' }}>{visStatus.msg}</Flash>
+              )}
+            </div>
+          </div>
+
+          {/* Default Branch */}
+          <div className="forge-card" style={{ marginBottom: '24px' }}>
+            <div className="forge-card-header"><h3>Default Branch</h3></div>
+            <div style={{ padding: '16px' }}>
+              <p style={{ color: 'var(--fg-muted)', marginBottom: '12px' }}>The default branch is the base for new pull requests and code browsing.</p>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <select value={defaultBranch} onChange={e => setDefaultBranch(e.target.value)} style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)' }}>
+                  {branches.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
+                </select>
+                <Button size="small" onClick={async () => {
+                  try {
+                    await api.updateRepo(repo, { default_branch: defaultBranch });
+                  } catch { }
+                }}>
+                  Save
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Lock Policy */}
+          <div className="forge-card" style={{ marginBottom: '24px' }}>
+            <div className="forge-card-header"><h3>File Lock Policy</h3></div>
+            <div style={{ padding: '16px' }}>
+              <p style={{ color: 'var(--fg-muted)', marginBottom: '12px' }}>Binary files matching these patterns require exclusive locks before editing.</p>
+              <div style={{ fontFamily: 'monospace', fontSize: '13px', padding: '12px', backgroundColor: 'var(--bg-inset)', borderRadius: '6px', border: '1px solid var(--border-muted)' }}>
+                *.uasset<br />*.umap<br />*.uexp<br />*.ubulk
+              </div>
+            </div>
+          </div>
+
+          {/* Collaborators */}
+          <div className="forge-card" style={{ marginBottom: '24px' }}>
+            <div className="forge-card-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <PeopleIcon size={16} />
+              <h3>Collaborators</h3>
+            </div>
+            <div style={{ padding: '16px' }}>
+              {membersLoading ? (
+                <Spinner size="small" />
+              ) : membersError ? (
+                <Flash variant="danger">{membersError}</Flash>
+              ) : (
+                <>
+                  {members.length === 0 ? (
+                    <p style={{ color: 'var(--fg-muted)', marginBottom: '16px' }}>
+                      No collaborators yet. Add users to grant them access to this repository.
+                    </p>
+                  ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '16px' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid var(--border-muted)' }}>
+                          <th style={{ textAlign: 'left', padding: '8px 0', fontSize: '12px', color: 'var(--fg-muted)', fontWeight: 600 }}>User</th>
+                          <th style={{ textAlign: 'left', padding: '8px 0', fontSize: '12px', color: 'var(--fg-muted)', fontWeight: 600 }}>Role</th>
+                          <th style={{ width: '40px' }}></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {members.map((m) => (
+                          <tr key={m.user.id} style={{ borderBottom: '1px solid var(--border-muted)' }}>
+                            <td style={{ padding: '8px 0' }}>
+                              <span style={{ fontWeight: 600 }}>{m.user.username}</span>
+                              {m.user.display_name && (
+                                <span style={{ color: 'var(--fg-muted)', marginLeft: '8px' }}>{m.user.display_name}</span>
+                              )}
+                            </td>
+                            <td style={{ padding: '8px 0' }}>
+                              <select
+                                value={m.role}
+                                onChange={(e) => handleChangeRole(m.user.id, e.target.value)}
+                                style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)', fontSize: '13px' }}
+                              >
+                                <option value="read">Read</option>
+                                <option value="write">Write</option>
+                                <option value="admin">Admin</option>
+                              </select>
+                            </td>
+                            <td style={{ padding: '8px 0', textAlign: 'right' }}>
+                              <Button variant="danger" size="small" onClick={() => handleRemoveMember(m.user.id)}>
+                                <TrashIcon size={14} />
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+
+                  {/* Add collaborator form */}
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+                    <FormControl>
+                      <FormControl.Label>Username</FormControl.Label>
+                      <TextInput
+                        value={newUsername}
+                        onChange={(e) => setNewUsername(e.target.value)}
+                        placeholder="Enter username"
+                        size="small"
+                      />
+                    </FormControl>
+                    <FormControl>
+                      <FormControl.Label>Role</FormControl.Label>
+                      <select
+                        value={newRole}
+                        onChange={(e) => setNewRole(e.target.value)}
+                        style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-default)', backgroundColor: 'var(--bg-default)', color: 'var(--fg-default)' }}
+                      >
+                        <option value="read">Read</option>
+                        <option value="write">Write</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </FormControl>
+                    <Button onClick={handleAddMember} disabled={adding || !newUsername.trim()} size="small">
+                      {adding ? 'Adding...' : 'Add'}
+                    </Button>
+                  </div>
+                  {addError && (
+                    <Flash variant="danger" style={{ marginTop: '8px' }}>{addError}</Flash>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Danger Zone */}
+          <div className="forge-card" style={{ marginBottom: '24px', border: '1px solid var(--fg-danger, #da3633)' }}>
+            <div className="forge-card-header" style={{ borderBottomColor: 'var(--fg-danger, #da3633)', backgroundColor: 'rgba(218,54,51,0.05)' }}>
+              <h3 style={{ color: 'var(--fg-danger, #da3633)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <AlertIcon size={16} /> Danger Zone
+              </h3>
+            </div>
+            <div style={{ padding: '16px' }}>
+
+              {!showDeleteDialog ? (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: '14px', color: 'var(--fg-default)' }}>
+                      Delete this repository
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
+                      Once you delete a repository, there is no going back.
+                    </div>
+                  </div>
+                  <Button variant="danger" onClick={() => setShowDeleteDialog(true)}>
+                    Delete this repository
                   </Button>
                 </div>
-                {addError && (
-                  <Flash variant="danger" style={{ marginTop: '8px' }}>{addError}</Flash>
-                )}
-              </>
-            )}
-          </div>
-        </div>
+              ) : (
+                <div>
+                  <Flash variant="danger" style={{ marginBottom: '16px' }}>
+                    This action <strong>cannot</strong> be undone. This will permanently delete the{' '}
+                    <strong>{repo}</strong> repository and all of its data.
+                  </Flash>
 
-        {/* Danger Zone */}
-        <div
-          style={{
-            border: '1px solid var(--fg-danger, #da3633)',
-            borderRadius: '6px',
-            padding: '16px',
-          }}
-        >
-          <h3 style={{
-            fontSize: '16px',
-            fontWeight: 600,
-            color: 'var(--fg-danger, #da3633)',
-            marginBottom: '16px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-          }}>
-            <AlertIcon size={16} />
-            Danger Zone
-          </h3>
+                  <FormControl>
+                    <FormControl.Label>
+                      Please type <strong>{repo}</strong> to confirm.
+                    </FormControl.Label>
+                    <TextInput
+                      value={deleteConfirm}
+                      onChange={(e) => setDeleteConfirm(e.target.value)}
+                      block
+                      placeholder={repo}
+                    />
+                  </FormControl>
 
-          {!showDeleteDialog ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: '14px', color: 'var(--fg-default)' }}>
-                  Delete this repository
+                  {deleteError && (
+                    <Flash variant="danger" style={{ marginTop: '8px' }}>
+                      {deleteError}
+                    </Flash>
+                  )}
+
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                    <Button variant="danger" onClick={handleDelete} disabled={deleteConfirm !== repo || deleting}>
+                      {deleting ? 'Deleting...' : 'I understand, delete this repository'}
+                    </Button>
+                    <Button onClick={() => { setShowDeleteDialog(false); setDeleteConfirm(''); }}>
+                      Cancel
+                    </Button>
+                  </div>
                 </div>
-                <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>
-                  Once you delete a repository, there is no going back.
-                </div>
-              </div>
-              <Button variant="danger" onClick={() => setShowDeleteDialog(true)}>
-                Delete this repository
-              </Button>
-            </div>
-          ) : (
-            <div>
-              <Flash variant="danger" style={{ marginBottom: '16px' }}>
-                This action <strong>cannot</strong> be undone. This will permanently delete the{' '}
-                <strong>{repo}</strong> repository and all of its data.
-              </Flash>
-
-              <FormControl>
-                <FormControl.Label>
-                  Please type <strong>{repo}</strong> to confirm.
-                </FormControl.Label>
-                <TextInput
-                  value={deleteConfirm}
-                  onChange={(e) => setDeleteConfirm(e.target.value)}
-                  block
-                  placeholder={repo}
-                />
-              </FormControl>
-
-              {deleteError && (
-                <Flash variant="danger" style={{ marginTop: '8px' }}>
-                  {deleteError}
-                </Flash>
               )}
-
-              <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                <Button variant="danger" onClick={handleDelete} disabled={deleteConfirm !== repo || deleting}>
-                  {deleting ? 'Deleting...' : 'I understand, delete this repository'}
-                </Button>
-                <Button onClick={() => { setShowDeleteDialog(false); setDeleteConfirm(''); }}>
-                  Cancel
-                </Button>
-              </div>
             </div>
-          )}
+          </div>
         </div>
       </div>
     </div>

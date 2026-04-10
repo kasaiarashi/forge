@@ -109,7 +109,7 @@ export default function IssueDetail() {
   return (
     <div>
       <RepoHeader repo={repo} currentTab="issues" />
-      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 16px' }}>
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
         
         {/* Header */}
         <div style={{ marginBottom: '24px' }}>
@@ -140,20 +140,20 @@ export default function IssueDetail() {
         <div style={{ display: 'flex', gap: '24px' }}>
           {/* Main timeline/body */}
           <div style={{ flex: 1 }}>
-            <div className="forge-card" style={{ border: '1px solid var(--border-default)', borderRadius: '6px' }}>
-              <div className="forge-card-header" style={{ backgroundColor: 'var(--bg-subtle)', padding: '16px', borderBottom: '1px solid var(--border-default)' }}>
+            <div className="forge-card">
+              <div className="forge-card-header">
                 <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>{issue.author}</span>
                 <span style={{ color: 'var(--fg-muted)', marginLeft: '8px' }}>commented {timeAgo(issue.created_at)}</span>
               </div>
-              <div style={{ padding: '16px', color: 'var(--fg-default)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
+              <div style={{ padding: 'var(--space-4)', color: 'var(--fg-default)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
                 {issue.body || <span style={{ color: 'var(--fg-muted)', fontStyle: 'italic' }}>No description provided.</span>}
               </div>
             </div>
 
             {/* Comments */}
             {comments.map(c => (
-              <div key={c.id} className="forge-card" style={{ border: '1px solid var(--border-default)', borderRadius: '6px', marginTop: '16px' }}>
-                <div className="forge-card-header" style={{ backgroundColor: 'var(--bg-subtle)', padding: '12px 16px', borderBottom: '1px solid var(--border-default)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div key={c.id} className="forge-card" style={{ marginTop: 'var(--space-4)' }}>
+                <div className="forge-card-header" style={{ justifyContent: 'space-between' }}>
                   <div>
                     <span style={{ fontWeight: 600, color: 'var(--fg-default)' }}>{c.author}</span>
                     <span style={{ color: 'var(--fg-muted)', marginLeft: '8px' }}>commented {timeAgo(c.created_at)}</span>
@@ -162,14 +162,13 @@ export default function IssueDetail() {
                     <TrashIcon size={14} />
                   </Button>
                 </div>
-                <div style={{ padding: '16px', color: 'var(--fg-default)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
+                <div style={{ padding: 'var(--space-4)', color: 'var(--fg-default)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>
                   {c.body}
                 </div>
               </div>
             ))}
 
-            {/* New comment */}
-            <div style={{ marginTop: '24px' }}>
+            <div style={{ marginTop: 'var(--space-6)' }}>
               <textarea
                 value={newComment}
                 onChange={e => setNewComment(e.target.value)}

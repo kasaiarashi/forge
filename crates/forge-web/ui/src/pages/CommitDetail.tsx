@@ -335,7 +335,7 @@ export default function CommitDetail() {
   return (
     <div>
       <RepoHeader repo={repo} currentTab="commits" />
-
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
       {/* Commit header */}
       <div className="forge-card" style={{ marginBottom: '16px' }}>
         <div style={{
@@ -439,6 +439,7 @@ export default function CommitDetail() {
             No files changed in this commit.
           </div>
         )}
+      </div>
       </div>
     </div>
   );

@@ -37,7 +37,7 @@ export default function Releases() {
   return (
     <div>
       <RepoHeader repo={repo || ''} currentTab="releases" />
-
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
       <h2 style={{ marginTop: 16 }}>Releases</h2>
 
       {releases.length === 0 ? (
@@ -81,6 +81,7 @@ export default function Releases() {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

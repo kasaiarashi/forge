@@ -161,10 +161,15 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Pin cwd to the binary's directory so relative paths in config
-    // (base_path, cert paths, etc.) resolve from the binary location,
-    // not whatever directory the user launched from.
-    if let Ok(exe) = std::env::current_exe() {
+    // Pin cwd so relative paths in the config resolve predictably.
+    // When --config points at a real file, use its parent directory;
+    // otherwise fall back to the binary's directory.
+    let config_path = std::path::Path::new(&cli.config);
+    if config_path.exists() {
+        if let Some(dir) = config_path.canonicalize().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            let _ = std::env::set_current_dir(&dir);
+        }
+    } else if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let _ = std::env::set_current_dir(dir);
         }

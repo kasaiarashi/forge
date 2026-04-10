@@ -212,7 +212,7 @@ export default function NewPullRequest() {
                         placeholder="Add your description here..."
                         style={{
                           width: '100%',
-                          minHeight: '200px',
+                          minHeight: '400px',
                           padding: '12px',
                           border: 'none',
                           backgroundColor: 'transparent',
@@ -223,7 +223,7 @@ export default function NewPullRequest() {
                         }}
                       />
                     ) : (
-                      <div style={{ minHeight: '200px', padding: '16px', color: 'var(--fg-default)', backgroundColor: 'transparent' }}>
+                      <div style={{ minHeight: '400px', padding: '16px', color: 'var(--fg-default)', backgroundColor: 'transparent' }}>
                         {body || <span style={{ color: 'var(--fg-muted)' }}>Nothing to preview</span>}
                       </div>
                     )}

@@ -145,7 +145,7 @@ export default function Locks() {
   return (
     <div>
       <RepoHeader repo={repo} currentTab="locks" activeBranch={defaultBranch} />
-
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
       {/* Page header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -320,6 +320,7 @@ export default function Locks() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

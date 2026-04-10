@@ -139,7 +139,7 @@ export default function PullRequestDetail() {
   return (
     <div>
       <RepoHeader repo={repo} currentTab="pulls" />
-      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 16px' }}>
+      <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 var(--space-6)' }}>
         
         {/* Header */}
         <div style={{ marginBottom: '24px' }}>

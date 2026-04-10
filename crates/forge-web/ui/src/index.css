@@ -18,6 +18,18 @@
   --header-logo: #ffffff;
   --header-search-bg: rgba(255, 255, 255, 0.125);
   --header-search-border: rgba(255, 255, 255, 0);
+
+  /* Spacing Scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* Shadows */
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 [data-color-mode="night"] {
@@ -38,6 +50,9 @@
   --header-logo: #ffffff;
   --header-search-bg: #0d1117;
   --header-search-border: #30363d;
+
+  /* Shadows */
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 body {
@@ -60,7 +75,14 @@ body {
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace !important;
 }
 
-/* File browser table hover */
+/* Standard list/table row */
+.file-row {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-muted);
+}
+.file-row:last-child {
+  border-bottom: none;
+}
 .file-row:hover {
   background-color: var(--bg-subtle);
 }
@@ -142,15 +164,16 @@ body {
   border-radius: 6px;
   background: var(--bg-default);
   overflow: hidden;
+  box-shadow: var(--shadow-subtle);
 }
 
 .forge-card-header {
   background: var(--bg-subtle);
-  padding: 8px 16px;
+  padding: var(--space-4);
   border-bottom: 1px solid var(--border-default);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .stat-card {

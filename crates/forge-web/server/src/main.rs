@@ -252,10 +252,16 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Pin cwd to the binary's directory so relative paths in the config
-    // (static_dir, ca_cert_path, forge-web-certs/, etc.) resolve from the
-    // binary location, not whatever directory the user happened to launch from.
-    if let Ok(exe) = std::env::current_exe() {
+    // Pin cwd so relative paths in the config (static_dir, ca_cert_path,
+    // forge-web-certs/, etc.) resolve predictably. When --config points at
+    // a real file, use its parent directory; otherwise fall back to the
+    // binary's directory. This way `./ui/dist` in the config resolves
+    // relative to wherever the config lives.
+    if cli.config.exists() {
+        if let Some(dir) = cli.config.canonicalize().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            let _ = std::env::set_current_dir(&dir);
+        }
+    } else if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let _ = std::env::set_current_dir(dir);
         }
