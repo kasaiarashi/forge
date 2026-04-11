@@ -170,9 +170,9 @@ jobs:
       # ── UE Plugin (Fab zips — one per engine version) ──
       # Stages the plugin source for Fab code-plugin submission.
       # Fab compiles the plugin from source, so Binaries/Intermediate/
-      # Build/Saved are excluded — only .uplugin, Config, Content,
-      # Resources, and Source are shipped. Each zip gets its own
-      # EngineVersion stamped into the .uplugin.
+      # Build/Saved are excluded — only .uplugin, README.txt, and Source
+      # are shipped. Each zip gets its own EngineVersion stamped into
+      # the .uplugin.
       - name: Package UE Plugin (Fab zips)
         shell: pwsh
         run: |
@@ -183,9 +183,7 @@ jobs:
             if (Test-Path "staging\ForgeSourceControl-UE$ver") { Remove-Item -Recurse -Force "staging\ForgeSourceControl-UE$ver" }
             New-Item -ItemType Directory -Force -Path $stage | Out-Null
             Copy-Item        "$plugin\ForgeSourceControl.uplugin" $stage
-            Copy-Item -Recurse "$plugin\Config"    $stage
-            Copy-Item -Recurse "$plugin\Content"   $stage
-            Copy-Item -Recurse "$plugin\Resources" $stage
+            Copy-Item        "$plugin\README.txt"                 $stage
             Copy-Item -Recurse "$plugin\Source"    $stage
             # Stamp EngineVersion in the .uplugin for this build
             $uplugin = "$stage\ForgeSourceControl.uplugin"
@@ -207,9 +205,7 @@ jobs:
           if (Test-Path "staging\ForgeSourceControl-general") { Remove-Item -Recurse -Force "staging\ForgeSourceControl-general" }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item        "$plugin\ForgeSourceControl.uplugin" $stage
-          Copy-Item -Recurse "$plugin\Config"    $stage
-          Copy-Item -Recurse "$plugin\Content"   $stage
-          Copy-Item -Recurse "$plugin\Resources" $stage
+          Copy-Item        "$plugin\README.txt"                 $stage
           Copy-Item -Recurse "$plugin\Source"    $stage
           Copy-Item -Recurse "$plugin\Binaries"  $stage
           # Stamp EngineVersion to 5.7
