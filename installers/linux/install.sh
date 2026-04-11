@@ -44,18 +44,12 @@ if [ ! -f "$SCRIPT_DIR/forge-server" ] || [ ! -f "$SCRIPT_DIR/forge-server.toml"
 
     if [ -z "$VERSION" ]; then
         echo "Resolving latest Forge release..."
-        # Capture the full JSON response before parsing. Piping curl
-        # directly into `grep -m1` races: grep closes the pipe as soon
-        # as it finds the first match, curl's next write hits EPIPE,
-        # and curl prints "(23) Failure writing output to destination"
-        # even though the version was successfully extracted.
         if ! release_json="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")"; then
             echo "Failed to reach GitHub API for latest release." >&2
             echo "Set FORGE_VERSION=vX.Y.Z manually and re-run." >&2
             exit 1
         fi
-        VERSION="$(printf '%s\n' "$release_json" \
-            | grep -m1 '"tag_name"' \
+        VERSION="$(grep -m1 '"tag_name"' <<< "$release_json" \
             | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')"
         if [ -z "$VERSION" ]; then
             echo "Failed to parse latest release tag from GitHub API response." >&2

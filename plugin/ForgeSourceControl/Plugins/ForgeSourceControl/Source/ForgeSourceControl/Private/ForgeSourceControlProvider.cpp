@@ -102,7 +102,6 @@ FText FForgeSourceControlProvider::GetStatusText() const
 		: LOCTEXT("StatusUnavailable", "No Forge workspace found");
 }
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 TMap<ISourceControlProvider::EStatus, FString> FForgeSourceControlProvider::GetStatus() const
 {
 	TMap<EStatus, FString> Result;
@@ -110,7 +109,6 @@ TMap<ISourceControlProvider::EStatus, FString> FForgeSourceControlProvider::GetS
 	Result.Add(EStatus::Connected, IsAvailable() ? TEXT("Yes") : TEXT("No"));
 	return Result;
 }
-#endif
 
 bool FForgeSourceControlProvider::IsEnabled() const { return true; }
 bool FForgeSourceControlProvider::IsAvailable() const { return bIsAvailable; }
@@ -218,7 +216,6 @@ TArray<FSourceControlStateRef> FForgeSourceControlProvider::GetCachedStateByPred
 	return Result;
 }
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 TOptional<int> FForgeSourceControlProvider::GetNumLocalChanges() const
 {
 	int32 Count = 0;
@@ -232,7 +229,6 @@ TOptional<int> FForgeSourceControlProvider::GetNumLocalChanges() const
 	}
 	return Count;
 }
-#endif
 
 // ── Delegates ───────────────────────────────────────────────────────────────
 

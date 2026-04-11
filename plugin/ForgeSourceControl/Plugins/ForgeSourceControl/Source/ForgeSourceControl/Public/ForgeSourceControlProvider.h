@@ -26,18 +26,14 @@ public:
 
 	virtual const FName& GetName() const override;
 	virtual FText GetStatusText() const override;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 	virtual TMap<EStatus, FString> GetStatus() const override;
-#endif
 	virtual bool IsEnabled() const override;
 	virtual bool IsAvailable() const override;
 
 	virtual bool QueryStateBranchConfig(const FString& ConfigSrc, const FString& ConfigDest) override { return false; }
 	virtual void RegisterStateBranches(const TArray<FString>& BranchNames, const FString& ContentRoot) override {}
 	virtual int32 GetStateBranchIndex(const FString& BranchName) const override { return INDEX_NONE; }
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 	virtual bool GetStateBranchAtIndex(int32 BranchIndex, FString& OutBranchName) const override { return false; }
-#endif
 
 	virtual ECommandResult::Type GetState(
 		const TArray<FString>& InFiles,
@@ -76,7 +72,6 @@ public:
 	virtual bool UsesChangelists() const override { return false; }
 	virtual bool UsesUncontrolledChangelists() const override { return false; }
 	virtual bool UsesCheckout() const override { return true; }
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 	virtual bool UsesFileRevisions() const override { return false; }
 	// Must be false: when true, FSourceControlWindows::PromptForCheckin auto-calls
 	// SyncLatest() before checkin, which reloads every loaded package (including
@@ -86,7 +81,6 @@ public:
 
 	virtual TOptional<bool> IsAtLatestRevision() const override { return TOptional<bool>(); }
 	virtual TOptional<int> GetNumLocalChanges() const override;
-#endif
 
 	virtual TSharedRef<class SWidget> MakeSettingsWidget() const override;
 

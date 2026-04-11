@@ -11,7 +11,7 @@
 	"DocsURL": "https://github.com/kasaiarashi/forge#readme",
 	"MarketplaceURL": "https://www.fab.com/listings/7cd90180-8c2f-4b64-a772-2f010cec0105",
 	"SupportURL": "https://github.com/kasaiarashi/forge/issues",
-	"EnabledByDefault": false,
+	"EnabledByDefault": true,
 	"CanContainContent": false,
 	"IsBetaVersion": true,
 	"Modules": [
