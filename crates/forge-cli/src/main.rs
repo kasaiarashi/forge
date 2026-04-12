@@ -266,6 +266,11 @@ enum Commands {
         /// Only remove from the index (keep file on disk)
         #[arg(long)]
         cached: bool,
+
+        /// Recurse into directories: expands each directory path to every
+        /// tracked file underneath it. Matches `git rm -r` semantics.
+        #[arg(short, long)]
+        recursive: bool,
     },
 
     /// Move or rename a file
@@ -466,7 +471,7 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Remote { action, args } => commands::remote::run(action, args)?,
         Commands::Config { key, value } => commands::config_cmd::run(key, value)?,
         Commands::Tag { name, commit, delete } => commands::tag::run(name, commit, delete)?,
-        Commands::Rm { paths, cached } => commands::rm::run(paths, cached)?,
+        Commands::Rm { paths, cached, recursive } => commands::rm::run(paths, cached, recursive)?,
         Commands::Mv { source, dest } => commands::mv::run(source, dest)?,
         Commands::Show { commit } => commands::show::run(commit, cli.json)?,
         Commands::Merge { branch } => commands::merge::run(branch)?,
