@@ -30,7 +30,13 @@
 
 void FForgeSourceControlProvider::Init(bool bForceConnection)
 {
-	ForgeExePath = TEXT("forge");
+	// Preserve any previously-configured path across re-inits (e.g. the one
+	// set via MakeSettingsWidget's executable path field). Only seed the
+	// default on first run when it's still unset.
+	if (ForgeExePath.IsEmpty())
+	{
+		ForgeExePath = TEXT("forge");
+	}
 	bIsAvailable = false;
 
 	// Walk up from project dir to find .forge/.
@@ -443,94 +449,110 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 			]
 		];
 
-	// ── Init section: only shown when no workspace has been detected ────────
-	if (!bIsAvailable)
+	// ── Init section: dynamically hidden once a workspace is detected ──────
+	// Uses a Visibility_Lambda bound to bIsAvailable rather than a build-time
+	// `if`, so the panel disappears the moment init succeeds — without this,
+	// UE caches the settings widget and the user sees the init UI stuck on
+	// screen even though the workspace was created.
+	auto InitVisibility = [MutableThis]() -> EVisibility
 	{
-		Root->AddSlot()
-			.AutoHeight()
-			.Padding(2.0f, 8.0f, 2.0f, 2.0f)
-			[
-				SNew(SSeparator)
-			];
+		return MutableThis->bIsAvailable ? EVisibility::Collapsed : EVisibility::Visible;
+	};
 
-		Root->AddSlot()
-			.AutoHeight()
-			.Padding(2.0f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("InitHeader", "No Forge workspace detected for this project."))
-				.AutoWrapText(true)
-			];
+	TSharedRef<SVerticalBox> InitBox = SNew(SVerticalBox)
+		.Visibility_Lambda(InitVisibility);
 
-		Root->AddSlot()
-			.AutoHeight()
-			.Padding(2.0f, 4.0f)
+	InitBox->AddSlot()
+		.AutoHeight()
+		.Padding(2.0f, 8.0f, 2.0f, 2.0f)
+		[
+			SNew(SSeparator)
+		];
+
+	InitBox->AddSlot()
+		.AutoHeight()
+		.Padding(2.0f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("InitHeader", "No Forge workspace detected for this project."))
+			.AutoWrapText(true)
+		];
+
+	InitBox->AddSlot()
+		.AutoHeight()
+		.Padding(2.0f, 4.0f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0.0f, 0.0f, 4.0f, 0.0f)
 			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+				SNew(SBox)
+				.WidthOverride(110.0f)
 				[
-					SNew(SBox)
-					.WidthOverride(110.0f)
-					[
-						SNew(STextBlock).Text(LOCTEXT("RemoteUrlLabel", "Remote URL:"))
-					]
+					SNew(STextBlock).Text(LOCTEXT("RemoteUrlLabel", "Remote URL:"))
 				]
-				+ SHorizontalBox::Slot()
-				.FillWidth(1.0f)
-				[
-					SNew(SEditableTextBox)
-					.Text(FText::FromString(*RemoteUrlRef))
-					.HintText(LOCTEXT("RemoteUrlHint", "https://server/owner/repo (optional)"))
-					.OnTextChanged_Lambda([RemoteUrlRef](const FText& NewText)
-					{
-						*RemoteUrlRef = NewText.ToString();
-					})
-				]
-			];
-
-		Root->AddSlot()
-			.AutoHeight()
-			.Padding(2.0f, 4.0f)
+			]
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
 			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("InitIdentityHint",
-					"Your name and email will be taken from 'forge login' — "
-					"a terminal will open to sign you in if needed."))
-				.AutoWrapText(true)
-			];
-
-		Root->AddSlot()
-			.AutoHeight()
-			.Padding(2.0f, 8.0f)
-			.HAlign(HAlign_Left)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("InitButton", "Initialize Project with Forge"))
-				.ToolTipText(LOCTEXT("InitButtonTooltip",
-					"Creates a .forge workspace in the project directory and (if provided) "
-					"adds an 'origin' remote. Identity is pulled from 'forge login'."))
-				.OnClicked_Lambda([MutableThis, RemoteUrlRef]()
+				SNew(SEditableTextBox)
+				.Text(FText::FromString(*RemoteUrlRef))
+				.HintText(LOCTEXT("RemoteUrlHint", "https://server/owner/repo (optional)"))
+				.OnTextChanged_Lambda([RemoteUrlRef](const FText& NewText)
 				{
-					FText Error;
-					const bool bOk = MutableThis->InitializeWorkspace(*RemoteUrlRef, Error);
-
-					FNotificationInfo Info(bOk
-						? LOCTEXT("InitOk", "Forge workspace initialized.")
-						: FText::Format(LOCTEXT("InitFailFmt", "Forge init failed: {0}"), Error));
-					Info.ExpireDuration = bOk ? 4.0f : 8.0f;
-					FSlateNotificationManager::Get().AddNotification(Info);
-
-					if (bOk)
-					{
-						MutableThis->RefreshStatusAsync();
-					}
-					return FReply::Handled();
+					*RemoteUrlRef = NewText.ToString();
 				})
-			];
-	}
+			]
+		];
+
+	InitBox->AddSlot()
+		.AutoHeight()
+		.Padding(2.0f, 4.0f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("InitIdentityHint",
+				"Remote URL is optional — leave blank for a local-only workspace. "
+				"If set, a terminal opens to run 'forge login' so your identity is recorded."))
+			.AutoWrapText(true)
+		];
+
+	InitBox->AddSlot()
+		.AutoHeight()
+		.Padding(2.0f, 8.0f)
+		.HAlign(HAlign_Left)
+		[
+			SNew(SButton)
+			.Text(LOCTEXT("InitButton", "Initialize Project with Forge"))
+			.ToolTipText(LOCTEXT("InitButtonTooltip",
+				"Creates a .forge workspace in the project directory. "
+				"If a remote URL is provided, also adds it as 'origin' and opens a "
+				"login terminal. Leaving the URL blank creates a local-only workspace."))
+			.OnClicked_Lambda([MutableThis, RemoteUrlRef]()
+			{
+				FText Error;
+				const bool bOk = MutableThis->InitializeWorkspace(*RemoteUrlRef, Error);
+
+				FNotificationInfo Info(bOk
+					? LOCTEXT("InitOk", "Forge workspace initialized.")
+					: FText::Format(LOCTEXT("InitFailFmt", "Forge init failed: {0}"), Error));
+				Info.ExpireDuration = bOk ? 4.0f : 8.0f;
+				FSlateNotificationManager::Get().AddNotification(Info);
+
+				if (bOk)
+				{
+					MutableThis->RefreshStatusAsync();
+				}
+				return FReply::Handled();
+			})
+		];
+
+	Root->AddSlot()
+		.AutoHeight()
+		[
+			InitBox
+		];
 
 	return Root;
 }

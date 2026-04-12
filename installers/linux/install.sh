@@ -170,7 +170,10 @@ if [ -d /run/systemd/system ]; then
 
     # forge-server writes objects, refs, and auto-generated TLS
     # material under $DATA_DIR, so the forge user needs to own it.
+    # Group-writable + setgid so admins in the 'forge' group can run
+    # CLI management commands (e.g. forge-server user add) directly.
     chown -R forge:forge "$DATA_DIR"
+    chmod 2775 "$DATA_DIR"
 
     # Generate unit files with the actual install paths baked in.
     # Shipping static units would hardcode /usr/local and break when
@@ -221,6 +224,8 @@ User=forge
 Group=forge
 WorkingDirectory=$DATA_DIR
 
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -233,6 +238,13 @@ EOF
 
     chmod 644 /etc/systemd/system/forge-server.service
     chmod 644 /etc/systemd/system/forge-web.service
+
+    # Add the invoking user (via SUDO_USER) to the forge group so they
+    # can run CLI admin commands without sudo.
+    if [ -n "$SUDO_USER" ] && ! id -nG "$SUDO_USER" 2>/dev/null | grep -qw forge; then
+        echo "  Adding '$SUDO_USER' to 'forge' group..."
+        usermod -aG forge "$SUDO_USER"
+    fi
 
     systemctl daemon-reload
 
@@ -256,6 +268,14 @@ if [ "$SYSTEMD_SETUP" = "1" ]; then
     echo "  systemctl status forge-server forge-web"
     echo "  journalctl -u forge-server -f"
     echo "  journalctl -u forge-web -f"
+    echo ""
+    echo "Create your first admin user:"
+    echo "  forge-server user add <username> --admin"
+    if [ -n "$SUDO_USER" ]; then
+        echo ""
+        echo "Note: '$SUDO_USER' was added to the 'forge' group."
+        echo "Log out and back in (or run 'newgrp forge') for it to take effect."
+    fi
 else
     echo "systemd not detected — start manually:"
     echo "  forge-server --config $CONFIG_DIR/forge-server.toml"
