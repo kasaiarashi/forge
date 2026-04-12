@@ -40,19 +40,48 @@ fn web_asset_name() -> &'static str {
     { "forge-web-macos-x64" }
 }
 
-pub fn run(check_only: bool, force: bool) -> Result<()> {
+pub fn run(check_only: bool, force: bool, version: Option<String>) -> Result<()> {
     let current = parse_version(CURRENT_VERSION)?;
 
-    let api_url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        GITHUB_REPO
-    );
-    let body = http_get_string(&api_url)?;
+    // Pinned version → fetch that exact release tag. No tag → latest.
+    // GitHub accepts either "v0.1.0" or "0.1.0" as the tag, but the
+    // releases API path expects the exact tag as published, so we try
+    // the user's input verbatim first and retry with a "v" prefix when
+    // it's missing.
+    let api_url = match &version {
+        Some(tag) => format!(
+            "https://api.github.com/repos/{}/releases/tags/{}",
+            GITHUB_REPO, tag
+        ),
+        None => format!(
+            "https://api.github.com/repos/{}/releases/latest",
+            GITHUB_REPO
+        ),
+    };
+    let body = match (http_get_string(&api_url), &version) {
+        (Ok(b), _) => b,
+        (Err(_), Some(tag)) if !tag.starts_with('v') => {
+            let retry = format!(
+                "https://api.github.com/repos/{}/releases/tags/v{}",
+                GITHUB_REPO, tag
+            );
+            http_get_string(&retry).with_context(|| {
+                format!("No release found for tag '{}' (also tried 'v{}')", tag, tag)
+            })?
+        }
+        (Err(e), _) => return Err(e),
+    };
     let release: Release =
         serde_json::from_str(&body).context("Failed to parse release JSON")?;
 
     let latest = parse_version(&release.tag_name)?;
-    let needs_update = latest > current || force;
+    // When pinning a version, treat "not equal" as needing an update so
+    // downgrades work too. --force still bypasses the version check.
+    let needs_update = if version.is_some() {
+        latest != current || force
+    } else {
+        latest > current || force
+    };
 
     if !needs_update {
         println!("forge-server is up to date (v{})", format_version(&current));

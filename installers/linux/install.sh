@@ -96,6 +96,35 @@ if [ ! -f "$SCRIPT_DIR/forge-server" ] || [ ! -f "$SCRIPT_DIR/forge-server.toml"
     exit $?
 fi
 
+# ── Interactive location prompts ───────────────────────────────────────
+#
+# Env vars (PREFIX/CONFIG_DIR/DATA_DIR) still win — they're set explicitly
+# by the user or by the curl-pipe bootstrap, and we don't want to override
+# that. Only prompt when:
+#   - stdin is a real terminal (skip for `curl | sudo bash`)
+#   - the env var was NOT supplied (detect via the ${VAR+x} trick before
+#     defaults were applied above — we re-check by comparing against the
+#     known-default string)
+# The prompts just let the user confirm or swap in a different path in one
+# pass rather than re-running with env vars set.
+if [ -t 0 ] && [ -t 1 ]; then
+    echo "Forge VCS Server installer"
+    echo ""
+    echo "Press Enter to accept the default path shown in brackets, or type a"
+    echo "different absolute path to install somewhere else."
+    echo ""
+
+    read -r -p "Install prefix (binaries + web UI) [$PREFIX]: " _answer
+    [ -n "$_answer" ] && PREFIX="$_answer"
+
+    read -r -p "Config dir (TOML files)              [$CONFIG_DIR]: " _answer
+    [ -n "$_answer" ] && CONFIG_DIR="$_answer"
+
+    read -r -p "Data dir (objects, DB, certs)        [$DATA_DIR]: " _answer
+    [ -n "$_answer" ] && DATA_DIR="$_answer"
+    echo ""
+fi
+
 echo "Installing Forge VCS Server..."
 echo "  PREFIX:     $PREFIX"
 echo "  CONFIG_DIR: $CONFIG_DIR"
@@ -239,17 +268,55 @@ EOF
     chmod 644 /etc/systemd/system/forge-server.service
     chmod 644 /etc/systemd/system/forge-web.service
 
-    # Add the invoking user (via SUDO_USER) to the forge group so they
-    # can run CLI admin commands without sudo.
-    if [ -n "$SUDO_USER" ] && ! id -nG "$SUDO_USER" 2>/dev/null | grep -qw forge; then
-        echo "  Adding '$SUDO_USER' to 'forge' group..."
-        usermod -aG forge "$SUDO_USER"
+    # Add the invoking user to the forge group so they can run CLI admin
+    # commands (forge-server user add, etc.) without sudo. Try $SUDO_USER
+    # first (installer run via sudo — most common case), fall back to
+    # `logname` (controlling tty's login name) when the script was run
+    # directly as root. Skip for root itself since root already has access.
+    INVOKING_USER="${SUDO_USER:-}"
+    if [ -z "$INVOKING_USER" ] && command -v logname >/dev/null 2>&1; then
+        INVOKING_USER="$(logname 2>/dev/null || true)"
+    fi
+    if [ -n "$INVOKING_USER" ] && [ "$INVOKING_USER" != "root" ] \
+       && id "$INVOKING_USER" >/dev/null 2>&1 \
+       && ! id -nG "$INVOKING_USER" 2>/dev/null | grep -qw forge; then
+        echo "  Adding '$INVOKING_USER' to 'forge' group..."
+        usermod -aG forge "$INVOKING_USER"
+        GROUP_ADDED_USER="$INVOKING_USER"
     fi
 
     systemctl daemon-reload
 
     SYSTEMD_SETUP=1
 fi
+
+# ── Login-shell convenience wrapper ───────────────────────────────────
+#
+# `forge-server` defaults --config to `forge-server.toml` (cwd-relative),
+# which means running `forge-server user add krishna --admin` from any
+# directory other than $CONFIG_DIR fails with "readonly database" or
+# creates a junk forge-data/ next to cwd. Install a tiny shell function
+# via /etc/profile.d so login shells transparently inject
+# `--config $CONFIG_DIR/forge-server.toml` when the user didn't pass one.
+# systemd units use the absolute binary path so this function doesn't
+# affect service startup — it's purely a user-ergonomics fix.
+echo ""
+echo "Installing shell convenience wrapper to /etc/profile.d/forge.sh..."
+cat > /etc/profile.d/forge.sh <<EOF
+# Forge VCS — auto-inject --config for the server CLI so admin commands
+# (forge-server user add, user list, repo grant, ...) work from any cwd.
+# Only applies in interactive shells; systemd services call the binary
+# directly by absolute path and bypass this function.
+forge-server() {
+    for _arg in "\$@"; do
+        case "\$_arg" in
+            -c|--config|--config=*) command forge-server "\$@"; return \$?;;
+        esac
+    done
+    command forge-server --config "$CONFIG_DIR/forge-server.toml" "\$@"
+}
+EOF
+chmod 644 /etc/profile.d/forge.sh
 
 echo ""
 echo "Forge VCS Server installed successfully!"
@@ -269,12 +336,14 @@ if [ "$SYSTEMD_SETUP" = "1" ]; then
     echo "  journalctl -u forge-server -f"
     echo "  journalctl -u forge-web -f"
     echo ""
-    echo "Create your first admin user:"
+    echo "Create your first admin user (open a fresh shell first so the"
+    echo "config wrapper from /etc/profile.d/forge.sh is loaded):"
     echo "  forge-server user add <username> --admin"
-    if [ -n "$SUDO_USER" ]; then
+    if [ -n "${GROUP_ADDED_USER:-}" ]; then
         echo ""
-        echo "Note: '$SUDO_USER' was added to the 'forge' group."
-        echo "Log out and back in (or run 'newgrp forge') for it to take effect."
+        echo "Note: '$GROUP_ADDED_USER' was added to the 'forge' group and the"
+        echo "data dir is group-writable. Log out + back in (or run"
+        echo "'newgrp forge') so the new group membership takes effect."
     fi
 else
     echo "systemd not detected — start manually:"

@@ -12,6 +12,8 @@ mod services;
 mod storage;
 mod tls_autogen;
 mod update;
+#[cfg(target_os = "linux")]
+mod uninstall;
 
 use std::sync::Arc;
 
@@ -79,6 +81,23 @@ enum Commands {
         /// Force re-download even if already on the latest version
         #[arg(short, long)]
         force: bool,
+
+        /// Install a specific version tag (e.g. `0.1.0` or `v0.1.0`).
+        /// Defaults to the latest release.
+        #[arg(long, value_name = "TAG")]
+        version: Option<String>,
+    },
+    /// Uninstall forge-server from this Linux host (binaries, config,
+    /// systemd units, profile snippet). Use --purge to also remove data.
+    #[cfg(target_os = "linux")]
+    Uninstall {
+        /// Also delete the data directory (DB, objects, certs). Irreversible.
+        #[arg(long)]
+        purge: bool,
+
+        /// Skip the interactive confirmation prompt.
+        #[arg(short, long)]
+        yes: bool,
     },
     /// Manage the Windows service (Windows only).
     #[cfg(windows)]
@@ -175,8 +194,13 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Update { check, force }) => {
-            update::run(check, force)?;
+        Some(Commands::Update { check, force, version }) => {
+            update::run(check, force, version)?;
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        Some(Commands::Uninstall { purge, yes }) => {
+            uninstall::run(purge, yes)?;
             return Ok(());
         }
         Some(Commands::Init) => {
