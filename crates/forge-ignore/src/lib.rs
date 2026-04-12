@@ -58,6 +58,15 @@ impl ForgeIgnore {
     }
 
     /// Parse ignore patterns from string content.
+    ///
+    /// Accepts a gitignore-ish subset: `#` comments, blank lines, and glob
+    /// patterns. Gitignore-style trailing-slash semantics are normalized
+    /// here — `Docs/node_modules/` is expanded into two registered globs,
+    /// `Docs/node_modules` (matches the directory itself, so the status
+    /// walker can prune descent) and `Docs/node_modules/**` (matches every
+    /// file under it). Without this expansion, a literal trailing slash
+    /// never matches anything because the paths we check against are
+    /// always `/`-less at their tail.
     pub fn from_str(content: &str) -> Result<Self, ForgeIgnoreError> {
         let mut builder = GlobSetBuilder::new();
         let mut patterns = Vec::new();
@@ -67,9 +76,23 @@ impl ForgeIgnore {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let glob = Glob::new(line).map_err(|e| ForgeIgnoreError::Pattern(e.to_string()))?;
-            builder.add(glob);
-            patterns.push(line.to_string());
+
+            let raw = line.to_string();
+            let trimmed = raw.trim_end_matches('/');
+            // Directory form: `foo/` → ignore the dir AND its contents.
+            // Plain form: `foo` → ignore the file/dir AND its contents
+            // (matches common expectation; gitignore also treats bare
+            // directory names this way when they're directories).
+            let dir_glob = Glob::new(trimmed)
+                .map_err(|e| ForgeIgnoreError::Pattern(e.to_string()))?;
+            builder.add(dir_glob);
+
+            let contents = format!("{}/**", trimmed);
+            let contents_glob = Glob::new(&contents)
+                .map_err(|e| ForgeIgnoreError::Pattern(e.to_string()))?;
+            builder.add(contents_glob);
+
+            patterns.push(raw);
         }
 
         let glob_set = builder.build().map_err(|e| ForgeIgnoreError::Pattern(e.to_string()))?;
@@ -123,6 +146,25 @@ mod tests {
         let ignore = ForgeIgnore::from_str("*.uasset\nBinaries/**\n# comment\n").unwrap();
         assert!(ignore.is_ignored("Binaries/Win64/game.exe"));
         assert!(!ignore.is_ignored("Content/Maps/Level.umap"));
+    }
+
+    #[test]
+    fn trailing_slash_pattern_matches_dir_and_contents() {
+        // Regression: `Docs/node_modules/` was being passed to globset as
+        // a literal pattern ending in '/', which never matched the
+        // slash-less paths the status walker feeds in.
+        let ignore = ForgeIgnore::from_str("Docs/node_modules/\n").unwrap();
+        assert!(ignore.is_ignored("Docs/node_modules"));
+        assert!(ignore.is_ignored("Docs/node_modules/package.json"));
+        assert!(ignore.is_ignored("Docs/node_modules/.bin/acorn"));
+        assert!(!ignore.is_ignored("Docs/src/index.js"));
+    }
+
+    #[test]
+    fn bare_dir_name_matches_contents() {
+        let ignore = ForgeIgnore::from_str("build\n").unwrap();
+        assert!(ignore.is_ignored("build"));
+        assert!(ignore.is_ignored("build/foo.o"));
     }
 
     #[test]
