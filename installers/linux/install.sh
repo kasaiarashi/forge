@@ -98,31 +98,33 @@ fi
 
 # ── Interactive location prompts ───────────────────────────────────────
 #
-# Env vars (PREFIX/CONFIG_DIR/DATA_DIR) still win — they're set explicitly
-# by the user or by the curl-pipe bootstrap, and we don't want to override
-# that. Only prompt when:
-#   - stdin is a real terminal (skip for `curl | sudo bash`)
-#   - the env var was NOT supplied (detect via the ${VAR+x} trick before
-#     defaults were applied above — we re-check by comparing against the
-#     known-default string)
-# The prompts just let the user confirm or swap in a different path in one
-# pass rather than re-running with env vars set.
-if [ -t 0 ] && [ -t 1 ]; then
-    echo "Forge VCS Server installer"
-    echo ""
-    echo "Press Enter to accept the default path shown in brackets, or type a"
-    echo "different absolute path to install somewhere else."
-    echo ""
+# Env vars (PREFIX/CONFIG_DIR/DATA_DIR) still win when set explicitly. We
+# read from /dev/tty rather than stdin so prompts work even under
+# `curl ... | sudo bash`, where stdin is the piped script and a
+# naive `[ -t 0 ]` check would skip the prompts entirely. Skip only when
+# /dev/tty isn't available (truly non-interactive: CI, docker build, etc.).
+# FORGE_NONINTERACTIVE=1 forces the non-prompting path for scripted installs.
+if [ -z "${FORGE_NONINTERACTIVE:-}" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    {
+        echo "Forge VCS Server installer"
+        echo ""
+        echo "Press Enter to accept the default path shown in brackets, or type a"
+        echo "different absolute path to install somewhere else."
+        echo ""
+    } > /dev/tty
 
-    read -r -p "Install prefix (binaries + web UI) [$PREFIX]: " _answer
+    printf "Install prefix (binaries + web UI) [%s]: " "$PREFIX" > /dev/tty
+    IFS= read -r _answer < /dev/tty || _answer=""
     [ -n "$_answer" ] && PREFIX="$_answer"
 
-    read -r -p "Config dir (TOML files)              [$CONFIG_DIR]: " _answer
+    printf "Config dir (TOML files)              [%s]: " "$CONFIG_DIR" > /dev/tty
+    IFS= read -r _answer < /dev/tty || _answer=""
     [ -n "$_answer" ] && CONFIG_DIR="$_answer"
 
-    read -r -p "Data dir (objects, DB, certs)        [$DATA_DIR]: " _answer
+    printf "Data dir (objects, DB, certs)        [%s]: " "$DATA_DIR" > /dev/tty
+    IFS= read -r _answer < /dev/tty || _answer=""
     [ -n "$_answer" ] && DATA_DIR="$_answer"
-    echo ""
+    echo "" > /dev/tty
 fi
 
 echo "Installing Forge VCS Server..."
@@ -287,36 +289,28 @@ EOF
 
     systemctl daemon-reload
 
+    # Enable + start both services so the install is immediately usable.
+    # Prior installs left users to run `systemctl enable --now` manually,
+    # which was easy to miss — the services just never came up and
+    # forge-web's TLS bind never initialized certs. Idempotent: re-running
+    # the installer on an already-running system is a no-op.
+    echo "Enabling and starting forge-server and forge-web..."
+    systemctl enable forge-server.service forge-web.service
+    systemctl restart forge-server.service forge-web.service
+
     SYSTEMD_SETUP=1
 fi
 
-# ── Login-shell convenience wrapper ───────────────────────────────────
-#
-# `forge-server` defaults --config to `forge-server.toml` (cwd-relative),
-# which means running `forge-server user add krishna --admin` from any
-# directory other than $CONFIG_DIR fails with "readonly database" or
-# creates a junk forge-data/ next to cwd. Install a tiny shell function
-# via /etc/profile.d so login shells transparently inject
-# `--config $CONFIG_DIR/forge-server.toml` when the user didn't pass one.
-# systemd units use the absolute binary path so this function doesn't
-# affect service startup — it's purely a user-ergonomics fix.
-echo ""
-echo "Installing shell convenience wrapper to /etc/profile.d/forge.sh..."
-cat > /etc/profile.d/forge.sh <<EOF
-# Forge VCS — auto-inject --config for the server CLI so admin commands
-# (forge-server user add, user list, repo grant, ...) work from any cwd.
-# Only applies in interactive shells; systemd services call the binary
-# directly by absolute path and bypass this function.
-forge-server() {
-    for _arg in "\$@"; do
-        case "\$_arg" in
-            -c|--config|--config=*) command forge-server "\$@"; return \$?;;
-        esac
-    done
-    command forge-server --config "$CONFIG_DIR/forge-server.toml" "\$@"
-}
-EOF
-chmod 644 /etc/profile.d/forge.sh
+# ── Clean up the old profile.d wrapper if present ──────────────────────
+# Earlier installer versions shipped /etc/profile.d/forge.sh as a shell
+# function that injected --config. It only worked for bash login shells;
+# zsh/fish users never picked it up. The forge-server binary now falls
+# back to /etc/forge/forge-server.toml internally when the user doesn't
+# pass --config, so the wrapper is obsolete. Remove it on upgrade to
+# avoid two layers of indirection.
+if [ -f /etc/profile.d/forge.sh ]; then
+    rm -f /etc/profile.d/forge.sh
+fi
 
 echo ""
 echo "Forge VCS Server installed successfully!"
@@ -336,9 +330,11 @@ if [ "$SYSTEMD_SETUP" = "1" ]; then
     echo "  journalctl -u forge-server -f"
     echo "  journalctl -u forge-web -f"
     echo ""
-    echo "Create your first admin user (open a fresh shell first so the"
-    echo "config wrapper from /etc/profile.d/forge.sh is loaded):"
-    echo "  forge-server user add <username> --admin"
+    echo "Create your first admin user:"
+    echo "  sudo forge-server user add <username> --admin"
+    echo ""
+    echo "(run via sudo so the 'forge'-owned data dir is writable; alternatively"
+    echo "log out + back in after group membership changes and drop the sudo)"
     if [ -n "${GROUP_ADDED_USER:-}" ]; then
         echo ""
         echo "Note: '$GROUP_ADDED_USER' was added to the 'forge' group and the"

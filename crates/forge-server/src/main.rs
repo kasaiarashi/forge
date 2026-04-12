@@ -33,7 +33,10 @@ use storage::fs::FsStorage;
 #[derive(Parser)]
 #[command(name = "forge-server", about = "Forge VCS server", version)]
 struct Cli {
-    /// Path to config file (TOML)
+    /// Path to config file (TOML). Defaults to `forge-server.toml` in the
+    /// current directory; if that file is absent on Linux, falls back to
+    /// `/etc/forge/forge-server.toml` (the installer's canonical location)
+    /// so admin CLI commands work from any cwd without `--config`.
     #[arg(short, long, default_value = "forge-server.toml", global = true)]
     config: String,
 
@@ -182,7 +185,31 @@ fn main() -> Result<()> {
     // enabling [server.tls] later does not blow up at handshake time.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let cli = Cli::parse();
+    // `mut` is consumed by the Linux config-fallback block below; keep
+    // the binding mutable unconditionally so the attribute doesn't flip
+    // with cfg, and silence the spurious warning on non-Linux targets.
+    #[allow(unused_mut)]
+    let mut cli = Cli::parse();
+
+    // Fall back to the system-wide config location when the user didn't
+    // pass --config and the cwd-relative default isn't present. Without
+    // this, admin CLI commands (`forge-server user list`, etc.) invoked
+    // from a user's shell fail with SQLITE_READONLY_DIRECTORY because
+    // the auto-generated default config points `base_path` at
+    // `./forge-data`, which resolves under the binary's dir (/usr/local/bin,
+    // not writable). On Linux we resolve to the installer's canonical
+    // `/etc/forge/forge-server.toml` when it exists.
+    #[cfg(target_os = "linux")]
+    {
+        if cli.config == "forge-server.toml"
+            && !std::path::Path::new(&cli.config).exists()
+        {
+            let system = "/etc/forge/forge-server.toml";
+            if std::path::Path::new(system).exists() {
+                cli.config = system.into();
+            }
+        }
+    }
 
     // Always run from the binary's directory so config, data paths, and
     // certs resolve relative to where the binary lives — not wherever
