@@ -41,10 +41,6 @@ After downloading, either:
   system `PATH`, or
 - Note the absolute path — you will enter it in the plugin settings.
 
-Alternatively, if you have a Rust toolchain installed:
-
-    cargo install forge-vcs
-
 Verify the install:
 
     forge --version

@@ -21,10 +21,6 @@ Download and install the Forge CLI from the official repository:
 After downloading, place the `forge` executable somewhere in your system PATH,
 or configure the path in the plugin settings (see below).
 
-Alternatively, install via cargo:
-
-    cargo install forge-vcs
-
 Verify installation by running:
 
     forge --version
