@@ -78,6 +78,43 @@ impl ForgeGrpcService {
     }
 }
 
+/// Return true if `ancestor` is reachable from `descendant` via parent links
+/// (or equal to it). Walks the snapshot DAG breadth-first. Bounded to avoid
+/// pathological repos; the cap is far above any realistic divergence depth.
+fn is_ancestor_or_equal(os: &ObjectStore, ancestor: &ForgeHash, descendant: &ForgeHash) -> bool {
+    if ancestor == descendant {
+        return true;
+    }
+    if ancestor.is_zero() {
+        return true;
+    }
+    const MAX_WALK: usize = 100_000;
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![*descendant];
+    let mut visited = 0usize;
+    while let Some(cur) = stack.pop() {
+        if cur.is_zero() || !seen.insert(cur) {
+            continue;
+        }
+        visited += 1;
+        if visited > MAX_WALK {
+            tracing::warn!("is_ancestor_or_equal: walk cap hit, treating as non-ancestor");
+            return false;
+        }
+        let snap = match os.get_snapshot(&cur) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for p in &snap.parents {
+            if p == ancestor {
+                return true;
+            }
+            stack.push(*p);
+        }
+    }
+    false
+}
+
 #[tonic::async_trait]
 impl ForgeService for ForgeGrpcService {
     type PullObjectsStream = ReceiverStream<Result<ObjectChunk, Status>>;
@@ -378,6 +415,23 @@ impl ForgeService for ForgeGrpcService {
         // Auto-register repo if it doesn't exist (first push creates it).
         self.db.create_repo(repo, "")
             .map_err(|e| internal_err("failed to register repo", e))?;
+
+        // Fast-forward guard: for non-force updates against an existing ref,
+        // require `new_hash` to be a descendant of `old_hash`. Otherwise a
+        // stale client could rewind the branch with a behind-tip.
+        let old_is_zero = req.old_hash.iter().all(|&b| b == 0);
+        if !req.force && !old_is_zero {
+            let old = ForgeHash::from_hex(&hex::encode(&req.old_hash))
+                .map_err(|e| internal_err("grpc", e))?;
+            let new = ForgeHash::from_hex(&hex::encode(&req.new_hash))
+                .map_err(|e| internal_err("grpc", e))?;
+            if !is_ancestor_or_equal(&self.object_store(repo), &old, &new) {
+                return Ok(Response::new(UpdateRefResponse {
+                    success: false,
+                    error: "non-fast-forward: new tip is not a descendant of remote tip".into(),
+                }));
+            }
+        }
 
         let success = self
             .db

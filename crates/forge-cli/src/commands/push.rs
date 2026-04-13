@@ -86,6 +86,23 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         .into_inner();
 
     let remote_tip_bytes = refs_resp.refs.get(&ref_name).cloned().unwrap_or_else(|| vec![0u8; 32]);
+    let remote_is_zero = remote_tip_bytes.iter().all(|&b| b == 0);
+
+    // Pre-flight fast-forward check: make sure remote_tip is an ancestor of
+    // local_tip before uploading anything. Server enforces this too, but
+    // checking here avoids a wasted object upload and gives a clearer error.
+    if !force && !remote_is_zero {
+        let remote_tip = ForgeHash::from_hex(&hex::encode(&remote_tip_bytes))?;
+        if !is_local_ancestor_of(ws, &remote_tip, &local_tip)? {
+            bail!(
+                "Updates were rejected because the remote contains work that you do \
+                 not have locally.\n\
+                 This is usually caused by another repository pushing to the same ref.\n\
+                 Pull and rebase, then push again — or use `forge push --force` \
+                 to overwrite the remote (rewrites history; use with care)."
+            );
+        }
+    }
 
     let stop_hash = if force {
         vec![0u8; 32]
@@ -287,6 +304,36 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
     }
 
     Ok(())
+}
+
+/// Return true if `ancestor` is reachable from `descendant` via parent links
+/// (or equal). Used as a client-side fast-forward pre-flight.
+fn is_local_ancestor_of(
+    ws: &Workspace,
+    ancestor: &ForgeHash,
+    descendant: &ForgeHash,
+) -> Result<bool> {
+    if ancestor == descendant || ancestor.is_zero() {
+        return Ok(true);
+    }
+    let mut seen = HashSet::new();
+    let mut stack = vec![*descendant];
+    while let Some(cur) = stack.pop() {
+        if cur.is_zero() || !seen.insert(cur) {
+            continue;
+        }
+        let snap = match ws.object_store.get_snapshot(&cur) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for p in &snap.parents {
+            if p == ancestor {
+                return Ok(true);
+            }
+            stack.push(*p);
+        }
+    }
+    Ok(false)
 }
 
 /// Walk the snapshot chain from `tip` and collect all reachable object hashes,
