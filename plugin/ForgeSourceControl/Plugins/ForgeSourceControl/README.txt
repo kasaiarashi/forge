@@ -52,8 +52,9 @@ There are two ways to set up a Forge workspace:
      2. If no workspace is detected, a setup panel appears.
      3. Enter your remote URL (optional) and click "Initialize Project with
         Forge".
-     4. If a remote URL is provided and you are not yet authenticated, a
-        terminal window will open for you to complete login.
+     4. If a remote URL is provided and you are not yet authenticated, an
+        in-editor sign-in dialog opens so you can enter a username/password
+        or personal access token without leaving the editor.
 
 Usage
 -----

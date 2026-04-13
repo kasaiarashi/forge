@@ -18,10 +18,14 @@
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSeparator.h"
+#include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Notifications/NotificationManager.h"
 
 #define LOCTEXT_NAMESPACE "ForgeSourceControl"
@@ -514,7 +518,7 @@ TSharedRef<class SWidget> FForgeSourceControlProvider::MakeSettingsWidget() cons
 			SNew(STextBlock)
 			.Text(LOCTEXT("InitIdentityHint",
 				"Remote URL is optional — leave blank for a local-only workspace. "
-				"If set, a terminal opens to run 'forge login' so your identity is recorded."))
+				"If set, a sign-in dialog opens so your Forge identity is recorded."))
 			.AutoWrapText(true)
 		];
 
@@ -675,13 +679,14 @@ bool FForgeSourceControlProvider::InitializeWorkspace(
 			return false;
 		}
 
-		// 3. If there's no stored credential for this remote yet, pop an
-		//    interactive terminal so the user can `forge login`. `forge login`
-		//    will then write user.name / user.email back into the workspace
-		//    config, which is why we added the remote first.
+		// 3. If there's no stored credential for this remote yet, show the
+		//    in-editor login dialog so the user can `forge login` without
+		//    leaving the editor. `forge login` writes user.name / user.email
+		//    back into the workspace config, which is why we added the
+		//    remote first.
 		if (!IsLoggedInToRemote(RemoteUrl))
 		{
-			LaunchLoginShell(RemoteUrl);
+			ShowLoginDialog(RemoteUrl);
 		}
 	}
 
@@ -712,35 +717,202 @@ bool FForgeSourceControlProvider::IsLoggedInToRemote(const FString& RemoteUrl) c
 	return !StdOut.Contains(TEXT("Not logged in"));
 }
 
-void FForgeSourceControlProvider::LaunchLoginShell(const FString& RemoteUrl) const
+void FForgeSourceControlProvider::ShowLoginDialog(const FString& RemoteUrl) const
 {
-#if PLATFORM_WINDOWS
-	// We go through `cmd /c start cmd /k ...` so the new console is a real
-	// top-level window (UE's CreateProc otherwise gives us a DETACHED_PROCESS
-	// with no console, which is useless for an interactive prompt). The
-	// inner `/k` keeps the window open after login finishes so the user can
-	// read the "Logged in as…" / PAT-created output before closing.
-	const FString Inner = FString::Printf(
-		TEXT("\"\"%s\" login --server \"%s\"\""),
-		*ForgeExePath, *RemoteUrl);
-	const FString CmdLine = FString::Printf(
-		TEXT("/c start \"Forge Login\" cmd /k %s"),
-		*Inner);
-
-	FProcHandle Proc = FPlatformProcess::CreateProc(
-		TEXT("cmd.exe"), *CmdLine,
-		/*bLaunchDetached=*/true,
-		/*bLaunchHidden=*/true,
-		/*bLaunchReallyHidden=*/true,
-		nullptr, 0, nullptr, nullptr, nullptr);
-	if (Proc.IsValid())
+	// State shared between the widget callbacks and the login click handler.
+	// Lives on the heap via TSharedRef so the lambdas can capture safely
+	// regardless of widget/window destruction order.
+	struct FLoginState
 	{
-		FPlatformProcess::CloseProc(Proc);
+		FString Username;
+		FString Password;
+		FString Token;
+		bool    bUseToken = false;
+	};
+	TSharedRef<FLoginState> State = MakeShared<FLoginState>();
+
+	TSharedRef<SWindow> Window = SNew(SWindow)
+		.Title(LOCTEXT("ForgeLoginTitle", "Forge Login"))
+		.SizingRule(ESizingRule::Autosized)
+		.SupportsMaximize(false)
+		.SupportsMinimize(false);
+
+	TSharedRef<SEditableTextBox> UsernameBox = SNew(SEditableTextBox)
+		.HintText(LOCTEXT("ForgeLoginUserHint", "username"))
+		.OnTextChanged_Lambda([State](const FText& T) { State->Username = T.ToString(); });
+
+	TSharedRef<SEditableTextBox> PasswordBox = SNew(SEditableTextBox)
+		.IsPassword(true)
+		.HintText(LOCTEXT("ForgeLoginPassHint", "password"))
+		.OnTextChanged_Lambda([State](const FText& T) { State->Password = T.ToString(); });
+
+	TSharedRef<SEditableTextBox> TokenBox = SNew(SEditableTextBox)
+		.IsPassword(true)
+		.HintText(LOCTEXT("ForgeLoginTokenHint", "paste PAT here"))
+		.OnTextChanged_Lambda([State](const FText& T) { State->Token = T.ToString(); });
+
+	// Visibility toggles driven by the "use token" checkbox. Returning a
+	// lambda keeps the visibility reactive without needing to hold the
+	// widgets in member state.
+	auto UserPassVis = [State]() { return State->bUseToken ? EVisibility::Collapsed : EVisibility::Visible; };
+	auto TokenVis    = [State]() { return State->bUseToken ? EVisibility::Visible : EVisibility::Collapsed; };
+
+	const FString ForgeExe = ForgeExePath;
+	const FString Url      = RemoteUrl;
+	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+
+	auto DoLogin = [State, ForgeExe, Url, ProjectDir, Window]() -> FReply
+	{
+		FString Args;
+		if (State->bUseToken)
+		{
+			if (State->Token.IsEmpty())
+			{
+				FNotificationInfo Info(LOCTEXT("ForgeLoginNoToken", "Enter a personal access token."));
+				Info.ExpireDuration = 4.0f;
+				FSlateNotificationManager::Get().AddNotification(Info);
+				return FReply::Handled();
+			}
+			Args = FString::Printf(
+				TEXT("login --yes --server \"%s\" --token \"%s\""),
+				*Url, *State->Token);
+		}
+		else
+		{
+			if (State->Username.IsEmpty() || State->Password.IsEmpty())
+			{
+				FNotificationInfo Info(LOCTEXT("ForgeLoginNoCreds", "Enter both username and password."));
+				Info.ExpireDuration = 4.0f;
+				FSlateNotificationManager::Get().AddNotification(Info);
+				return FReply::Handled();
+			}
+			Args = FString::Printf(
+				TEXT("login --yes --server \"%s\" --username \"%s\" --password \"%s\""),
+				*Url, *State->Username, *State->Password);
+		}
+
+		int32 ReturnCode = -1;
+		FString StdOut, StdErr;
+		FPlatformProcess::ExecProcess(
+			*ForgeExe, *Args,
+			&ReturnCode, &StdOut, &StdErr, *ProjectDir);
+
+		const bool bOk = (ReturnCode == 0);
+		FText Msg = bOk
+			? LOCTEXT("ForgeLoginOk", "Logged in to Forge server.")
+			: FText::Format(
+				LOCTEXT("ForgeLoginFailFmt", "Forge login failed: {0}"),
+				FText::FromString(StdErr.IsEmpty() ? StdOut : StdErr));
+		FNotificationInfo Info(Msg);
+		Info.ExpireDuration = bOk ? 4.0f : 8.0f;
+		FSlateNotificationManager::Get().AddNotification(Info);
+
+		if (bOk && Window->IsVisible())
+		{
+			Window->RequestDestroyWindow();
+		}
+		return FReply::Handled();
+	};
+
+	auto DoCancel = [Window]() -> FReply
+	{
+		Window->RequestDestroyWindow();
+		return FReply::Handled();
+	};
+
+	TSharedRef<SVerticalBox> Root = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight().Padding(8.0f, 8.0f, 8.0f, 4.0f)
+		[
+			SNew(STextBlock)
+			.Text(FText::Format(
+				LOCTEXT("ForgeLoginServerFmt", "Sign in to: {0}"),
+				FText::FromString(RemoteUrl)))
+			.AutoWrapText(true)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(8.0f, 4.0f)
+		[
+			SNew(SCheckBox)
+			.IsChecked(ECheckBoxState::Unchecked)
+			.OnCheckStateChanged_Lambda([State](ECheckBoxState NewState)
+			{
+				State->bUseToken = (NewState == ECheckBoxState::Checked);
+			})
+			.Content()
+			[
+				SNew(STextBlock).Text(LOCTEXT("ForgeLoginUseToken", "Use personal access token instead"))
+			]
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(8.0f, 4.0f)
+		[
+			SNew(SBox).Visibility_Lambda(UserPassVis)
+			[
+				SNew(SUniformGridPanel).SlotPadding(FMargin(4.0f, 2.0f))
+				+ SUniformGridPanel::Slot(0, 0)
+				[
+					SNew(STextBlock).Text(LOCTEXT("ForgeLoginUserLabel", "Username"))
+				]
+				+ SUniformGridPanel::Slot(1, 0)
+				[
+					UsernameBox
+				]
+				+ SUniformGridPanel::Slot(0, 1)
+				[
+					SNew(STextBlock).Text(LOCTEXT("ForgeLoginPassLabel", "Password"))
+				]
+				+ SUniformGridPanel::Slot(1, 1)
+				[
+					PasswordBox
+				]
+			]
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(8.0f, 4.0f)
+		[
+			SNew(SBox).Visibility_Lambda(TokenVis)
+			[
+				SNew(SUniformGridPanel).SlotPadding(FMargin(4.0f, 2.0f))
+				+ SUniformGridPanel::Slot(0, 0)
+				[
+					SNew(STextBlock).Text(LOCTEXT("ForgeLoginTokenLabel", "Token"))
+				]
+				+ SUniformGridPanel::Slot(1, 0)
+				[
+					TokenBox
+				]
+			]
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(8.0f, 8.0f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.0f)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(4.0f, 0.0f)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("ForgeLoginCancel", "Cancel"))
+				.OnClicked_Lambda(DoCancel)
+			]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(4.0f, 0.0f)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("ForgeLoginSignIn", "Sign In"))
+				.OnClicked_Lambda(DoLogin)
+			]
+		];
+
+	Window->SetContent(
+		SNew(SBox).MinDesiredWidth(420.0f).Padding(4.0f)
+		[
+			Root
+		]);
+
+	// Parent to the main editor window so the dialog is modal to the editor,
+	// not to a random child window (which would let the user interact with
+	// the editor while this is open).
+	TSharedPtr<SWindow> ParentWindow;
+	if (FSlateApplication::IsInitialized() && FSlateApplication::Get().GetActiveTopLevelWindow().IsValid())
+	{
+		ParentWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
 	}
-#else
-	// Plugin is Windows-only right now; no-op elsewhere.
-	(void)RemoteUrl;
-#endif
+	FSlateApplication::Get().AddModalWindow(Window, ParentWindow, /*bSlowTaskWindow=*/false);
 }
 
 #undef LOCTEXT_NAMESPACE

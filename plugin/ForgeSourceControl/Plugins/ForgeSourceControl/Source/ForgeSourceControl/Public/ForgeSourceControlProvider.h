@@ -134,8 +134,12 @@ private:
 	/** Returns true if `forge whoami --server <url>` reports an authenticated user. */
 	bool IsLoggedInToRemote(const FString& RemoteUrl) const;
 
-	/** Pop an interactive console window running `forge login --server <url>`. */
-	void LaunchLoginShell(const FString& RemoteUrl) const;
+	/**
+	 * Show a modal Slate login dialog and invoke `forge login` non-interactively
+	 * with the collected credentials (username/password or PAT). Replaces the
+	 * old external terminal spawn so the whole flow stays in-editor.
+	 */
+	void ShowLoginDialog(const FString& RemoteUrl) const;
 
 	TMap<FName, FGetForgeWorker> WorkersMap;
 	TArray<FForgeSourceControlCommand*> CommandQueue;
