@@ -37,6 +37,9 @@ pub struct ForgeGrpcService {
     /// Auth/identity store. Used by every handler to check the caller's
     /// repo role and PAT scope before doing real work.
     pub user_store: Arc<dyn UserStore>,
+    /// Secret backend. Write-only through RPCs — values flow outward only
+    /// to the run executor, never back to clients (no Read RPC exists).
+    pub secrets: Arc<dyn crate::services::secrets::SecretBackend>,
 }
 
 /// Normalize a repo identifier into the canonical `<owner>/<name>` form
@@ -1802,5 +1805,101 @@ impl ForgeService for ForgeGrpcService {
         Ok(Response::new(DeleteCommentResponse {
             success: ok, error: String::new(),
         }))
+    }
+
+    // ── Secrets ──
+    //
+    // Write-only surface: create / update / delete / list keys. No Read RPC
+    // exists by design — values leave the server only via the run executor
+    // and are masked in step logs before persistence.
+
+    async fn create_secret(
+        &self,
+        request: Request<CreateSecretRequest>,
+    ) -> Result<Response<CreateSecretResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo = resolve_repo(&req.repo, &caller)?;
+        require_repo_admin(&caller, &self.user_store, &repo)?;
+        if req.key.is_empty() {
+            return Err(Status::invalid_argument("secret key must not be empty"));
+        }
+        self.secrets
+            .put(&repo, &req.key, &req.value)
+            .await
+            .map_err(|e| internal_err("create_secret", e))?;
+        Ok(Response::new(CreateSecretResponse {
+            success: true,
+            error: String::new(),
+        }))
+    }
+
+    async fn update_secret(
+        &self,
+        request: Request<UpdateSecretRequest>,
+    ) -> Result<Response<UpdateSecretResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo = resolve_repo(&req.repo, &caller)?;
+        require_repo_admin(&caller, &self.user_store, &repo)?;
+        if req.key.is_empty() {
+            return Err(Status::invalid_argument("secret key must not be empty"));
+        }
+        self.secrets
+            .put(&repo, &req.key, &req.value)
+            .await
+            .map_err(|e| internal_err("update_secret", e))?;
+        Ok(Response::new(UpdateSecretResponse {
+            success: true,
+            error: String::new(),
+        }))
+    }
+
+    async fn delete_secret(
+        &self,
+        request: Request<DeleteSecretRequest>,
+    ) -> Result<Response<DeleteSecretResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo = resolve_repo(&req.repo, &caller)?;
+        require_repo_admin(&caller, &self.user_store, &repo)?;
+        let removed = self
+            .secrets
+            .delete(&repo, &req.key)
+            .await
+            .map_err(|e| internal_err("delete_secret", e))?;
+        Ok(Response::new(DeleteSecretResponse {
+            success: removed,
+            error: if removed {
+                String::new()
+            } else {
+                "secret not found".into()
+            },
+        }))
+    }
+
+    async fn list_secret_keys(
+        &self,
+        request: Request<ListSecretKeysRequest>,
+    ) -> Result<Response<ListSecretKeysResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo = resolve_repo(&req.repo, &caller)?;
+        require_repo_admin(&caller, &self.user_store, &repo)?;
+        let rows = self
+            .secrets
+            .list_keys(&repo)
+            .await
+            .map_err(|e| internal_err("list_secret_keys", e))?;
+        let secrets = rows
+            .into_iter()
+            .map(|m| SecretMeta {
+                repo: m.repo,
+                key: m.key,
+                created_at: m.created_at,
+                updated_at: m.updated_at,
+            })
+            .collect();
+        Ok(Response::new(ListSecretKeysResponse { secrets }))
     }
 }

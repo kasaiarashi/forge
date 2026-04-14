@@ -8,3 +8,4 @@ pub mod refs;
 pub mod locks;
 pub mod grpc;
 pub mod actions;
+pub mod secrets;

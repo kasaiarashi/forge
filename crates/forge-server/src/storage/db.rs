@@ -167,7 +167,90 @@ impl MetadataDb {
             conn: Mutex::new(conn),
         };
         db.create_actions_tables()?;
+        db.create_secrets_tables()?;
         Ok(db)
+    }
+
+    // -- Secrets --
+
+    pub fn create_secrets_tables(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS secrets (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo         TEXT    NOT NULL,
+                key          TEXT    NOT NULL,
+                nonce        BLOB    NOT NULL,
+                ciphertext   BLOB    NOT NULL,
+                created_at   INTEGER NOT NULL,
+                updated_at   INTEGER NOT NULL,
+                UNIQUE(repo, key)
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_secret(
+        &self,
+        repo: &str,
+        key: &str,
+        nonce: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO secrets (repo, key, nonce, ciphertext, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(repo, key) DO UPDATE SET
+                nonce = excluded.nonce,
+                ciphertext = excluded.ciphertext,
+                updated_at = excluded.updated_at",
+            rusqlite::params![repo, key, nonce, ciphertext, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_secret(&self, repo: &str, key: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let conn = self.conn()?;
+        let result = conn
+            .prepare("SELECT nonce, ciphertext FROM secrets WHERE repo = ?1 AND key = ?2")?
+            .query_row(rusqlite::params![repo, key], |row: &rusqlite::Row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .ok();
+        Ok(result)
+    }
+
+    pub fn delete_secret(&self, repo: &str, key: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "DELETE FROM secrets WHERE repo = ?1 AND key = ?2",
+            rusqlite::params![repo, key],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn list_secret_keys(
+        &self,
+        repo: &str,
+    ) -> Result<Vec<crate::services::secrets::SecretMeta>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT repo, key, created_at, updated_at FROM secrets WHERE repo = ?1 ORDER BY key",
+        )?;
+        let rows = stmt.query_map([repo], |row: &rusqlite::Row| {
+            Ok(crate::services::secrets::SecretMeta {
+                repo: row.get(0)?,
+                key: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     // -- Repos --

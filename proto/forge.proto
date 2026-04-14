@@ -243,7 +243,41 @@ service ForgeService {
     rpc CreateComment(CreateCommentRequest) returns (CreateCommentResponse);
     rpc UpdateComment(UpdateCommentRequest) returns (UpdateCommentResponse);
     rpc DeleteComment(DeleteCommentRequest) returns (DeleteCommentResponse);
+
+    // Secrets — create/update/delete/list keys only. Values flow to runs,
+    // never back to clients. Repo-admin gated.
+    rpc CreateSecret(CreateSecretRequest) returns (CreateSecretResponse);
+    rpc UpdateSecret(UpdateSecretRequest) returns (UpdateSecretResponse);
+    rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
+    rpc ListSecretKeys(ListSecretKeysRequest) returns (ListSecretKeysResponse);
 }
+
+message SecretMeta {
+    string repo = 1;
+    string key = 2;
+    int64 created_at = 3;
+    int64 updated_at = 4;
+}
+
+message CreateSecretRequest {
+    string repo = 1;
+    string key = 2;
+    string value = 3;
+}
+message CreateSecretResponse { bool success = 1; string error = 2; }
+
+message UpdateSecretRequest {
+    string repo = 1;
+    string key = 2;
+    string value = 3;
+}
+message UpdateSecretResponse { bool success = 1; string error = 2; }
+
+message DeleteSecretRequest { string repo = 1; string key = 2; }
+message DeleteSecretResponse { bool success = 1; string error = 2; }
+
+message ListSecretKeysRequest { string repo = 1; }
+message ListSecretKeysResponse { repeated SecretMeta secrets = 1; }
 
 // ============================================================
 // Object transfer

@@ -428,6 +428,18 @@ pub(crate) async fn serve_inner(
         .collect();
     let fs = Arc::new(FsStorage::new(base.join("repos"), repo_overrides));
 
+    let user_store: Arc<dyn auth::UserStore> =
+        Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
+
+    // Secrets: load/create master key under <base>/secrets/master.key, then
+    // wrap the DB in the AES-GCM SQLite backend. Swap to a KMS-backed
+    // SecretBackend here later without touching call sites.
+    let master_key = services::secrets::master_key::load_or_create(&base)
+        .context("load or create secrets master key")?;
+    let secrets: Arc<dyn services::secrets::SecretBackend> = Arc::new(
+        services::secrets::sqlite::SqliteSecretBackend::new(Arc::clone(&db), &master_key),
+    );
+
     // Workflow engine is opt-in. See [actions] in forge-server.toml; the
     // post-audit default is OFF because steps run shell commands as the
     // forge-server process user.
@@ -437,15 +449,17 @@ pub(crate) async fn serve_inner(
              commands on this host. Ensure forge-server runs under an isolated \
              account. See docs/actions-security.md for the full threat model."
         );
-        let tx = services::actions::engine::start(&config, Arc::clone(&db), Arc::clone(&fs));
+        let tx = services::actions::engine::start(
+            &config,
+            Arc::clone(&db),
+            Arc::clone(&fs),
+            Arc::clone(&secrets),
+        );
         info!("Actions engine started (executor: {})", config.actions.executor);
         Some(tx)
     } else {
         None
     };
-
-    let user_store: Arc<dyn auth::UserStore> =
-        Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
 
     let grpc_service = ForgeGrpcService {
         fs: Arc::clone(&fs),
@@ -453,6 +467,7 @@ pub(crate) async fn serve_inner(
         start_time: std::time::Instant::now(),
         workflow_engine,
         user_store: Arc::clone(&user_store),
+        secrets: Arc::clone(&secrets),
     };
 
     let addr: std::net::SocketAddr = config.server.listen.parse()?;
