@@ -1,0 +1,19 @@
+# Steam upload via steamcmd. Credentials come strictly from secrets.
+name: Steam Upload
+inputs:
+  app_id:
+    required: true
+  depot_id:
+    required: true
+  content_root:
+    required: true
+  branch:
+    default: "default"
+steps:
+  - name: Upload
+    uses: "@builtin/steamcmd"
+    with:
+      app_id: "${{ inputs.app_id }}"
+      depot_id: "${{ inputs.depot_id }}"
+      content_root: "${{ inputs.content_root }}"
+      branch: "${{ inputs.branch }}"

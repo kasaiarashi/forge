@@ -501,6 +501,16 @@ pub(crate) async fn serve_inner(
     // StreamStepLogs readers subscribe.
     let log_hub = Arc::new(services::logs::LogHub::new());
 
+    // Composite actions registry: copy the bundled `actions/` tree (shipped
+    // next to the server binary or resolved via the repo's actions dir)
+    // into `<base>/actions/` on every start. Operator overrides dropped
+    // directly in `<base>/actions/` survive — we only refresh files that
+    // differ from the bundled copy, never delete strays.
+    let actions_root = base.join("actions");
+    if let Err(e) = sync_bundled_actions(&actions_root) {
+        warn!(error = %e, "failed to sync bundled actions (server will still start)");
+    }
+
     // Workflow engine is opt-in. See [actions] in forge-server.toml; the
     // post-audit default is OFF because steps run shell commands as the
     // forge-server process user. When `[actions] use_agents = true`, skip
@@ -566,6 +576,7 @@ pub(crate) async fn serve_inner(
         db: Arc::clone(&db),
         secrets: Arc::clone(&secrets),
         log_hub: Arc::clone(&log_hub),
+        actions_root: actions_root.clone(),
     })
     .max_decoding_message_size(max_msg)
     .max_encoding_message_size(max_msg);
@@ -837,4 +848,56 @@ fn load_config_for_admin(cli: &Cli) -> Result<ServerConfig> {
         config.storage.base_path = storage.into();
     }
     Ok(config)
+}
+
+/// Copy the bundled `actions/` tree into `<base>/actions/`. Only overwrites
+/// files whose contents actually changed so operator overrides dropped
+/// directly under `<base>/actions/` survive restarts.
+fn sync_bundled_actions(dest_root: &std::path::Path) -> anyhow::Result<()> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let candidates: Vec<std::path::PathBuf> = exe_dir
+        .iter()
+        .map(|d| d.join("actions"))
+        .chain(
+            std::env::current_dir()
+                .ok()
+                .into_iter()
+                .map(|c| c.join("actions")),
+        )
+        .chain(Some(std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../actions"
+        ))))
+        .collect();
+    let source = match candidates.into_iter().find(|p| p.exists()) {
+        Some(p) => p,
+        None => {
+            std::fs::create_dir_all(dest_root).ok();
+            return Ok(());
+        }
+    };
+
+    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let path = entry.path();
+            let to = dst.join(entry.file_name());
+            if path.is_dir() {
+                copy_dir(&path, &to)?;
+            } else {
+                let changed = match std::fs::read(&to) {
+                    Ok(existing) => existing != std::fs::read(&path)?,
+                    Err(_) => true,
+                };
+                if changed {
+                    std::fs::copy(&path, &to)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    copy_dir(&source, dest_root)
 }

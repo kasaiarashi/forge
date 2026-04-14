@@ -1170,6 +1170,7 @@ dependencies = [
  "indexmap 2.13.1",
  "libc",
  "prost",
+ "regex",
  "rustls",
  "serde",
  "serde_json",

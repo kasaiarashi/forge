@@ -26,6 +26,9 @@ pub struct ForgeAgentService {
     pub db: Arc<MetadataDb>,
     pub secrets: Arc<dyn SecretBackend>,
     pub log_hub: Arc<LogHub>,
+    /// Filesystem root the server serves composite action YAML from.
+    /// Typically `<base_path>/actions/`. Resolver order: `<root>/<name>/<version>/action.yaml`.
+    pub actions_root: std::path::PathBuf,
 }
 
 impl ForgeAgentService {
@@ -305,12 +308,31 @@ impl AgentService for ForgeAgentService {
 
     async fn get_action(
         &self,
-        _request: Request<GetActionRequest>,
+        request: Request<GetActionRequest>,
     ) -> Result<Response<GetActionResponse>, Status> {
-        // Phase 3 wires this up to the composite action registry; for now
-        // return empty so an agent can still run `run:`-only jobs without
-        // crashing on missing actions.
-        Ok(Response::new(GetActionResponse { yaml: String::new() }))
+        let req = request.into_inner();
+        self.authenticate(req.agent_id, &req.token)?;
+        // Action names are filesystem paths under actions_root, so refuse
+        // any traversal attempt up-front. The valid form is
+        // `<owner>/<name>` plus a `v*`-shaped version directory.
+        if req.name.contains("..") || req.name.contains('\\') || req.version.contains("..") {
+            return Err(Status::invalid_argument("invalid action path"));
+        }
+        let path = self
+            .actions_root
+            .join(&req.name)
+            .join(&req.version)
+            .join("action.yaml");
+        let yaml = match tokio::fs::read_to_string(&path).await {
+            Ok(s) => s,
+            Err(_) => {
+                return Err(Status::not_found(format!(
+                    "action '{}' @ '{}' not found",
+                    req.name, req.version
+                )));
+            }
+        };
+        Ok(Response::new(GetActionResponse { yaml }))
     }
 }
 

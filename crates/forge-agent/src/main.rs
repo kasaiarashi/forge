@@ -18,6 +18,8 @@ use tracing::{error, info, warn};
 use forge_proto::forge::agent_service_client::AgentServiceClient;
 use forge_proto::forge::*;
 
+mod actions;
+mod primitives;
 mod runner;
 
 #[derive(Parser)]

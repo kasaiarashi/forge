@@ -1,45 +1,42 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
 // Licensed under the MIT License.
 
-//! Step executor. Parses the workflow YAML handed to us by `ClaimJob`,
-//! runs each `run:` step through the local shell, streams stdout/stderr
-//! back to the server over `StreamAgentLogs`, then reports final step +
-//! run status.
+//! Step executor. Handles `run:` steps directly, `uses: @builtin/*` via
+//! the primitive dispatcher, and `uses: <owner>/<name>@<version>` by
+//! fetching the composite action YAML from the server and inline-expanding
+//! its steps. Expression expansion handles `${{ inputs.* }}` and
+//! `${{ steps.<id>.outputs.* }}` scopes; secrets were already expanded
+//! server-side into `env:`.
 
 use anyhow::{Context, Result};
 use forge_proto::forge::agent_service_client::AgentServiceClient;
 use forge_proto::forge::*;
 use indexmap::IndexMap;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use crate::actions::{expand_expr, ActionDef, ComposedStep};
+use crate::primitives::dispatch;
 use crate::AgentConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 struct WorkflowDef {
     #[serde(default)]
+    #[allow(dead_code)]
     name: String,
     #[serde(default)]
-    env: std::collections::HashMap<String, String>,
+    env: HashMap<String, String>,
     jobs: IndexMap<String, JobDef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct JobDef {
-    #[allow(dead_code)]
-    name: String,
-    steps: Vec<StepDef>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct StepDef {
-    name: String,
     #[serde(default)]
-    run: Option<String>,
-    #[serde(rename = "timeout-minutes", default)]
-    timeout_minutes: Option<u64>,
+    name: String,
+    steps: Vec<ComposedStep>,
 }
 
 pub async fn execute_run(
@@ -59,37 +56,41 @@ pub async fn execute_run(
         let _ = std::fs::set_permissions(&workspace, perms);
     }
 
-    let def: WorkflowDef = serde_yaml::from_str(&job.workflow_yaml)
-        .context("parse workflow YAML")?;
+    let def: WorkflowDef =
+        serde_yaml::from_str(&job.workflow_yaml).context("parse workflow YAML")?;
+    let base_env = merged_env(&def, &job);
 
     let mut all_success = true;
+    let mut step_counter: i32 = 0;
     'jobs: for (_job_key, jd) in &def.jobs {
-        for (idx, step) in jd.steps.iter().enumerate() {
-            if let Some(cmd) = &step.run {
-                let ok = run_command_step(
-                    client,
-                    &cfg,
-                    agent_id,
-                    run_id,
-                    &jd.name,
-                    idx as i32,
-                    &step.name,
-                    cmd,
-                    &workspace,
-                    merged_env(&def, &job),
-                    step.timeout_minutes.unwrap_or(30),
-                )
-                .await
-                .unwrap_or(false);
-                if !ok {
-                    all_success = false;
-                    break 'jobs;
-                }
-            } else {
-                // v1 agent only handles `run:`. Artifact + release steps
-                // remain on the server side until Phase 3 composite
-                // actions fold them into `run:` primitives.
-                warn!(step = %step.name, "agent skipping non-run step (no local handler)");
+        let job_name = if jd.name.is_empty() {
+            _job_key.clone()
+        } else {
+            jd.name.clone()
+        };
+        // Per-job shared output map; outer scope has no inputs.
+        let mut step_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let empty_inputs: HashMap<String, String> = HashMap::new();
+
+        for step in &jd.steps {
+            let ok = execute_step(
+                client,
+                cfg.as_ref(),
+                agent_id,
+                run_id,
+                &job_name,
+                &mut step_counter,
+                step,
+                &workspace,
+                &base_env,
+                &empty_inputs,
+                &mut step_outputs,
+            )
+            .await
+            .unwrap_or(false);
+            if !ok {
+                all_success = false;
+                break 'jobs;
             }
         }
     }
@@ -103,8 +104,6 @@ pub async fn execute_run(
             status: final_status.to_string(),
         })
         .await;
-
-    // Workspace cleanup; best-effort.
     let _ = std::fs::remove_dir_all(&workspace);
     info!(run_id, status = final_status, "run finished");
     Ok(())
@@ -113,28 +112,230 @@ pub async fn execute_run(
 fn merged_env(
     def: &WorkflowDef,
     job: &ClaimJobResponse,
-) -> std::collections::HashMap<String, String> {
+) -> HashMap<String, String> {
     let mut out = def.env.clone();
-    // Server's resolved env wins — it already expanded ${{ secrets.* }}.
     for (k, v) in &job.env {
         out.insert(k.clone(), v.clone());
     }
     out
 }
 
+/// Execute a single step — may be `run:`, a `@builtin/*` primitive, or a
+/// composite action that expands into N sub-steps. Recursion depth is
+/// implicit and bounded by composite-depth-3 server-side (we trust the
+/// server's pre-flight for that; we'd otherwise add a depth counter here).
 #[allow(clippy::too_many_arguments)]
-async fn run_command_step(
+async fn execute_step(
     client: &mut AgentServiceClient<tonic::transport::Channel>,
     cfg: &AgentConfig,
     agent_id: i64,
     run_id: i64,
     job_name: &str,
-    step_index: i32,
+    step_counter: &mut i32,
+    step: &ComposedStep,
+    workspace: &PathBuf,
+    env: &HashMap<String, String>,
+    inputs: &HashMap<String, String>,
+    step_outputs: &mut HashMap<String, HashMap<String, String>>,
+) -> Result<bool> {
+    // `run:` takes priority. Expand expressions against the current scope.
+    if let Some(cmd) = &step.run {
+        let expanded = expand_expr(cmd, inputs, step_outputs);
+        return run_shell(
+            client,
+            cfg,
+            agent_id,
+            run_id,
+            job_name,
+            step_counter,
+            &step.name,
+            &expanded,
+            workspace,
+            env,
+            step.timeout_minutes.unwrap_or(30),
+            step.id.as_deref(),
+            step_outputs,
+        )
+        .await;
+    }
+
+    // `uses:` — either @builtin/* or a composite.
+    let uses = match &step.uses {
+        Some(u) => u.clone(),
+        None => {
+            // No run and no uses — treat as a name-only marker step, success.
+            warn!(step = %step.name, "step has neither run nor uses; skipping");
+            return Ok(true);
+        }
+    };
+
+    // Expand `with:` values now so both primitives and composites see
+    // the resolved inputs from the outer scope.
+    let mut resolved_with: IndexMap<String, String> = IndexMap::new();
+    for (k, v) in &step.with {
+        resolved_with.insert(k.clone(), expand_expr(v, inputs, step_outputs));
+    }
+
+    if let Some(prim) = uses.strip_prefix("@builtin/") {
+        let prim_name = format!("@builtin/{}", prim);
+        let outcome = match dispatch(&prim_name, &resolved_with) {
+            Ok(o) => o,
+            Err(e) => {
+                // Emit a synthetic failure step so the server-side run
+                // record shows where we gave up.
+                let _ = client
+                    .report_step(ReportStepRequest {
+                        agent_id,
+                        token: cfg.token.clone(),
+                        run_id,
+                        job_name: job_name.to_string(),
+                        step_index: *step_counter,
+                        name: step.name.clone(),
+                        status: "failure".into(),
+                        exit_code: -1,
+                        log_tail: format!("{e}"),
+                    })
+                    .await;
+                *step_counter += 1;
+                return Ok(false);
+            }
+        };
+        if let Some(id) = &step.id {
+            step_outputs.insert(id.clone(), outcome.outputs.clone());
+        }
+        match outcome.command {
+            None => {
+                // Primitive was metadata-only (ue-discover). Log a trivial
+                // success step so the server's run log has a breadcrumb.
+                let log = outcome
+                    .outputs
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let _ = client
+                    .report_step(ReportStepRequest {
+                        agent_id,
+                        token: cfg.token.clone(),
+                        run_id,
+                        job_name: job_name.to_string(),
+                        step_index: *step_counter,
+                        name: step.name.clone(),
+                        status: "success".into(),
+                        exit_code: 0,
+                        log_tail: log,
+                    })
+                    .await;
+                *step_counter += 1;
+                return Ok(true);
+            }
+            Some(cmd) => {
+                return run_shell(
+                    client,
+                    cfg,
+                    agent_id,
+                    run_id,
+                    job_name,
+                    step_counter,
+                    &step.name,
+                    &cmd,
+                    workspace,
+                    env,
+                    step.timeout_minutes.unwrap_or(30),
+                    step.id.as_deref(),
+                    step_outputs,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Composite action. Split `owner/name@version` → fetch via GetAction.
+    let (name, version) = match uses.rsplit_once('@') {
+        Some((n, v)) => (n.to_string(), v.to_string()),
+        None => (uses.clone(), "v1".to_string()),
+    };
+    let fetched = client
+        .get_action(GetActionRequest {
+            agent_id,
+            token: cfg.token.clone(),
+            name: name.clone(),
+            version: version.clone(),
+        })
+        .await;
+    let yaml = match fetched {
+        Ok(r) => r.into_inner().yaml,
+        Err(e) => {
+            warn!(action = %uses, error = %e, "get_action failed");
+            let _ = client
+                .report_step(ReportStepRequest {
+                    agent_id,
+                    token: cfg.token.clone(),
+                    run_id,
+                    job_name: job_name.to_string(),
+                    step_index: *step_counter,
+                    name: step.name.clone(),
+                    status: "failure".into(),
+                    exit_code: -1,
+                    log_tail: format!("action '{}' not resolvable: {}", uses, e),
+                })
+                .await;
+            *step_counter += 1;
+            return Ok(false);
+        }
+    };
+    let action = ActionDef::parse(&yaml)?;
+    let action_inputs = action.resolve_inputs(&resolved_with)?;
+    // Composite steps execute in a scope where `inputs.*` resolves from
+    // the caller's `with:` (with defaults applied), and its own `steps.*`
+    // are isolated to the composite so they don't pollute the parent.
+    let mut composite_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for inner in &action.steps {
+        let ok = Box::pin(execute_step(
+            client,
+            cfg,
+            agent_id,
+            run_id,
+            job_name,
+            step_counter,
+            inner,
+            workspace,
+            env,
+            &action_inputs,
+            &mut composite_outputs,
+        ))
+        .await
+        .unwrap_or(false);
+        if !ok {
+            return Ok(false);
+        }
+    }
+    // Export composite's outputs under the outer step's id.
+    if let Some(id) = &step.id {
+        let mut exported: HashMap<String, String> = HashMap::new();
+        for (k, raw_expr) in &action.outputs {
+            exported.insert(k.clone(), expand_expr(raw_expr, &action_inputs, &composite_outputs));
+        }
+        step_outputs.insert(id.clone(), exported);
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_shell(
+    client: &mut AgentServiceClient<tonic::transport::Channel>,
+    cfg: &AgentConfig,
+    agent_id: i64,
+    run_id: i64,
+    job_name: &str,
+    step_counter: &mut i32,
     step_name: &str,
     cmd: &str,
     workspace: &PathBuf,
-    env: std::collections::HashMap<String, String>,
+    env: &HashMap<String, String>,
     timeout_minutes: u64,
+    step_id_key: Option<&str>,
+    step_outputs: &mut HashMap<String, HashMap<String, String>>,
 ) -> Result<bool> {
     use tokio::io::AsyncReadExt;
 
@@ -166,10 +367,9 @@ async fn run_command_step(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NEW_PROCESS_GROUP
         command.creation_flags(0x00000200);
     }
-    for (k, v) in &env {
+    for (k, v) in env {
         command.env(k, v);
     }
 
@@ -177,8 +377,6 @@ async fn run_command_step(
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut stderr = child.stderr.take().expect("stderr piped");
 
-    // Open a client-streaming log channel. We use a tokio mpsc feeding a
-    // stream so the two capture loops can both push chunks.
     let (tx, rx) = tokio::sync::mpsc::channel::<AgentLogChunk>(256);
     let log_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     let log_handle = {
@@ -190,8 +388,9 @@ async fn run_command_step(
 
     let tail: Arc<tokio::sync::Mutex<String>> =
         Arc::new(tokio::sync::Mutex::new(String::new()));
-    let tx1 = tx.clone();
+
     let token1 = cfg.token.clone();
+    let tx1 = tx.clone();
     let tail1 = Arc::clone(&tail);
     let stdout_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 64 * 1024];
@@ -215,8 +414,8 @@ async fn run_command_step(
             }
         }
     });
-    let tx2 = tx.clone();
     let token2 = cfg.token.clone();
+    let tx2 = tx.clone();
     let tail2 = Arc::clone(&tail);
     let stderr_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 64 * 1024];
@@ -240,27 +439,25 @@ async fn run_command_step(
             }
         }
     });
+
     let timeout = std::time::Duration::from_secs(timeout_minutes * 60);
-    let status: ChildStatus = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(s)) => ChildStatus::Ok(s),
-        Ok(Err(_)) => ChildStatus::Timeout,
-        Err(_) => {
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(_)) | Err(_) => {
             let _ = child.start_kill();
-            warn!(step = %step_name, "step timed out");
-            ChildStatus::Timeout
+            None
         }
     };
-
     let _ = stdout_task.await;
     let _ = stderr_task.await;
     drop(tx);
     let _ = log_handle.await;
 
     let (ok, exit_code) = match status {
-        ChildStatus::Ok(s) => (s.success(), s.code().unwrap_or(-1)),
-        ChildStatus::Timeout => (false, -1),
+        Some(s) => (s.success(), s.code().unwrap_or(-1)),
+        None => (false, -1),
     };
-    let final_status = if ok { "success" } else { "failure" };
+
     let log_tail = tail.lock().await.clone();
     let _ = client
         .report_step(ReportStepRequest {
@@ -268,21 +465,22 @@ async fn run_command_step(
             token: cfg.token.clone(),
             run_id,
             job_name: job_name.to_string(),
-            step_index,
+            step_index: *step_counter,
             name: step_name.to_string(),
-            status: final_status.to_string(),
+            status: if ok { "success".into() } else { "failure".into() },
             exit_code,
-            log_tail,
+            log_tail: log_tail.clone(),
         })
         .await;
+    *step_counter += 1;
+
+    // Expose `exit_code` + last-line `log` as step outputs so composites
+    // can inspect them via ${{ steps.id.outputs.exit_code }}.
+    if let Some(id) = step_id_key {
+        let mut out = HashMap::new();
+        out.insert("exit_code".into(), exit_code.to_string());
+        step_outputs.insert(id.to_string(), out);
+    }
 
     Ok(ok)
-}
-
-// Distinguish a completed child (with exit code) from a timeout. The
-// timeout arm reports "failure exit -1" so downstream server code can
-// tell the step didn't exit normally.
-enum ChildStatus {
-    Ok(std::process::ExitStatus),
-    Timeout,
 }

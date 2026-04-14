@@ -29,6 +29,7 @@ futures = "0.3"
 async-stream = "0.3"
 bytes = "1"
 tokio-stream = "0.1"
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

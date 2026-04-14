@@ -1,0 +1,33 @@
+# UE Build — invokes UAT BuildCookRun for a game/engine target.
+name: UE Build
+inputs:
+  project:
+    required: true
+  target:
+    default: Game
+  platform:
+    default: Win64
+  config:
+    default: Development
+  engine_version:
+    default: "5.7"
+outputs:
+  uat_exit_code: ${{ steps.uat.outputs.exit_code }}
+steps:
+  - name: Discover UE
+    id: ue
+    uses: "@builtin/ue-discover"
+    with:
+      version: "${{ inputs.engine_version }}"
+  - name: Run UAT BuildCookRun
+    id: uat
+    uses: "@builtin/run-uat"
+    with:
+      uat: "${{ steps.ue.outputs.uat_path }}"
+      args: >
+        BuildCookRun
+        -project=${{ inputs.project }}
+        -target=${{ inputs.target }}
+        -platform=${{ inputs.platform }}
+        -config=${{ inputs.config }}
+        -build -nocook -nostage
