@@ -11,3 +11,4 @@ pub mod actions;
 pub mod secrets;
 pub mod artifacts;
 pub mod logs;
+pub mod agents;

@@ -23,6 +23,7 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::{info, warn};
 
 use config::ServerConfig;
+use forge_proto::forge::agent_service_server::AgentServiceServer;
 use forge_proto::forge::auth_service_server::AuthServiceServer;
 use forge_proto::forge::forge_service_server::ForgeServiceServer;
 use services::auth_service::ForgeAuthService;
@@ -85,6 +86,11 @@ enum Commands {
     Repo {
         #[command(subcommand)]
         action: RepoAction,
+    },
+    /// Manage CI agents (add/list/remove)
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
     /// Check for updates and self-update the server
     Update {
@@ -179,6 +185,21 @@ enum RepoAction {
     Revoke { repo: String, username: String },
     /// List the users that have an explicit grant on a repo
     ListMembers { repo: String },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Provision a new agent and print its token (show once).
+    Add {
+        name: String,
+        /// Labels the agent will advertise, e.g. `--labels os:windows ue:5.7`.
+        #[arg(long, num_args = 0..)]
+        labels: Vec<String>,
+    },
+    /// List registered agents.
+    List,
+    /// Remove an agent (breaks its token immediately).
+    Remove { name: String },
 }
 
 // main is intentionally synchronous. The serve path builds its own Tokio
@@ -323,6 +344,17 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Some(Commands::Service { ref action }) => {
             handle_service_command(action)?;
+            return Ok(());
+        }
+        Some(Commands::Agent { ref action }) => {
+            let config = load_config_for_admin(&cli)?;
+            match action {
+                AgentAction::Add { name, labels } => {
+                    cli_admin::agent_add(&config, name, labels)?
+                }
+                AgentAction::List => cli_admin::agent_list(&config)?,
+                AgentAction::Remove { name } => cli_admin::agent_remove(&config, name)?,
+            }
             return Ok(());
         }
         _ => {}
@@ -471,8 +503,9 @@ pub(crate) async fn serve_inner(
 
     // Workflow engine is opt-in. See [actions] in forge-server.toml; the
     // post-audit default is OFF because steps run shell commands as the
-    // forge-server process user.
-    let workflow_engine = if config.actions.enabled {
+    // forge-server process user. When `[actions] use_agents = true`, skip
+    // the in-process runner entirely so only external agents pick up runs.
+    let workflow_engine = if config.actions.enabled && !config.actions.use_agents {
         warn!(
             "*** Actions engine ENABLED — workflow steps will execute as shell \
              commands on this host. Ensure forge-server runs under an isolated \
@@ -529,6 +562,13 @@ pub(crate) async fn serve_inner(
         bootstrap_token: bootstrap_token.clone(),
         bootstrap_token_path: bootstrap_token_path.clone(),
     });
+    let agent_svc = AgentServiceServer::new(services::agents::ForgeAgentService {
+        db: Arc::clone(&db),
+        secrets: Arc::clone(&secrets),
+        log_hub: Arc::clone(&log_hub),
+    })
+    .max_decoding_message_size(max_msg)
+    .max_encoding_message_size(max_msg);
 
     // Raise HTTP/2 flow-control windows from the 65 KB default so a single
     // stream can saturate a fast LAN link without stalling on window updates.
@@ -618,6 +658,11 @@ pub(crate) async fn serve_inner(
             auth_svc,
             interceptor,
         ))
+        // AgentService carries its own per-message (agent_id, token)
+        // credentials verified against Argon2-hashed agent tokens in DB;
+        // it deliberately bypasses the user PAT interceptor so agents
+        // don't need a user account.
+        .add_service(agent_svc)
         .serve_with_shutdown(addr, shutdown)
         .await?;
 

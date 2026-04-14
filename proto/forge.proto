@@ -10,6 +10,112 @@ package forge;
 // All authz checks live on the server side and are enforced by the gRPC
 // auth interceptor + per-handler require_* helpers in forge-server.
 
+service AgentService {
+    // Issued agent tokens authenticate the whole stream. RegisterAgent is
+    // idempotent — an agent restart re-calls it to refresh its label set
+    // and mark itself online.
+    rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    // Long-poll: server holds the call up to a configurable deadline, returning
+    // a job description when one becomes claimable for this agent's labels.
+    rpc ClaimJob(ClaimJobRequest) returns (ClaimJobResponse);
+    // Terminal report for a single step: exit code, final log. Live log
+    // chunks stream via StreamAgentLogs (client-streaming) for low-latency
+    // tailing.
+    rpc ReportStep(ReportStepRequest) returns (ReportStepResponse);
+    rpc StreamAgentLogs(stream AgentLogChunk) returns (StreamAgentLogsResponse);
+    rpc ReportRunFinished(ReportRunFinishedRequest) returns (ReportRunFinishedResponse);
+    // Fetch a secret scoped to a specific run the agent has claimed. Server
+    // validates: caller owns this run, workflow references this secret.
+    rpc GetRunSecret(GetRunSecretRequest) returns (GetRunSecretResponse);
+    // Fetch the YAML body of a composite action from the server's action
+    // registry. Cached client-side by content hash.
+    rpc GetAction(GetActionRequest) returns (GetActionResponse);
+}
+
+message RegisterAgentRequest {
+    string name = 1;
+    string token = 2;          // plaintext; server compares to stored hash
+    repeated string labels = 3;
+    string version = 4;        // forge-agent version string
+    string os = 5;             // "windows", "linux", ...
+}
+message RegisterAgentResponse {
+    int64 agent_id = 1;
+    // Server tells the agent how often to send Heartbeat and how long
+    // a ClaimJob long-poll should hold before returning empty.
+    int32 heartbeat_seconds = 2;
+    int32 claim_poll_seconds = 3;
+}
+
+message HeartbeatRequest { int64 agent_id = 1; string token = 2; }
+message HeartbeatResponse { bool ok = 1; }
+
+message ClaimJobRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    // Max seconds the server should hold this call waiting for work.
+    int32 wait_seconds = 3;
+}
+// `run_id == 0` means "no work available within the wait window".
+message ClaimJobResponse {
+    int64 run_id = 1;
+    string repo = 2;
+    string workflow_yaml = 3;
+    string commit_hash = 4;
+    string trigger_ref = 5;
+    // Resolved env after secret substitution. Plaintext values; TLS on
+    // the agent channel is how they stay confidential.
+    map<string, string> env = 6;
+}
+
+message ReportStepRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    int64 run_id = 3;
+    string job_name = 4;
+    int32 step_index = 5;
+    string name = 6;
+    string status = 7;        // "success" | "failure" | "cancelled"
+    int32 exit_code = 8;
+    string log_tail = 9;      // final tail for DB persistence
+}
+message ReportStepResponse { bool ok = 1; }
+
+message AgentLogChunk {
+    int64 agent_id = 1;
+    string token = 2;
+    int64 run_id = 3;
+    int64 step_id = 4;
+    bytes data = 5;
+    bool is_final = 6;
+}
+message StreamAgentLogsResponse { bool ok = 1; }
+
+message ReportRunFinishedRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    int64 run_id = 3;
+    string status = 4;        // "success" | "failure" | "cancelled"
+}
+message ReportRunFinishedResponse { bool ok = 1; }
+
+message GetRunSecretRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    int64 run_id = 3;
+    string key = 4;
+}
+message GetRunSecretResponse { string value = 1; }
+
+message GetActionRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    string name = 3;          // e.g. "forge/ue-build"
+    string version = 4;       // e.g. "v1"
+}
+message GetActionResponse { string yaml = 1; }
+
 service AuthService {
     // Identity
     rpc Login(LoginRequest) returns (LoginResponse);

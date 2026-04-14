@@ -166,6 +166,14 @@ pub struct ActionsSection {
     /// Execution environment: "native" (default) or "container" (stubbed).
     #[serde(default = "default_executor")]
     pub executor: String,
+
+    /// When true, runs are executed only by registered agents; the
+    /// embedded in-process runner stays idle. Flip this on once at least
+    /// one `forge-agent` is registered — otherwise queued runs will
+    /// pile up forever. Default false keeps single-host installs working
+    /// out of the box.
+    #[serde(default = "default_false")]
+    pub use_agents: bool,
 }
 
 /// Artifact storage backend + retention policy.
@@ -259,6 +267,7 @@ impl Default for ActionsSection {
             workspaces_path: default_workspaces_path(),
             max_concurrent_runs: default_max_runs(),
             executor: default_executor(),
+            use_agents: false,
         }
     }
 }

@@ -168,7 +168,188 @@ impl MetadataDb {
         };
         db.create_actions_tables()?;
         db.create_secrets_tables()?;
+        db.create_agent_tables()?;
         Ok(db)
+    }
+
+    // -- Agents (Phase 2 distributed runners) --
+
+    pub fn create_agent_tables(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS agents (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT    NOT NULL UNIQUE,
+                token_hash  TEXT    NOT NULL,
+                labels_json TEXT    NOT NULL DEFAULT '[]',
+                version     TEXT    NOT NULL DEFAULT '',
+                os          TEXT    NOT NULL DEFAULT '',
+                last_seen   INTEGER,
+                created_at  INTEGER NOT NULL
+            );
+            -- Track which agent has claimed which run. Null claimed_by =
+            -- the server's in-process engine (embedded mode).
+            CREATE TABLE IF NOT EXISTS run_claims (
+                run_id      INTEGER PRIMARY KEY,
+                agent_id    INTEGER,
+                claimed_at  INTEGER NOT NULL
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_agent(
+        &self,
+        name: &str,
+        token_hash: &str,
+        labels_json: &str,
+        version: &str,
+        os: &str,
+    ) -> Result<i64> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO agents (name, token_hash, labels_json, version, os, last_seen, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(name) DO UPDATE SET
+                labels_json = excluded.labels_json,
+                version     = excluded.version,
+                os          = excluded.os,
+                last_seen   = excluded.last_seen",
+            rusqlite::params![name, token_hash, labels_json, version, os, now],
+        )?;
+        let id: i64 = conn
+            .prepare("SELECT id FROM agents WHERE name = ?1")?
+            .query_row([name], |row| row.get(0))?;
+        Ok(id)
+    }
+
+    pub fn get_agent_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<(i64, String, String)>> {
+        let conn = self.conn()?;
+        let result = conn
+            .prepare(
+                "SELECT id, token_hash, labels_json FROM agents WHERE name = ?1",
+            )?
+            .query_row([name], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok();
+        Ok(result)
+    }
+
+    pub fn get_agent_by_id(
+        &self,
+        id: i64,
+    ) -> Result<Option<(String, String, String)>> {
+        let conn = self.conn()?;
+        let result = conn
+            .prepare(
+                "SELECT name, token_hash, labels_json FROM agents WHERE id = ?1",
+            )?
+            .query_row([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok();
+        Ok(result)
+    }
+
+    pub fn touch_agent_last_seen(&self, id: i64) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE agents SET last_seen = ?1 WHERE id = ?2",
+            rusqlite::params![chrono::Utc::now().timestamp(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_agents(
+        &self,
+    ) -> Result<Vec<(i64, String, String, i64, String, String)>> {
+        // (id, name, labels_json, last_seen, version, os)
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, labels_json, COALESCE(last_seen, 0), version, os
+             FROM agents ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn delete_agent(&self, id: i64) -> Result<bool> {
+        let conn = self.conn()?;
+        let n = conn.execute("DELETE FROM agents WHERE id = ?1", [id])?;
+        Ok(n > 0)
+    }
+
+    /// Atomically claim the oldest queued run whose workflow doesn't
+    /// require labels the agent is missing. Returns (run_id) on success
+    /// or None when no work is available.
+    pub fn claim_next_run(
+        &self,
+        agent_id: i64,
+        _agent_labels: &[String],
+    ) -> Result<Option<i64>> {
+        // v1 label routing is permissive: if the run has no claim yet and
+        // is queued, any agent can take it. Full label matching lands when
+        // runs-on is parsed out of the workflow YAML in Phase 3.
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        let tx = conn.unchecked_transaction()?;
+        let candidate: Option<i64> = tx
+            .prepare(
+                "SELECT r.id FROM workflow_runs r
+                 LEFT JOIN run_claims c ON c.run_id = r.id
+                 WHERE r.status = 'queued' AND c.run_id IS NULL
+                 ORDER BY r.created_at ASC LIMIT 1",
+            )?
+            .query_row([], |row| row.get(0))
+            .ok();
+        if let Some(run_id) = candidate {
+            tx.execute(
+                "INSERT INTO run_claims (run_id, agent_id, claimed_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![run_id, agent_id, now],
+            )?;
+            tx.execute(
+                "UPDATE workflow_runs SET status = 'running', started_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, run_id],
+            )?;
+            tx.commit()?;
+            Ok(Some(run_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_run_claim_agent(&self, run_id: i64) -> Result<Option<i64>> {
+        let conn = self.conn()?;
+        let result = conn
+            .prepare("SELECT agent_id FROM run_claims WHERE run_id = ?1")?
+            .query_row([run_id], |row: &rusqlite::Row| row.get::<_, i64>(0))
+            .ok();
+        Ok(result)
     }
 
     // -- Secrets --

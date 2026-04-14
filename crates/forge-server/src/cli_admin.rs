@@ -222,6 +222,97 @@ fn prompt_line(prompt: &str) -> Result<String> {
     Ok(buf.trim().to_string())
 }
 
+// ── Agent subcommands ────────────────────────────────────────────────────────
+
+fn open_db(config: &ServerConfig) -> Result<Arc<MetadataDb>> {
+    let db_path = config.resolved_db_path();
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let db = MetadataDb::open(&db_path)
+        .with_context(|| format!("open metadata db at {}", db_path.display()))?;
+    Ok(Arc::new(db))
+}
+
+pub fn agent_add(config: &ServerConfig, name: &str, labels: &[String]) -> Result<()> {
+    use argon2::{password_hash::{PasswordHasher, SaltString}, Argon2};
+    use rand::RngCore;
+
+    if name.is_empty() {
+        bail!("agent name is required");
+    }
+    let db = open_db(config)?;
+
+    // Random 32-byte token, hex-encoded. Stored only as Argon2 hash on the
+    // server; the plaintext is printed once and expected to land in the
+    // agent's keyring via `forge-agent register`.
+    let mut raw = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let token = hex::encode(raw);
+    let salt = SaltString::generate(&mut rand::thread_rng());
+    let hash = Argon2::default()
+        .hash_password(token.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("argon2: {e}"))?
+        .to_string();
+
+    let labels_json = serde_json::to_string(labels).unwrap_or_else(|_| "[]".into());
+    let agent_id = db.upsert_agent(name, &hash, &labels_json, "", "")?;
+
+    println!("Agent '{name}' provisioned (id {agent_id}).");
+    println!("\n*** AGENT TOKEN — COPY NOW, WILL NOT BE SHOWN AGAIN ***");
+    println!("    {token}");
+    println!("\nRegister the agent with:");
+    println!("    forge-agent register --server <URL> --name {name} --token {token}");
+    Ok(())
+}
+
+pub fn agent_list(config: &ServerConfig) -> Result<()> {
+    let db = open_db(config)?;
+    let rows = db.list_agents()?;
+    if rows.is_empty() {
+        println!("No agents registered.");
+        return Ok(());
+    }
+    println!("{:<5} {:<24} {:<8} {:<32} {}", "ID", "NAME", "OS", "LABELS", "LAST SEEN");
+    println!("{}", "-".repeat(96));
+    for (id, name, labels_json, last_seen, _version, os) in &rows {
+        let labels: Vec<String> =
+            serde_json::from_str(labels_json).unwrap_or_default();
+        let when = if *last_seen == 0 {
+            "never".to_string()
+        } else {
+            chrono::DateTime::from_timestamp(*last_seen, 0)
+                .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| "?".into())
+        };
+        println!(
+            "{:<5} {:<24} {:<8} {:<32} {}",
+            id,
+            name,
+            if os.is_empty() { "-" } else { os.as_str() },
+            labels.join(","),
+            when
+        );
+    }
+    Ok(())
+}
+
+pub fn agent_remove(config: &ServerConfig, name: &str) -> Result<()> {
+    let db = open_db(config)?;
+    let row = db.get_agent_by_name(name)?;
+    let (id, _, _) = match row {
+        Some(r) => r,
+        None => bail!("agent '{name}' not found"),
+    };
+    let removed = db.delete_agent(id)?;
+    if removed {
+        println!("Removed agent '{name}' (id {id}). Its token is no longer valid.");
+    } else {
+        println!("Nothing to remove.");
+    }
+    Ok(())
+}
+
 fn prompt_password_with_confirm() -> Result<String> {
     let p1 = rpassword::prompt_password("Password: ")?;
     if p1.is_empty() {
