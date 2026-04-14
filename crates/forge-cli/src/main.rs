@@ -448,6 +448,105 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Manage repository secrets (CI tokens, signing keys, …). Values can
+    /// be written or replaced but never read back — the server exposes
+    /// them to workflow runs only, with automatic log masking.
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
+
+    /// Manage CI workflows.
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction,
+    },
+
+    /// Inspect workflow runs.
+    Runs {
+        #[command(subcommand)]
+        action: RunsAction,
+    },
+
+    /// Manage build artifacts.
+    Artifacts {
+        #[command(subcommand)]
+        action: ArtifactsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretsAction {
+    /// Store a secret (interactive prompt if neither --value nor --file).
+    Set {
+        key: String,
+        #[arg(long)]
+        value: Option<String>,
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// Delete a secret.
+    Delete { key: String },
+    /// List secret keys (values are never returned).
+    List,
+}
+
+#[derive(Subcommand)]
+enum WorkflowAction {
+    /// List workflows configured for this repo.
+    List,
+    /// Create a new workflow from a YAML file.
+    Create { name: String, file: String },
+    /// Delete a workflow by id.
+    Delete { id: i64 },
+    /// Enable a disabled workflow.
+    Enable { id: i64 },
+    /// Disable a workflow without deleting it.
+    Disable { id: i64 },
+    /// Manually trigger a run for a workflow.
+    Trigger {
+        workflow_id: i64,
+        /// Branch / ref to record against the run. Default: empty.
+        #[arg(long, value_name = "REF")]
+        r#ref: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunsAction {
+    /// List runs in the current repo.
+    List {
+        #[arg(long)]
+        workflow: Option<i64>,
+        #[arg(long, default_value_t = 50)]
+        limit: i32,
+    },
+    /// Show run detail + steps + artifacts.
+    Show { run_id: i64 },
+    /// Tail step logs (catch-up + live follow). Pass --step to filter.
+    Logs {
+        run_id: i64,
+        #[arg(long, default_value_t = 0)]
+        step: i64,
+        /// Stop after replaying persisted log; don't follow.
+        #[arg(long)]
+        no_follow: bool,
+    },
+    /// Cancel a running or queued run.
+    Cancel { run_id: i64 },
+}
+
+#[derive(Subcommand)]
+enum ArtifactsAction {
+    /// List artifacts for a run.
+    List { run_id: i64 },
+    /// Stream an artifact to local disk.
+    Download {
+        artifact_id: i64,
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 fn main() {
@@ -509,6 +608,45 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::CatObject { object } => commands::cat_object::run(object)?,
         Commands::Version => commands::version::run(cli.json)?,
         Commands::Trust { server, yes } => commands::trust::run(server, yes)?,
+        Commands::Secrets { action } => match action {
+            SecretsAction::Set { key, value, file } => {
+                commands::secrets::set(&key, value, file, cli.json)?
+            }
+            SecretsAction::Delete { key } => commands::secrets::delete(&key, cli.json)?,
+            SecretsAction::List => commands::secrets::list(cli.json)?,
+        },
+        Commands::Workflow { action } => match action {
+            WorkflowAction::List => commands::workflow::list(cli.json)?,
+            WorkflowAction::Create { name, file } => {
+                commands::workflow::create(&name, &file, cli.json)?
+            }
+            WorkflowAction::Delete { id } => commands::workflow::delete(id, cli.json)?,
+            WorkflowAction::Enable { id } => {
+                commands::workflow::set_enabled(id, true, cli.json)?
+            }
+            WorkflowAction::Disable { id } => {
+                commands::workflow::set_enabled(id, false, cli.json)?
+            }
+            WorkflowAction::Trigger { workflow_id, r#ref } => {
+                commands::workflow::trigger(workflow_id, r#ref, cli.json)?
+            }
+        },
+        Commands::Runs { action } => match action {
+            RunsAction::List { workflow, limit } => {
+                commands::runs::list(workflow.unwrap_or(0), limit, cli.json)?
+            }
+            RunsAction::Show { run_id } => commands::runs::show(run_id, cli.json)?,
+            RunsAction::Logs { run_id, step, no_follow } => {
+                commands::runs::logs(run_id, step, !no_follow, cli.json)?
+            }
+            RunsAction::Cancel { run_id } => commands::runs::cancel(run_id, cli.json)?,
+        },
+        Commands::Artifacts { action } => match action {
+            ArtifactsAction::List { run_id } => commands::artifacts::list(run_id, cli.json)?,
+            ArtifactsAction::Download { artifact_id, out } => {
+                commands::artifacts::download(artifact_id, out)?
+            }
+        },
     }
 
     Ok(())
