@@ -9,3 +9,4 @@ pub mod locks;
 pub mod grpc;
 pub mod actions;
 pub mod secrets;
+pub mod artifacts;

@@ -222,6 +222,11 @@ service ForgeService {
     rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
     rpc ListReleases(ListReleasesRequest) returns (ListReleasesResponse);
     rpc GetRelease(GetReleaseRequest) returns (GetReleaseResponse);
+    // Streaming artifact transfer. Upload chunks include the run_id and
+    // artifact name in the first frame; subsequent frames carry data only.
+    rpc UploadArtifact(stream UploadArtifactChunk) returns (UploadArtifactResponse);
+    rpc DownloadArtifact(DownloadArtifactRequest) returns (stream ArtifactChunk);
+    rpc GetArtifactSignedUrl(GetArtifactSignedUrlRequest) returns (GetArtifactSignedUrlResponse);
 
     // Issues
     rpc ListIssues(ListIssuesRequest) returns (ListIssuesResponse);
@@ -250,6 +255,34 @@ service ForgeService {
     rpc UpdateSecret(UpdateSecretRequest) returns (UpdateSecretResponse);
     rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
     rpc ListSecretKeys(ListSecretKeysRequest) returns (ListSecretKeysResponse);
+}
+
+// Streaming artifact upload. The first chunk must carry `run_id` and
+// `name`; later chunks leave those empty and only populate `data`. The
+// server returns the final artifact id + size on completion.
+message UploadArtifactChunk {
+    int64 run_id = 1;
+    string name = 2;
+    bytes data = 3;
+}
+message UploadArtifactResponse {
+    int64 artifact_id = 1;
+    int64 size_bytes = 2;
+}
+
+message DownloadArtifactRequest { int64 artifact_id = 1; }
+message ArtifactChunk { bytes data = 1; }
+
+message GetArtifactSignedUrlRequest {
+    int64 artifact_id = 1;
+    // TTL in seconds; server clamps to [60, 3600].
+    int64 ttl_seconds = 2;
+}
+message GetArtifactSignedUrlResponse {
+    // Opaque token; plug into the web download endpoint as
+    // `/api/artifacts/<id>?token=<token>`.
+    string token = 1;
+    int64 expires_at = 2;
 }
 
 message SecretMeta {

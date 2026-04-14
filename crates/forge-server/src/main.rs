@@ -440,6 +440,31 @@ pub(crate) async fn serve_inner(
         services::secrets::sqlite::SqliteSecretBackend::new(Arc::clone(&db), &master_key),
     );
 
+    // Artifact store: FS (default) or S3 (feature-gated). Matches
+    // `[artifacts] backend = ...` in the config. Selecting `"s3"` without
+    // the `s3` cargo feature is a hard error at startup rather than a
+    // silent downgrade to FS.
+    let artifacts_root = config.resolved_artifacts_path();
+    let artifacts: Arc<dyn services::artifacts::ArtifactStore> =
+        match config.artifacts.backend.as_str() {
+            "fs" => Arc::new(services::artifacts::fs::FsArtifactStore::new(
+                artifacts_root.clone(),
+            )),
+            "s3" => {
+                anyhow::bail!(
+                    "artifact backend 's3' requested but this build was compiled without the s3 feature"
+                );
+            }
+            other => anyhow::bail!("unknown artifact backend: {}", other),
+        };
+    // Retention sweeper. No-op when the actions engine is off and no runs
+    // are ever produced, but safe to start unconditionally.
+    services::artifacts::retention::spawn(
+        Arc::clone(&db),
+        Arc::clone(&artifacts),
+        config.artifacts.retention.clone(),
+    );
+
     // Workflow engine is opt-in. See [actions] in forge-server.toml; the
     // post-audit default is OFF because steps run shell commands as the
     // forge-server process user.
@@ -468,6 +493,8 @@ pub(crate) async fn serve_inner(
         workflow_engine,
         user_store: Arc::clone(&user_store),
         secrets: Arc::clone(&secrets),
+        artifacts: Arc::clone(&artifacts),
+        artifact_signer_key: master_key,
     };
 
     let addr: std::net::SocketAddr = config.server.listen.parse()?;

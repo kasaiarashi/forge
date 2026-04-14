@@ -436,6 +436,85 @@ impl MetadataDb {
         Ok(result)
     }
 
+    /// Look up the storage path for an artifact. Retained in the
+    /// artifacts table so the ArtifactStore can re-open it without
+    /// reconstructing the filename rules on the fly.
+    pub fn get_artifact_path(&self, artifact_id: i64) -> Result<Option<(i64, String, String)>> {
+        let conn = self.conn()?;
+        let result = conn
+            .prepare(
+                "SELECT a.run_id, a.name, a.path FROM artifacts a WHERE a.id = ?1",
+            )?
+            .query_row([artifact_id], |row: &rusqlite::Row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok();
+        Ok(result)
+    }
+
+    /// Runs whose artifacts are eligible for pruning.
+    ///
+    /// Rules:
+    ///   * run finished before `cutoff_ts`, OR
+    ///   * run is outside the most-recent `keep_per_workflow` for its
+    ///     workflow.
+    /// Release-pinned artifacts are skipped at the caller-level
+    /// (delete_run_artifacts refuses to drop pinned rows), so it's safe to
+    /// over-report candidates here.
+    pub fn retention_candidates(
+        &self,
+        cutoff_ts: i64,
+        keep_per_workflow: i64,
+    ) -> Result<Vec<i64>> {
+        let conn = self.conn()?;
+
+        let mut out = std::collections::BTreeSet::new();
+
+        // Age-based candidates.
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT r.id FROM workflow_runs r
+             JOIN artifacts a ON a.run_id = r.id
+             WHERE COALESCE(r.finished_at, r.created_at) < ?1",
+        )?;
+        let rows = stmt.query_map([cutoff_ts], |row: &rusqlite::Row| row.get::<_, i64>(0))?;
+        for id in rows {
+            out.insert(id?);
+        }
+
+        // Per-workflow rolling window.
+        let mut stmt = conn.prepare(
+            "SELECT r.id FROM (
+                SELECT id, workflow_id,
+                       ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY created_at DESC) AS rn
+                FROM workflow_runs
+             ) r
+             JOIN artifacts a ON a.run_id = r.id
+             WHERE r.rn > ?1",
+        )?;
+        let rows = stmt.query_map([keep_per_workflow], |row: &rusqlite::Row| row.get::<_, i64>(0))?;
+        for id in rows {
+            out.insert(id?);
+        }
+
+        Ok(out.into_iter().collect())
+    }
+
+    /// Remove every artifact row for `run_id` except those pinned to a
+    /// release. Caller is expected to delete the backend blobs first.
+    pub fn delete_run_artifacts(&self, run_id: i64) -> Result<usize> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "DELETE FROM artifacts WHERE run_id = ?1
+             AND id NOT IN (SELECT artifact_id FROM release_artifacts)",
+            [run_id],
+        )?;
+        Ok(n)
+    }
+
     // ── Releases ──
 
     pub fn create_release(&self, repo: &str, run_id: Option<i64>, tag: &str, name: &str, artifact_ids: &[i64]) -> Result<i64> {

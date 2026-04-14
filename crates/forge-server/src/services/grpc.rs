@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
 // Licensed under the MIT License.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
@@ -40,6 +41,12 @@ pub struct ForgeGrpcService {
     /// Secret backend. Write-only through RPCs — values flow outward only
     /// to the run executor, never back to clients (no Read RPC exists).
     pub secrets: Arc<dyn crate::services::secrets::SecretBackend>,
+    /// Artifact backend. Streams binary content without materialising whole
+    /// blobs in memory.
+    pub artifacts: Arc<dyn crate::services::artifacts::ArtifactStore>,
+    /// Master key, used to sign short-lived artifact download URLs for the
+    /// web UI. Held as raw bytes so the signer module stays dep-free.
+    pub artifact_signer_key: [u8; 32],
 }
 
 /// Normalize a repo identifier into the canonical `<owner>/<name>` form
@@ -121,6 +128,7 @@ fn is_ancestor_or_equal(os: &ObjectStore, ancestor: &ForgeHash, descendant: &For
 #[tonic::async_trait]
 impl ForgeService for ForgeGrpcService {
     type PullObjectsStream = ReceiverStream<Result<ObjectChunk, Status>>;
+    type DownloadArtifactStream = Pin<Box<dyn futures::Stream<Item = Result<ArtifactChunk, Status>> + Send>>;
 
     async fn push_objects(
         &self,
@@ -1805,6 +1813,150 @@ impl ForgeService for ForgeGrpcService {
         Ok(Response::new(DeleteCommentResponse {
             success: ok, error: String::new(),
         }))
+    }
+
+    // ── Artifacts (streaming transfer + signed URLs) ──
+    //
+    // Upload: client-streaming; first chunk carries (run_id, name), rest is
+    // data. Gated on repo:write via the run → repo lookup. Download: server-
+    // streaming; gated on repo:read. Signed URLs are issued for web-UI
+    // downloads so a browser can fetch without re-proving gRPC auth.
+
+    async fn upload_artifact(
+        &self,
+        request: Request<Streaming<UploadArtifactChunk>>,
+    ) -> Result<Response<UploadArtifactResponse>, Status> {
+        let caller = caller_of(&request);
+        let mut inbound = request.into_inner();
+
+        // Peel the first chunk for metadata.
+        let first = inbound
+            .message()
+            .await
+            .map_err(|e| internal_err("upload_artifact_first", e))?
+            .ok_or_else(|| Status::invalid_argument("empty upload stream"))?;
+        if first.run_id == 0 || first.name.is_empty() {
+            return Err(Status::invalid_argument(
+                "first upload chunk must set run_id and name",
+            ));
+        }
+
+        // Auth: look up the run's repo, gate on write.
+        let run = self
+            .db
+            .get_run(first.run_id)
+            .map_err(|e| internal_err("upload_artifact_lookup", e))?
+            .ok_or_else(|| Status::not_found("run not found"))?;
+        require_repo_write(&caller, &self.user_store, &run.repo)?;
+
+        let run_id = first.run_id;
+        let name = first.name.clone();
+
+        // Build an AsyncReader that drains the remaining stream. The first
+        // chunk's `data` may be non-empty when the whole artifact fits in
+        // one frame, so we prepend it.
+        use futures::StreamExt;
+        let prefix_bytes = first.data;
+        let rest = async_stream::stream! {
+            if !prefix_bytes.is_empty() {
+                yield Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(prefix_bytes));
+            }
+            while let Some(chunk) = inbound.next().await {
+                match chunk {
+                    Ok(c) => {
+                        if !c.data.is_empty() {
+                            yield Ok(bytes::Bytes::from(c.data));
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.message().to_string()));
+                    }
+                }
+            }
+        };
+        let reader = tokio_util::io::StreamReader::new(Box::pin(rest));
+        let reader: crate::services::artifacts::AsyncReader = Box::pin(reader);
+
+        let handle = self
+            .artifacts
+            .put(run_id, &name, reader)
+            .await
+            .map_err(|e| internal_err("upload_artifact_put", e))?;
+
+        let id = self
+            .db
+            .create_artifact(run_id, &name, &handle.path, handle.size_bytes)
+            .map_err(|e| internal_err("upload_artifact_db", e))?;
+
+        Ok(Response::new(UploadArtifactResponse {
+            artifact_id: id,
+            size_bytes: handle.size_bytes,
+        }))
+    }
+
+    async fn download_artifact(
+        &self,
+        request: Request<DownloadArtifactRequest>,
+    ) -> Result<Response<Self::DownloadArtifactStream>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+
+        let (run_id, _name, path) = self
+            .db
+            .get_artifact_path(req.artifact_id)
+            .map_err(|e| internal_err("download_artifact_lookup", e))?
+            .ok_or_else(|| Status::not_found("artifact not found"))?;
+        let run = self
+            .db
+            .get_run(run_id)
+            .map_err(|e| internal_err("download_artifact_run", e))?
+            .ok_or_else(|| Status::not_found("run not found"))?;
+        require_repo_read(&caller, &self.user_store, &run.repo, false)?;
+
+        let mut reader = self
+            .artifacts
+            .get(&path)
+            .await
+            .map_err(|e| internal_err("download_artifact_open", e))?;
+
+        let out = async_stream::try_stream! {
+            let mut buf = vec![0u8; 4 * 1024 * 1024];
+            loop {
+                let n = tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await
+                    .map_err(|e| Status::internal(format!("read: {e}")))?;
+                if n == 0 { break; }
+                yield ArtifactChunk { data: buf[..n].to_vec() };
+            }
+        };
+        Ok(Response::new(Box::pin(out)))
+    }
+
+    async fn get_artifact_signed_url(
+        &self,
+        request: Request<GetArtifactSignedUrlRequest>,
+    ) -> Result<Response<GetArtifactSignedUrlResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let (run_id, _name, _path) = self
+            .db
+            .get_artifact_path(req.artifact_id)
+            .map_err(|e| internal_err("signed_url_lookup", e))?
+            .ok_or_else(|| Status::not_found("artifact not found"))?;
+        let run = self
+            .db
+            .get_run(run_id)
+            .map_err(|e| internal_err("signed_url_run", e))?
+            .ok_or_else(|| Status::not_found("run not found"))?;
+        require_repo_read(&caller, &self.user_store, &run.repo, false)?;
+
+        let ttl = req.ttl_seconds.clamp(60, 3600);
+        let token = crate::services::artifacts::signed_url::sign(
+            &self.artifact_signer_key,
+            req.artifact_id,
+            ttl,
+        );
+        let expires_at = chrono::Utc::now().timestamp() + ttl;
+        Ok(Response::new(GetArtifactSignedUrlResponse { token, expires_at }))
     }
 
     // ── Secrets ──

@@ -23,6 +23,10 @@ pub struct ServerConfig {
     /// Actions/workflow engine settings.
     #[serde(default)]
     pub actions: ActionsSection,
+
+    /// Artifact storage settings (run outputs, release assets).
+    #[serde(default)]
+    pub artifacts: ArtifactsSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +168,83 @@ pub struct ActionsSection {
     pub executor: String,
 }
 
+/// Artifact storage backend + retention policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactsSection {
+    /// Storage backend. "fs" = local filesystem (default). "s3" = any
+    /// S3-compatible endpoint (MinIO/R2/AWS). The s3 backend is compiled
+    /// in behind the `s3` cargo feature; leaving it selected without the
+    /// feature enabled is a startup error.
+    #[serde(default = "default_artifacts_backend")]
+    pub backend: String,
+
+    /// Retention policy. Runs older than `max_days`, or runs outside the
+    /// newest `max_runs_per_workflow` per workflow, are eligible for
+    /// pruning. Release-pinned artifacts are always skipped.
+    #[serde(default)]
+    pub retention: ArtifactsRetention,
+
+    /// S3 backend options (used only when `backend = "s3"`).
+    #[serde(default)]
+    pub s3: ArtifactsS3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactsRetention {
+    #[serde(default = "default_retention_days")]
+    pub max_days: u32,
+    #[serde(default = "default_retention_runs")]
+    pub max_runs_per_workflow: u32,
+    /// Soft cap on total artifact bytes per repo. The prune job sorts
+    /// eligible runs oldest-first and deletes until the repo is under the
+    /// cap. 0 = unlimited.
+    #[serde(default)]
+    pub max_repo_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArtifactsS3 {
+    /// Endpoint URL (e.g. `https://minio.example.com:9000` or
+    /// `https://s3.amazonaws.com`). Leave empty for AWS-default.
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub bucket: String,
+    /// When true, use path-style addressing (required for MinIO/R2/old
+    /// S3-compatible endpoints). Default false = virtual-hosted style.
+    #[serde(default)]
+    pub path_style: bool,
+    /// Optional key prefix under which all artifacts land, e.g. `"prod/"`.
+    #[serde(default)]
+    pub prefix: String,
+}
+
+fn default_artifacts_backend() -> String { "fs".into() }
+fn default_retention_days() -> u32 { 30 }
+fn default_retention_runs() -> u32 { 100 }
+
+impl Default for ArtifactsRetention {
+    fn default() -> Self {
+        Self {
+            max_days: default_retention_days(),
+            max_runs_per_workflow: default_retention_runs(),
+            max_repo_bytes: 0,
+        }
+    }
+}
+
+impl Default for ArtifactsSection {
+    fn default() -> Self {
+        Self {
+            backend: default_artifacts_backend(),
+            retention: ArtifactsRetention::default(),
+            s3: ArtifactsS3::default(),
+        }
+    }
+}
+
 fn default_false() -> bool { false }
 fn default_artifacts_path() -> PathBuf { PathBuf::from("artifacts") }
 fn default_workspaces_path() -> PathBuf { PathBuf::from("workspaces") }
@@ -225,6 +306,7 @@ impl Default for ServerConfig {
             storage: StorageSection::default(),
             repos: std::collections::HashMap::new(),
             actions: ActionsSection::default(),
+            artifacts: ArtifactsSection::default(),
         }
     }
 }
