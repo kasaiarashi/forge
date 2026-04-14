@@ -134,6 +134,10 @@ enum Commands {
         /// Force push (overwrite remote ref even if diverged)
         #[arg(short, long)]
         force: bool,
+        /// Optional remote name (git-compat; must match the configured remote when set)
+        remote: Option<String>,
+        /// Optional branch ref (git-compat; must match the current branch when set)
+        branch: Option<String>,
     },
 
     /// Pull commits from the server
@@ -469,7 +473,9 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Status => commands::status::run(cli.json)?,
         Commands::Diff { commit, staged, stat, extract, no_pager, class_stats, paths } => commands::diff::run(commit, staged, stat, extract, paths, no_pager, cli.json, class_stats)?,
         Commands::Log { count, file, oneline, all, no_pager } => commands::log::run(count, file, oneline, all, no_pager, cli.json)?,
-        Commands::Push { force } => commands::push::run(force)?,
+        Commands::Push { force, remote, branch } => {
+            commands::push::run(force, remote.as_deref(), branch.as_deref())?
+        }
         Commands::Pull => commands::pull::run()?,
         Commands::Fetch { branch } => commands::fetch::run(branch)?,
         Commands::Clone { url, repo, path } => commands::clone::run(url, path, repo)?,

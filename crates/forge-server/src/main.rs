@@ -222,6 +222,24 @@ fn main() -> Result<()> {
         }
     }
 
+    // Resolve `--config` to an absolute path *before* we change the cwd.
+    // The chdir-to-binary-dir below would otherwise reinterpret a relative
+    // `--config forge-server.toml` as living next to the binary, silently
+    // ignoring the file the user pointed at. Canonicalize when the file
+    // exists; fall back to plain cwd-join when it doesn't (so `init` still
+    // creates the file at the path the user typed).
+    {
+        let p = std::path::Path::new(&cli.config);
+        if !p.is_absolute() {
+            let abs = std::fs::canonicalize(p)
+                .ok()
+                .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(p)));
+            if let Some(abs) = abs {
+                cli.config = abs.to_string_lossy().into_owned();
+            }
+        }
+    }
+
     // Always run from the binary's directory so config, data paths, and
     // certs resolve relative to where the binary lives — not wherever
     // the user happened to launch it from.

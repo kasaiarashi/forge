@@ -8,7 +8,7 @@ use forge_proto::forge::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 
-pub fn run(force: bool) -> Result<()> {
+pub fn run(force: bool, remote_arg: Option<&str>, branch_arg: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
     let config = ws.config()?;
@@ -28,6 +28,32 @@ pub fn run(force: bool) -> Result<()> {
         .default_remote()
         .map(|r| r.name.clone())
         .unwrap_or_else(|| "origin".to_string());
+
+    // Git-compat positional args. Forge only supports a single configured
+    // remote and always pushes the current branch, so we accept `forge push
+    // origin main` but reject any value that doesn't match — silently
+    // ignoring a mismatch would push to a different target than the user
+    // asked for.
+    if let Some(r) = remote_arg {
+        if r != remote_name {
+            bail!(
+                "remote '{}' is not configured (current: '{}'). Use `forge remote` to inspect.",
+                r,
+                remote_name
+            );
+        }
+    }
+    if let Some(b) = branch_arg {
+        if let Some(current) = ws.current_branch()? {
+            if b != current {
+                bail!(
+                    "forge push always targets the current branch ('{}'). Switch first: forge switch {}",
+                    current,
+                    b
+                );
+            }
+        }
+    }
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async { push_async(&ws, &server_url, &repo_name, &remote_name, force).await })

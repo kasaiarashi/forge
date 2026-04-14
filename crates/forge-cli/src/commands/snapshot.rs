@@ -17,6 +17,11 @@ pub fn run(message: Option<String>, all: bool, amend: bool, json: bool) -> Resul
     // If --all, auto-stage all modified/deleted files.
     if all {
         auto_stage(&ws, &mut index)?;
+        // auto_stage shells out to `add::run` for modified/untracked files,
+        // which rewrites the index on disk. Reload so the in-memory copy
+        // reflects those staged entries — otherwise the staged-filter below
+        // sees the pre-stage snapshot and bails with "Nothing staged".
+        index = Index::load(&ws.forge_dir().join("index"))?;
     }
 
     let staged: Vec<(String, forge_core::index::IndexEntry)> = index
