@@ -153,6 +153,9 @@ async fn execute_run(
                 // `curl -u user:$TOKEN`). The mask covers the log side so we
                 // don't leak the plaintext back into DB rows.
                 let expanded_cmd = expand_secret_refs(cmd, &resolved_env);
+                let step_timeout = std::time::Duration::from_secs(
+                    step_def.timeout_minutes.unwrap_or(30) * 60,
+                );
                 let result = execute_command_streaming(
                     &expanded_cmd,
                     &workspace_dir,
@@ -162,6 +165,7 @@ async fn execute_run(
                     step_id,
                     log_hub,
                     &mask,
+                    step_timeout,
                 )
                 .await;
                 match result {
@@ -226,6 +230,7 @@ async fn execute_command_streaming(
     step_id: i64,
     log_hub: &LogHub,
     mask: &Mask,
+    timeout: std::time::Duration,
 ) -> Result<(i32, String)> {
     let (shell, flag) = if cfg!(target_os = "windows") {
         ("cmd", "/C")
@@ -249,11 +254,34 @@ async fn execute_command_streaming(
         // even after forge-server exits.
         .kill_on_drop(true);
 
+    // Isolate in a new process group so `kill_group` later tears down any
+    // descendants the shell spawned. Without this, `kill` on the shell
+    // leaves grandchildren (ninja, cargo, UAT, …) orphaned.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Safety: this closure runs in the child between fork and exec;
+        // setsid() is async-signal-safe.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP = 0x00000200
+        command.creation_flags(0x00000200);
+    }
+
     for (k, v) in env_vars {
         command.env(k, v);
     }
 
     let mut child = command.spawn()?;
+    let child_pid = child.id();
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
@@ -263,12 +291,11 @@ async fn execute_command_streaming(
     let stdout_task = tokio::spawn(forward_stream(stdout, sender.clone(), step_id, run_id, mask.clone_values(), Arc::clone(&acc)));
     let stderr_task = tokio::spawn(forward_stream(stderr, sender.clone(), step_id, run_id, mask.clone_values(), Arc::clone(&acc)));
 
-    let timeout = std::time::Duration::from_secs(30 * 60);
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(r) => r?,
         Err(_) => {
-            let _ = child.start_kill();
-            anyhow::bail!("step timed out after 30 minutes");
+            kill_process_tree(&mut child, child_pid);
+            anyhow::bail!("step timed out after {}m", timeout.as_secs() / 60);
         }
     };
 
@@ -288,6 +315,25 @@ async fn execute_command_streaming(
     });
 
     Ok((exit_code, log_str))
+}
+
+/// Kill the step's whole process tree. On Unix we signal the negative pid
+/// (process-group), which setsid() in pre_exec made distinct from the
+/// server's. On Windows `child.start_kill()` already terminates the
+/// process; the CREATE_NEW_PROCESS_GROUP flag doesn't cascade to
+/// descendants, but tokio's kill_on_drop guarantees at least the root dies,
+/// and Job Objects are a Phase-2 runner concern.
+fn kill_process_tree(child: &mut tokio::process::Child, _pid: Option<u32>) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = _pid {
+            // SIGKILL to the whole group.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.start_kill();
 }
 
 async fn forward_stream<R>(

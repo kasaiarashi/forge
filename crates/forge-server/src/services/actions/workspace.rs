@@ -18,6 +18,17 @@ pub fn checkout(
     workspace_dir: &Path,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(workspace_dir)?;
+    // On Unix, lock the workspace dir to the server user. This is the
+    // short-term hardening for the in-process runner — once Phase 2 lands
+    // an external agent with a dedicated OS user, that becomes the real
+    // isolation boundary. Windows leaves ACLs to installer inheritance.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(workspace_dir)?.permissions();
+        perms.set_mode(0o700);
+        let _ = std::fs::set_permissions(workspace_dir, perms);
+    }
 
     let snapshot = object_store
         .get_snapshot(commit_hash)

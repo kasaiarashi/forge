@@ -48,6 +48,11 @@ pub struct StepDef {
     pub artifact: Option<ArtifactDef>,
     /// Create a release.
     pub release: Option<ReleaseDef>,
+    /// Per-step wall-clock cap. Unset → engine default (30m). Applied to
+    /// `run:` steps; artifact/release bookkeeping steps are cheap and
+    /// exempt.
+    #[serde(rename = "timeout-minutes", default)]
+    pub timeout_minutes: Option<u64>,
 }
 
 /// Artifact upload definition.
