@@ -12,6 +12,7 @@ use forge_core::store::object_store::ObjectStore;
 use forge_proto::forge::forge_service_server::ForgeService;
 use forge_proto::forge::*;
 
+use crate::audit;
 use crate::auth::authorize::{
     require_authenticated, require_repo_admin, require_repo_read, require_repo_write,
 };
@@ -455,6 +456,16 @@ impl ForgeService for ForgeGrpcService {
 
         // Check push triggers on successful ref update.
         if success {
+            audit!(
+                action = "ref.update",
+                outcome = "success",
+                actor_id = caller.user_id(),
+                repo = repo,
+                ref_name = %req.ref_name,
+                old_hash = %hex::encode(&req.old_hash),
+                new_hash = %hex::encode(&req.new_hash),
+                force = req.force
+            );
             if let Some(engine_tx) = &self.workflow_engine {
                 crate::services::actions::trigger::check_push_triggers(
                     &self.db, engine_tx, repo, &req.ref_name, &req.new_hash,
@@ -489,20 +500,42 @@ impl ForgeService for ForgeGrpcService {
             .map_err(|e| internal_err("grpc", e))?;
 
         match result {
-            Ok(()) => Ok(Response::new(LockResponse {
-                granted: true,
-                existing_lock: None,
-            })),
-            Err(lock) => Ok(Response::new(LockResponse {
-                granted: false,
-                existing_lock: Some(LockInfo {
-                    path: lock.path,
-                    owner: lock.owner,
-                    workspace_id: lock.workspace_id,
-                    created_at: lock.created_at,
-                    reason: lock.reason,
-                }),
-            })),
+            Ok(()) => {
+                audit!(
+                    action = "lock.acquire",
+                    outcome = "granted",
+                    actor_id = caller.user_id(),
+                    repo = repo,
+                    path = %req.path,
+                    owner = %req.owner
+                );
+                Ok(Response::new(LockResponse {
+                    granted: true,
+                    existing_lock: None,
+                }))
+            }
+            Err(lock) => {
+                audit!(
+                    action = "lock.acquire",
+                    outcome = "denied",
+                    actor_id = caller.user_id(),
+                    repo = repo,
+                    path = %req.path,
+                    owner = %req.owner,
+                    reason = "already held",
+                    held_by = %lock.owner
+                );
+                Ok(Response::new(LockResponse {
+                    granted: false,
+                    existing_lock: Some(LockInfo {
+                        path: lock.path,
+                        owner: lock.owner,
+                        workspace_id: lock.workspace_id,
+                        created_at: lock.created_at,
+                        reason: lock.reason,
+                    }),
+                }))
+            }
         }
     }
 
@@ -517,21 +550,19 @@ impl ForgeService for ForgeGrpcService {
         super::validate::path(&req.path)?;
         require_repo_write(&caller, &self.user_store, repo)?;
 
-        // When force-unlocking, verify the caller provided an owner identity.
-        // Force-unlock is an admin action; log it for audit trail.
-        if req.force && !req.owner.is_empty() {
-            tracing::warn!(
-                repo = repo,
-                path = req.path,
-                owner = req.owner,
-                "Force-unlock requested"
-            );
-        }
-
         let success = self
             .db
             .release_lock(repo, &req.path, &req.owner, req.force)
             .map_err(|e| internal_err("grpc", e))?;
+
+        audit!(
+            action = if req.force { "lock.force_release" } else { "lock.release" },
+            outcome = if success { "success" } else { "noop" },
+            actor_id = caller.user_id(),
+            repo = repo,
+            path = %req.path,
+            owner = %req.owner
+        );
 
         Ok(Response::new(UnlockResponse {
             success,
@@ -739,6 +770,13 @@ impl ForgeService for ForgeGrpcService {
         // Ensure the repo's objects directory exists.
         let _store = self.fs.repo_store(&repo);
 
+        audit!(
+            action = "repo.create",
+            outcome = "success",
+            actor_id = caller.user_id(),
+            repo = %repo
+        );
+
         Ok(Response::new(CreateRepoResponse {
             success: true,
             error: String::new(),
@@ -835,6 +873,16 @@ impl ForgeService for ForgeGrpcService {
             }
         }
 
+        audit!(
+            action = "repo.update",
+            outcome = "success",
+            actor_id = caller.user_id(),
+            repo = %repo,
+            new_name = %new_name,
+            visibility = %req.visibility,
+            default_branch = %req.default_branch
+        );
+
         Ok(Response::new(UpdateRepoResponse {
             success: true,
             error: String::new(),
@@ -885,6 +933,13 @@ impl ForgeService for ForgeGrpcService {
                 error: "internal error during delete".into(),
             }));
         }
+
+        audit!(
+            action = "repo.delete",
+            outcome = "success",
+            actor_id = caller.user_id(),
+            repo = %repo
+        );
 
         Ok(Response::new(DeleteRepoResponse {
             success: true,
@@ -1342,6 +1397,17 @@ impl ForgeService for ForgeGrpcService {
             let _ = engine.send(run_id);
         }
 
+        audit!(
+            action = "workflow.trigger",
+            outcome = "success",
+            actor_id = caller.user_id(),
+            repo = %workflow.repo,
+            workflow_id = workflow.id,
+            workflow_name = %workflow.name,
+            run_id = run_id,
+            ref_name = %ref_name
+        );
+
         Ok(Response::new(TriggerWorkflowResponse { success: true, error: String::new(), run_id }))
     }
 
@@ -1423,6 +1489,13 @@ impl ForgeService for ForgeGrpcService {
         }
         self.db.update_run_status(req.run_id, "cancelled")
             .map_err(|e| internal_err("grpc", e))?;
+        audit!(
+            action = "workflow.run.cancel",
+            outcome = "success",
+            actor_id = caller.user_id(),
+            repo = %run.repo,
+            run_id = req.run_id
+        );
         Ok(Response::new(CancelWorkflowRunResponse { success: true, error: String::new() }))
     }
 
@@ -2057,6 +2130,13 @@ impl ForgeService for ForgeGrpcService {
             .put(&repo, &req.key, &req.value)
             .await
             .map_err(|e| internal_err("create_secret", e))?;
+        audit!(
+            action = "secret.create",
+            outcome = "success",
+            actor_id = caller.user_id(),
+            repo = %repo,
+            key = %req.key
+        );
         Ok(Response::new(CreateSecretResponse {
             success: true,
             error: String::new(),
@@ -2078,6 +2158,13 @@ impl ForgeService for ForgeGrpcService {
             .put(&repo, &req.key, &req.value)
             .await
             .map_err(|e| internal_err("update_secret", e))?;
+        audit!(
+            action = "secret.update",
+            outcome = "success",
+            actor_id = caller.user_id(),
+            repo = %repo,
+            key = %req.key
+        );
         Ok(Response::new(UpdateSecretResponse {
             success: true,
             error: String::new(),
@@ -2097,6 +2184,13 @@ impl ForgeService for ForgeGrpcService {
             .delete(&repo, &req.key)
             .await
             .map_err(|e| internal_err("delete_secret", e))?;
+        audit!(
+            action = "secret.delete",
+            outcome = if removed { "success" } else { "noop" },
+            actor_id = caller.user_id(),
+            repo = %repo,
+            key = %req.key
+        );
         Ok(Response::new(DeleteSecretResponse {
             success: removed,
             error: if removed {

@@ -6,6 +6,7 @@ mod auth;
 mod cert_install;
 mod cli_admin;
 mod config;
+mod observability;
 #[cfg(windows)]
 mod service;
 mod services;
@@ -207,7 +208,11 @@ enum AgentAction {
 // runtime inside `service::run_under_scm`. Nesting `#[tokio::main]` would
 // prevent the SCM dispatch from spinning up its own runtime cleanly.
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // tracing is initialised lazily: admin subcommands don't use it and
+    // the `serve` path calls [`observability::init`] after the config is
+    // in hand so file/audit sinks can be wired up correctly. A bare early
+    // `fmt::init` here would grab the global subscriber slot and prevent
+    // the richer init from running.
 
     // Select a rustls crypto provider up-front. Both aws-lc-rs (via tonic's
     // tls feature) and ring (via axum-server's tls-rustls feature, if it
@@ -443,6 +448,15 @@ pub(crate) async fn serve_inner(
     // sections of `config` into the gRPC service.
     let base = config.storage.base_path.clone();
     std::fs::create_dir_all(base.join("repos"))?;
+
+    // Wire up logging + audit sinks now that we have a config and a base
+    // path to resolve the log dir against. Guards are held until the end
+    // of `serve_inner`; dropping them at the wrong moment loses the
+    // final flush from the non-blocking appender.
+    let _log_guards = observability::init(
+        &config.logging,
+        config.resolved_log_dir().as_deref(),
+    );
 
     let db_path = config.resolved_db_path();
     let db = Arc::new(MetadataDb::open(&db_path)?);

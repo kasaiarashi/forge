@@ -27,6 +27,61 @@ pub struct ServerConfig {
     /// Artifact storage settings (run outputs, release assets).
     #[serde(default)]
     pub artifacts: ArtifactsSection,
+
+    /// Logging + audit output.
+    #[serde(default)]
+    pub logging: LoggingSection,
+}
+
+/// Logging configuration. All fields optional; safe defaults apply.
+///
+/// File sinks use daily rotation under `dir`. The audit sink emits only
+/// events whose tracing target is `audit` (see `observability::audit`);
+/// the application sink captures everything else at `level`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingSection {
+    /// Minimum level for the application log sink. Accepts any
+    /// `tracing_subscriber::EnvFilter` directive (e.g. `"info"`,
+    /// `"forge_server=debug,tonic=warn"`). Overridden by the `RUST_LOG`
+    /// environment variable when set.
+    #[serde(default = "default_log_level")]
+    pub level: String,
+
+    /// Output format. `"text"` = human-readable (default); `"json"` =
+    /// one JSON object per line, suitable for log shippers.
+    #[serde(default = "default_log_format")]
+    pub format: String,
+
+    /// Directory for rotating log files. Relative paths resolve against
+    /// `storage.base_path`. When empty, file logging is disabled — logs
+    /// go to stdout only, preserving the pre-audit behaviour.
+    #[serde(default)]
+    pub dir: PathBuf,
+
+    /// Also mirror the application log to stdout. Off by default when a
+    /// `dir` is configured — operators tailing a file don't also want the
+    /// console cluttered. Always on when `dir` is empty, regardless of
+    /// this flag.
+    #[serde(default)]
+    pub stdout: bool,
+}
+
+fn default_log_level() -> String {
+    "info".into()
+}
+fn default_log_format() -> String {
+    "text".into()
+}
+
+impl Default for LoggingSection {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            format: default_log_format(),
+            dir: PathBuf::new(),
+            stdout: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +371,7 @@ impl Default for ServerConfig {
             repos: std::collections::HashMap::new(),
             actions: ActionsSection::default(),
             artifacts: ArtifactsSection::default(),
+            logging: LoggingSection::default(),
         }
     }
 }
@@ -425,6 +481,20 @@ enabled = false
             self.actions.workspaces_path.clone()
         } else {
             self.storage.base_path.join(&self.actions.workspaces_path)
+        }
+    }
+
+    /// Resolve the log directory. Returns `None` when file logging is
+    /// disabled (empty `logging.dir`). Relative paths resolve against
+    /// `storage.base_path` so an operator can set `dir = "logs"` and not
+    /// have to think about absolute layout.
+    pub fn resolved_log_dir(&self) -> Option<PathBuf> {
+        if self.logging.dir.as_os_str().is_empty() {
+            None
+        } else if self.logging.dir.is_absolute() {
+            Some(self.logging.dir.clone())
+        } else {
+            Some(self.storage.base_path.join(&self.logging.dir))
         }
     }
 }
