@@ -1,0 +1,23 @@
+# Forge ignore patterns
+
+# Unreal Engine
+**/Binaries/**
+**/Intermediate/**
+**/Saved/**
+**/DerivedDataCache/**
+**/Build/**
+**/.vs/**
+**/.idea/**
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.temp
+*.dmp
+.forge/**

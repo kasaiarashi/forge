@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Hand-crafted dark-mode counterpart of forge-logo-simple.svg.
+     Same paths and geometry as the BW source, but every fill / stroke
+     is white so the glyph reads on a dark background without needing
+     a CSS `filter: invert(1)` hack. -->
+<svg width="100%" height="100%" viewBox="0 0 2000 2000" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:1.5;">
+  <g>
+    <path d="M93.076,1126.362l101.09,0l0,-84.685l113.947,0l0,-62.073l-113.947,0l0,-35.027l173.803,0l0,-70.94l-274.893,0l0,252.724Z" style="fill:#fff;fill-rule:nonzero;"/>
+    <path d="M1044.559,1126.362l110.844,0l-62.959,-83.798c30.593,-6.651 51.432,-30.371 51.432,-61.629l0,-43.894c0,-36.8 -29.041,-63.403 -68.945,-63.403l-228.117,0l0,252.724l101.09,0l0,-82.024l42.121,0l54.535,82.024Zm-96.656,-184.001l78.034,0c12.858,0 20.174,5.764 20.174,15.962l0,5.764c0,10.198 -7.316,15.962 -20.174,15.962l-78.034,0l0,-37.687Z" style="fill:#fff;fill-rule:nonzero;"/>
+    <path d="M1283.76,1126.362l186.218,0c32.366,0 55.644,-19.952 55.644,-47.441l0,-83.798l-137.446,0l-15.518,28.376l54.092,0l0,14.188c0,10.863 -8.868,18.622 -21.06,18.622l-57.639,0c-11.971,0 -20.617,-7.759 -20.617,-18.622l0,-74.93c0,-11.084 8.646,-19.065 20.617,-19.065l58.082,0c11.971,0 20.617,7.759 20.617,18.622l98.873,-34.583l0,-6.207c0,-27.711 -23.277,-47.885 -55.644,-47.885l-186.218,0c-31.923,0 -55.2,20.174 -55.2,47.885l0,157.398c0,27.489 23.277,47.441 55.2,47.441Z" style="fill:#fff;fill-rule:nonzero;"/>
+    <path d="M1627.598,1126.362l279.327,0l0,-65.398l-178.237,0l0,-31.036l116.164,0l0,-59.856l-116.164,0l0,-31.036l178.237,0l0,-65.398l-279.327,0l0,252.724Z" style="fill:#fff;fill-rule:nonzero;"/>
+  </g>
+  <g>
+    <ellipse cx="595.755" cy="1003.754" rx="141.869" ry="130.116" style="fill:none;stroke:#fff;stroke-width:16.67px;"/>
+    <ellipse cx="595.755" cy="1003.754" rx="62.197" ry="57.983" style="fill:#fff;"/>
+  </g>
+</svg>

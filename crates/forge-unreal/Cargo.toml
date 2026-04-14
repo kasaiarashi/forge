@@ -1,0 +1,15 @@
+[package]
+name = "forge-unreal"
+description = "Unreal Engine .uasset/.umap parser for Forge VCS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+binread = "2.1.1"
+bit_field = "0.10.1"
+num-traits = "0.2"
+num-derive = "0.4"
+thiserror.workspace = true
+serde.workspace = true

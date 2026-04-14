@@ -1,0 +1,25 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"EngineVersion": "5.7",
+	"FriendlyName": "Forge Source Control",
+	"Description": "Forge version control provider for Unreal Engine — built for game development with native binary asset support and file locking.",
+	"Category": "Source Control",
+	"CreatedBy": "Krishna Teja Mekala",
+	"CreatedByURL": "https://github.com/kasaiarashi",
+	"DocsURL": "https://github.com/kasaiarashi/forge#readme",
+	"MarketplaceURL": "https://www.fab.com/listings/7cd90180-8c2f-4b64-a772-2f010cec0105",
+	"SupportURL": "https://github.com/kasaiarashi/forge/issues",
+	"EnabledByDefault": true,
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Modules": [
+		{
+			"Name": "ForgeSourceControl",
+			"Type": "DeveloperTool",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
+		}
+	]
+}

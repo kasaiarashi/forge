@@ -1,0 +1,40 @@
+[package]
+name = "forge-web"
+version = "0.1.0"
+edition = "2021"
+authors = ["Krishna Teja <krishna18developer@gmail.com>"]
+
+[dependencies]
+forge-proto = { path = "../../forge-proto" }
+forge-core = { path = "../../forge-core" }
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "set-header"] }
+tower_governor = "0.4"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs", "x509-parser"] }
+sha2 = "0.10"
+if-addrs = "0.13"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+toml = "0.8"
+
+# Windows-only: native Windows service support so forge-web can install
+# itself with the Service Control Manager. The order matters — every
+# `[target.'cfg(...)']` block must come AFTER the cross-platform
+# `[dependencies]` table or all the lines beneath the section header get
+# pulled into the cfg-gated namespace and disappear from Linux/macOS
+# builds.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
