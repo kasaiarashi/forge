@@ -1,0 +1,45 @@
+[package]
+name = "forge-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+forge-core.workspace = true
+forge-proto.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hex.workspace = true
+rayon.workspace = true
+crossbeam-channel.workspace = true
+tokio-stream = "0.1"
+toml.workspace = true
+serde_yaml.workspace = true
+indexmap.workspace = true
+uuid.workspace = true
+globset.workspace = true
+walkdir.workspace = true
+indicatif.workspace = true
+self-replace.workspace = true
+argon2 = "0.5"
+rand = "0.8"
+rpassword = "7"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rcgen.workspace = true
+sha2 = "0.10"
+if-addrs = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
+[dev-dependencies]
+tempfile.workspace = true

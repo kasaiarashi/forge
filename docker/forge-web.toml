@@ -1,0 +1,17 @@
+# Forge Web UI Configuration (Docker)
+# =====================================
+
+[web]
+listen = "0.0.0.0"
+http_port = 80
+https_port = 443
+static_dir = "/srv/forge-web/ui"
+
+[server]
+grpc_url = "http://forge-server:9876"
+
+[auth]
+# Generate a hash with: docker run --rm forge-web hash-password <password>
+admin_password_hash = ""
+jwt_secret = "change-me-to-a-random-secret"
+token_ttl_hours = 24

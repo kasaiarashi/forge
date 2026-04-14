@@ -1,0 +1,59 @@
+# Forge Web UI Configuration
+# =========================
+
+[web]
+# Bind address for the web UI. Use 0.0.0.0 to expose on the network.
+listen = "0.0.0.0"
+
+# HTTP port — plain HTTP requests are redirected to HTTPS when TLS is on.
+http_port = 80
+
+# HTTPS port — used when TLS is enabled (the default).
+https_port = 443
+
+# Path to the built React UI assets (relative to wherever forge-web is
+# launched from — the installer drops these next to the binary).
+static_dir = "./ui"
+
+# Allowed CORS origins. Empty (the default) means same-origin only,
+# which is what you want unless you serve the SPA from a different
+# hostname than the API. Never wildcard this list.
+# allowed_origins = ["https://forge.example.com"]
+
+# `Secure` flag on session cookies. Auto-enabled when [web.tls] is
+# configured below; only set this manually to `true` if you terminate
+# TLS at a separate reverse proxy and forge-web sees plaintext locally.
+# Setting it to true while serving plaintext HTTP directly will break
+# login because browsers refuse to send Secure cookies over HTTP.
+# secure_cookies = false
+
+# TLS is ON by default. On first start, forge-web generates a local CA
+# under ./forge-web-certs/, mints a leaf cert covering the hostnames
+# below plus loopback and every detected interface IP, and serves HTTPS
+# directly. Import ./forge-web-certs/certs/ca.crt into your browser's
+# trust store to remove the "not secure" warning — there's no way around
+# the warning for self-signed certs without ACME.
+[web.tls]
+auto_generate = true
+# hostnames = ["forge.example.com"]
+# cert_path = "./forge-web-certs/server.crt"
+# key_path  = "./forge-web-certs/server.key"
+
+# Rate limit applied to /api/auth/* (per client IP). The hot paths
+# (push/pull/clone) are unlimited.
+[web.rate_limit]
+per_second = 1
+burst      = 5
+
+[server]
+# gRPC URL of the forge-server instance. Use https:// when forge-server
+# has TLS enabled (the default for new installs).
+grpc_url = "https://127.0.0.1:9876"
+
+# Path to a PEM-encoded CA bundle to trust for the gRPC connection.
+# Required when forge-server uses an auto-generated self-signed CA —
+# point this at the CA file forge-server writes at
+# <storage.base_path>/certs/ca.crt. The path below assumes the default
+# installer layout where forge-server's data dir is `./forge-data`
+# relative to the install root.
+ca_cert_path = "./forge-data/certs/ca.crt"

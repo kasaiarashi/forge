@@ -1,0 +1,72 @@
+[workspace]
+members = [
+    "crates/forge-core",
+    "crates/forge-diff",
+    "crates/forge-cli",
+    "crates/forge-server",
+    "crates/forge-proto",
+    "crates/forge-ignore",
+    "crates/forge-web/server",
+    "crates/forge-unreal",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+authors = ["Krishna Teja <krishna18developer@gmail.com>"]
+
+[workspace.dependencies]
+# Hashing
+blake3 = "1"
+# Chunking
+fastcdc = "3"
+# Compression
+zstd = "0.13"
+# Serialization
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+serde_json = "1"
+# gRPC
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+prost = "0.13"
+tonic-build = "0.12"
+# Async
+tokio = { version = "1", features = ["full"] }
+# CLI
+clap = { version = "4", features = ["derive"] }
+# Error handling
+thiserror = "2"
+anyhow = "1"
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+# Misc
+uuid = { version = "1", features = ["v4", "serde"] }
+hex = "0.4"
+walkdir = "2"
+rayon = "1"
+crossbeam-channel = "0.5"
+toml = "0.8"
+globset = "0.4"
+bytes = "1"
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Internal
+forge-core = { path = "crates/forge-core" }
+forge-diff = { path = "crates/forge-diff" }
+forge-proto = { path = "crates/forge-proto" }
+forge-ignore = { path = "crates/forge-ignore" }
+tempfile = "3"
+similar = "2"
+indicatif = "0.17"
+forge-unreal = { path = "crates/forge-unreal" }
+serde_yaml = "0.9"
+indexmap = { version = "2", features = ["serde"] }
+# Self-replacement for updater
+self-replace = "1"
+# Self-signed certificate generation (auto-TLS bootstrap)
+rcgen = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs", "x509-parser"] }

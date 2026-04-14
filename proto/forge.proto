@@ -1,0 +1,818 @@
+syntax = "proto3";
+package forge;
+
+// ============================================================
+// AuthService — identity, sessions, PATs, ACLs, server bootstrap
+// ============================================================
+//
+// The CLI and the web UI both consume this. Sessions back the web UI's
+// HttpOnly cookie; PATs are what the CLI stores in ~/.forge/credentials.
+// All authz checks live on the server side and are enforced by the gRPC
+// auth interceptor + per-handler require_* helpers in forge-server.
+
+service AuthService {
+    // Identity
+    rpc Login(LoginRequest) returns (LoginResponse);
+    rpc Logout(LogoutRequest) returns (LogoutResponse);
+    rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+
+    // Personal Access Tokens (caller acts on themself)
+    rpc CreatePersonalAccessToken(CreatePatRequest) returns (CreatePatResponse);
+    rpc ListPersonalAccessTokens(ListPatsRequest) returns (ListPatsResponse);
+    rpc RevokePersonalAccessToken(RevokePatRequest) returns (RevokePatResponse);
+
+    // Sessions (caller acts on themself)
+    rpc ListMySessions(ListSessionsRequest) returns (ListSessionsResponse);
+    rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
+
+    // User admin (server admin only)
+    rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+    rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+    rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+    // Repo ACLs (repo admin or server admin)
+    rpc GrantRepoRole(GrantRepoRoleRequest) returns (GrantRepoRoleResponse);
+    rpc RevokeRepoRole(RevokeRepoRoleRequest) returns (RevokeRepoRoleResponse);
+    rpc ListRepoMembers(ListRepoMembersRequest) returns (ListRepoMembersResponse);
+
+    // User lookup (any authenticated user)
+    rpc LookupUser(LookupUserRequest) returns (LookupUserResponse);
+
+    // Server bootstrap (unauthenticated; rejects after first user exists)
+    rpc IsServerInitialized(IsServerInitializedRequest) returns (IsServerInitializedResponse);
+    rpc BootstrapAdmin(BootstrapAdminRequest) returns (BootstrapAdminResponse);
+}
+
+message UserInfo {
+    int64  id = 1;
+    string username = 2;
+    string email = 3;
+    string display_name = 4;
+    bool   is_server_admin = 5;
+    int64  created_at = 6;
+    int64  last_login_at = 7; // 0 if never
+}
+
+message SessionInfo {
+    int64  id = 1;
+    int64  user_id = 2;
+    int64  created_at = 3;
+    int64  last_used_at = 4;
+    int64  expires_at = 5;
+    string user_agent = 6;
+    string ip = 7;
+}
+
+message PatInfo {
+    int64  id = 1;
+    string name = 2;
+    int64  user_id = 3;
+    repeated string scopes = 4;
+    int64  created_at = 5;
+    int64  last_used_at = 6;
+    int64  expires_at = 7; // 0 = never
+}
+
+message LoginRequest {
+    string username = 1;
+    string password = 2;
+    string user_agent = 3; // optional, set by web UI
+    string ip = 4;          // optional, set by web UI
+}
+
+message LoginResponse {
+    string session_token = 1; // plaintext session token, set as HttpOnly cookie
+    UserInfo user = 2;
+    int64 expires_at = 3;
+}
+
+message LogoutRequest {} // session token comes from auth header
+
+message LogoutResponse { bool success = 1; }
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+    bool authenticated = 1;
+    UserInfo user = 2;
+    repeated string scopes = 3; // active scopes for this credential
+}
+
+message CreatePatRequest {
+    string name = 1;
+    repeated string scopes = 2;        // e.g. ["repo:read","repo:write"]
+    int64  expires_at = 3;             // 0 = never
+}
+
+message CreatePatResponse {
+    string plaintext_token = 1; // shown ONCE — never persisted as plaintext
+    PatInfo pat = 2;
+}
+
+message ListPatsRequest {}
+message ListPatsResponse { repeated PatInfo pats = 1; }
+
+message RevokePatRequest { int64 id = 1; }
+message RevokePatResponse { bool success = 1; }
+
+message ListSessionsRequest {}
+message ListSessionsResponse { repeated SessionInfo sessions = 1; }
+
+message RevokeSessionRequest { int64 id = 1; }
+message RevokeSessionResponse { bool success = 1; }
+
+message CreateUserRequest {
+    string username = 1;
+    string email = 2;
+    string display_name = 3;
+    string password = 4;
+    bool   is_server_admin = 5;
+}
+message CreateUserResponse { UserInfo user = 1; }
+
+message ListUsersRequest {}
+message ListUsersResponse { repeated UserInfo users = 1; }
+
+message DeleteUserRequest { int64 id = 1; }
+message DeleteUserResponse { bool success = 1; }
+
+message LookupUserRequest { string username = 1; }
+message LookupUserResponse { UserInfo user = 1; }
+
+message GrantRepoRoleRequest {
+    string repo = 1;
+    int64  user_id = 2;
+    string role = 3; // "read" | "write" | "admin"
+}
+message GrantRepoRoleResponse { bool success = 1; }
+
+message RevokeRepoRoleRequest {
+    string repo = 1;
+    int64  user_id = 2;
+}
+message RevokeRepoRoleResponse { bool success = 1; }
+
+message ListRepoMembersRequest { string repo = 1; }
+message ListRepoMembersResponse {
+    repeated RepoMember members = 1;
+}
+message RepoMember {
+    UserInfo user = 1;
+    string role = 2;
+}
+
+message IsServerInitializedRequest {}
+message IsServerInitializedResponse { bool initialized = 1; }
+
+message BootstrapAdminRequest {
+    string username = 1;
+    string email = 2;
+    string display_name = 3;
+    string password = 4;
+    // One-time token generated by the server at first start and printed to
+    // the logs / written to <base_path>/.bootstrap_token. Required before
+    // the first admin can be created so that a publicly-reachable fresh
+    // install cannot be bootstrapped by a stranger.
+    string bootstrap_token = 5;
+}
+message BootstrapAdminResponse { UserInfo user = 1; }
+
+service ForgeService {
+    // Object transfer (scoped to repo)
+    rpc PushObjects(stream ObjectChunk) returns (PushResponse);
+    rpc PullObjects(PullRequest) returns (stream ObjectChunk);
+    rpc HasObjects(HasObjectsRequest) returns (HasObjectsResponse);
+
+    // References (scoped to repo)
+    rpc GetRefs(GetRefsRequest) returns (GetRefsResponse);
+    rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
+
+    // Locks (scoped to repo)
+    rpc AcquireLock(LockRequest) returns (LockResponse);
+    rpc ReleaseLock(UnlockRequest) returns (UnlockResponse);
+    rpc ListLocks(ListLocksRequest) returns (ListLocksResponse);
+    rpc VerifyLocks(VerifyLocksRequest) returns (VerifyLocksResponse);
+
+    // Repository management
+    rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+    rpc CreateRepo(CreateRepoRequest) returns (CreateRepoResponse);
+    rpc UpdateRepo(UpdateRepoRequest) returns (UpdateRepoResponse);
+    rpc DeleteRepo(DeleteRepoRequest) returns (DeleteRepoResponse);
+
+    // Browsing (used by Web UI)
+    rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+    rpc GetTreeEntries(GetTreeEntriesRequest) returns (GetTreeEntriesResponse);
+    rpc GetFileContent(GetFileContentRequest) returns (GetFileContentResponse);
+    rpc GetCommitDetail(GetCommitDetailRequest) returns (GetCommitDetailResponse);
+    rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+    // Actions (Workflows)
+    rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
+    rpc CreateWorkflow(CreateWorkflowRequest) returns (CreateWorkflowResponse);
+    rpc UpdateWorkflow(UpdateWorkflowRequest) returns (UpdateWorkflowResponse);
+    rpc DeleteWorkflow(DeleteWorkflowRequest) returns (DeleteWorkflowResponse);
+
+    // Workflow Runs
+    rpc TriggerWorkflow(TriggerWorkflowRequest) returns (TriggerWorkflowResponse);
+    rpc ListWorkflowRuns(ListWorkflowRunsRequest) returns (ListWorkflowRunsResponse);
+    rpc GetWorkflowRun(GetWorkflowRunRequest) returns (GetWorkflowRunResponse);
+    rpc CancelWorkflowRun(CancelWorkflowRunRequest) returns (CancelWorkflowRunResponse);
+
+    // Artifacts & Releases
+    rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+    rpc ListReleases(ListReleasesRequest) returns (ListReleasesResponse);
+    rpc GetRelease(GetReleaseRequest) returns (GetReleaseResponse);
+
+    // Issues
+    rpc ListIssues(ListIssuesRequest) returns (ListIssuesResponse);
+    rpc CreateIssue(CreateIssueRequest) returns (CreateIssueResponse);
+    rpc UpdateIssue(UpdateIssueRequest) returns (UpdateIssueResponse);
+
+    // Pull Requests
+    rpc ListPullRequests(ListPullRequestsRequest) returns (ListPullRequestsResponse);
+    rpc CreatePullRequest(CreatePullRequestRequest) returns (CreatePullRequestResponse);
+    rpc UpdatePullRequest(UpdatePullRequestRequest) returns (UpdatePullRequestResponse);
+    rpc MergePullRequest(MergePullRequestRequest) returns (MergePullRequestResponse);
+
+    // Single item getters
+    rpc GetIssue(GetIssueRequest) returns (GetIssueResponse);
+    rpc GetPullRequest(GetPullRequestRequest) returns (GetPullRequestResponse);
+
+    // Comments (shared by issues and PRs)
+    rpc ListComments(ListCommentsRequest) returns (ListCommentsResponse);
+    rpc CreateComment(CreateCommentRequest) returns (CreateCommentResponse);
+    rpc UpdateComment(UpdateCommentRequest) returns (UpdateCommentResponse);
+    rpc DeleteComment(DeleteCommentRequest) returns (DeleteCommentResponse);
+}
+
+// ============================================================
+// Object transfer
+// ============================================================
+
+message ObjectChunk {
+    bytes hash = 1;
+    uint32 object_type = 2;
+    uint64 total_size = 3;
+    uint64 offset = 4;
+    bytes data = 5;
+    bool is_last = 6;
+    string repo = 7;
+}
+
+message PushResponse {
+    repeated bytes received_hashes = 1;
+    string error = 2;
+}
+
+message PullRequest {
+    repeated bytes want_hashes = 1;
+    string repo = 2;
+}
+
+message HasObjectsRequest {
+    repeated bytes hashes = 1;
+    string repo = 2;
+}
+
+message HasObjectsResponse {
+    repeated bool has = 1;
+}
+
+// ============================================================
+// References
+// ============================================================
+
+message GetRefsRequest {
+    string repo = 1;
+}
+
+message GetRefsResponse {
+    map<string, bytes> refs = 1;
+}
+
+message UpdateRefRequest {
+    string repo = 1;
+    string ref_name = 2;
+    bytes old_hash = 3;
+    bytes new_hash = 4;
+    // When true, the server overwrites the ref unconditionally (no
+    // compare-and-swap against `old_hash`). Used by `forge push --force`
+    // to publish a rewritten history. Still gated on `repo:write` —
+    // protected-branch enforcement is a future addition.
+    bool force = 5;
+}
+
+message UpdateRefResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// ============================================================
+// Locks
+// ============================================================
+
+message LockRequest {
+    string repo = 1;
+    string path = 2;
+    string owner = 3;
+    string workspace_id = 4;
+    string reason = 5;
+}
+
+message LockResponse {
+    bool granted = 1;
+    LockInfo existing_lock = 2;
+}
+
+message UnlockRequest {
+    string repo = 1;
+    string path = 2;
+    string owner = 3;
+    bool force = 4;
+}
+
+message UnlockResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message ListLocksRequest {
+    string repo = 1;
+    string path_prefix = 2;
+    string owner = 3;
+}
+
+message ListLocksResponse {
+    repeated LockInfo locks = 1;
+}
+
+message VerifyLocksRequest {
+    string repo = 1;
+    string owner = 2;
+    repeated string paths = 3;
+}
+
+message VerifyLocksResponse {
+    repeated LockInfo ours = 1;
+    repeated LockInfo theirs = 2;
+}
+
+message LockInfo {
+    string path = 1;
+    string owner = 2;
+    string workspace_id = 3;
+    int64 created_at = 4;
+    string reason = 5;
+}
+
+// ============================================================
+// Repository management
+// ============================================================
+
+message ListReposRequest {}
+
+message ListReposResponse {
+    repeated RepoInfo repos = 1;
+}
+
+message RepoInfo {
+    string name = 1;
+    string description = 2;
+    int64 created_at = 3;
+    int32 branch_count = 4;
+    string default_branch = 5;
+    string last_commit_message = 6;
+    string last_commit_author = 7;
+    int64 last_commit_time = 8;
+    string visibility = 9;          // "private" | "public"
+}
+
+message CreateRepoRequest {
+    string name = 1;
+    string description = 2;
+}
+
+message CreateRepoResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message UpdateRepoRequest {
+    string name = 1;           // current repo name
+    string new_name = 2;       // new name (empty = no rename)
+    string description = 3;    // new description
+    string visibility = 4;     // "private" | "public" — empty = no change
+    string default_branch = 5; // empty = no change
+}
+
+message UpdateRepoResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message DeleteRepoRequest {
+    string name = 1;
+}
+
+message DeleteRepoResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// ============================================================
+// Browsing (Web UI)
+// ============================================================
+
+message ListCommitsRequest {
+    string repo = 1;
+    string branch = 2;
+    int32 limit = 3;
+    int32 offset = 4;
+}
+
+message ListCommitsResponse {
+    repeated CommitInfo commits = 1;
+    int32 total = 2;
+}
+
+message CommitInfo {
+    string hash = 1;
+    string message = 2;
+    string author_name = 3;
+    string author_email = 4;
+    int64 timestamp = 5;
+    repeated string parent_hashes = 6;
+}
+
+message GetTreeEntriesRequest {
+    string repo = 1;
+    string commit_hash = 2;
+    string path = 3;
+}
+
+message GetTreeEntriesResponse {
+    repeated TreeEntryInfo entries = 1;
+    string commit_hash = 2;
+    string path = 3;
+}
+
+message TreeEntryInfo {
+    string name = 1;
+    string kind = 2;
+    string hash = 3;
+    uint64 size = 4;
+    string asset_class = 5;
+}
+
+message GetFileContentRequest {
+    string repo = 1;
+    string commit_hash = 2;
+    string path = 3;
+}
+
+message GetFileContentResponse {
+    bytes content = 1;
+    uint64 size = 2;
+    bool is_binary = 3;
+    string hash = 4;
+    AssetMetadata asset_metadata = 5;
+}
+
+message AssetMetadata {
+    string asset_class = 1;
+    string engine_version = 2;
+    repeated string package_flags = 3;
+    repeated string dependencies = 4;
+}
+
+message GetCommitDetailRequest {
+    string repo = 1;
+    string commit_hash = 2;
+}
+
+message GetCommitDetailResponse {
+    CommitInfo commit = 1;
+    repeated DiffEntry changes = 2;
+}
+
+message DiffEntry {
+    string path = 1;
+    string change_type = 2;
+    uint64 old_size = 3;
+    uint64 new_size = 4;
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+    string version = 1;
+    int64 uptime_secs = 2;
+    int64 total_objects = 3;
+    int64 total_size_bytes = 4;
+    repeated string repos = 5;
+    int32 active_locks = 6;
+}
+
+// ============================================================
+// Actions — Workflows
+// ============================================================
+
+message WorkflowInfo {
+    int64 id = 1;
+    string repo = 2;
+    string name = 3;
+    string yaml = 4;
+    bool enabled = 5;
+    int64 created_at = 6;
+    int64 updated_at = 7;
+}
+
+message ListWorkflowsRequest { string repo = 1; }
+message ListWorkflowsResponse { repeated WorkflowInfo workflows = 1; }
+
+message CreateWorkflowRequest {
+    string repo = 1;
+    string name = 2;
+    string yaml = 3;
+}
+message CreateWorkflowResponse { bool success = 1; string error = 2; int64 id = 3; }
+
+message UpdateWorkflowRequest {
+    int64 id = 1;
+    string name = 2;
+    string yaml = 3;
+    bool enabled = 4;
+}
+message UpdateWorkflowResponse { bool success = 1; string error = 2; }
+
+message DeleteWorkflowRequest { int64 id = 1; }
+message DeleteWorkflowResponse { bool success = 1; string error = 2; }
+
+// ============================================================
+// Actions — Workflow Runs
+// ============================================================
+
+message TriggerWorkflowRequest {
+    int64 workflow_id = 1;
+    string ref_name = 2;
+    string triggered_by = 3;
+}
+message TriggerWorkflowResponse { bool success = 1; string error = 2; int64 run_id = 3; }
+
+message WorkflowRunInfo {
+    int64 id = 1;
+    string repo = 2;
+    int64 workflow_id = 3;
+    string workflow_name = 4;
+    string trigger = 5;
+    string trigger_ref = 6;
+    string commit_hash = 7;
+    string status = 8;
+    int64 started_at = 9;
+    int64 finished_at = 10;
+    int64 created_at = 11;
+    string triggered_by = 12;
+}
+
+message StepInfo {
+    int64 id = 1;
+    string job_name = 2;
+    int32 step_index = 3;
+    string name = 4;
+    string status = 5;
+    int32 exit_code = 6;
+    string log = 7;
+    int64 started_at = 8;
+    int64 finished_at = 9;
+}
+
+message ListWorkflowRunsRequest {
+    string repo = 1;
+    int64 workflow_id = 2;
+    int32 limit = 3;
+    int32 offset = 4;
+}
+message ListWorkflowRunsResponse {
+    repeated WorkflowRunInfo runs = 1;
+    int32 total = 2;
+}
+
+message GetWorkflowRunRequest { int64 run_id = 1; }
+message GetWorkflowRunResponse {
+    WorkflowRunInfo run = 1;
+    repeated StepInfo steps = 2;
+    repeated ArtifactInfo artifacts = 3;
+}
+
+message CancelWorkflowRunRequest { int64 run_id = 1; }
+message CancelWorkflowRunResponse { bool success = 1; string error = 2; }
+
+// ============================================================
+// Actions — Artifacts & Releases
+// ============================================================
+
+message ArtifactInfo {
+    int64 id = 1;
+    int64 run_id = 2;
+    string name = 3;
+    int64 size_bytes = 4;
+    int64 created_at = 5;
+}
+
+message ListArtifactsRequest { int64 run_id = 1; }
+message ListArtifactsResponse { repeated ArtifactInfo artifacts = 1; }
+
+message ReleaseInfo {
+    int64 id = 1;
+    string repo = 2;
+    string tag = 3;
+    string name = 4;
+    int64 run_id = 5;
+    int64 created_at = 6;
+    repeated ArtifactInfo artifacts = 7;
+}
+
+message ListReleasesRequest { string repo = 1; }
+message ListReleasesResponse { repeated ReleaseInfo releases = 1; }
+
+message GetReleaseRequest { int64 release_id = 1; }
+message GetReleaseResponse { ReleaseInfo release = 1; }
+
+// ============================================================
+// Issues
+// ============================================================
+
+message IssueInfo {
+    int64 id = 1;
+    string repo = 2;
+    string title = 3;
+    string body = 4;
+    string author = 5;
+    string status = 6;         // open, closed
+    repeated string labels = 7;
+    int64 created_at = 8;
+    int64 updated_at = 9;
+    int32 comment_count = 10;
+    string assignee = 11;
+}
+
+message GetIssueRequest { int64 id = 1; }
+message GetIssueResponse { IssueInfo issue = 1; }
+
+message ListIssuesRequest {
+    string repo = 1;
+    string status = 2;        // open, closed, or empty for all
+    int32 limit = 3;
+    int32 offset = 4;
+}
+
+message ListIssuesResponse {
+    repeated IssueInfo issues = 1;
+    int32 total = 2;
+    int32 open_count = 3;
+    int32 closed_count = 4;
+}
+
+message CreateIssueRequest {
+    string repo = 1;
+    string title = 2;
+    string body = 3;
+    string author = 4;
+    repeated string labels = 5;
+}
+
+message CreateIssueResponse {
+    bool success = 1;
+    string error = 2;
+    int64 id = 3;
+}
+
+message UpdateIssueRequest {
+    int64 id = 1;
+    string title = 2;
+    string body = 3;
+    string status = 4;
+    repeated string labels = 5;
+    string assignee = 6;
+}
+
+message UpdateIssueResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// ============================================================
+// Pull Requests
+// ============================================================
+
+message PullRequestInfo {
+    int64 id = 1;
+    string repo = 2;
+    string title = 3;
+    string body = 4;
+    string author = 5;
+    string status = 6;            // open, closed, merged
+    string source_branch = 7;
+    string target_branch = 8;
+    repeated string labels = 9;
+    int64 created_at = 10;
+    int64 updated_at = 11;
+    int32 comment_count = 12;
+    string assignee = 13;
+}
+
+message GetPullRequestRequest { int64 id = 1; }
+message GetPullRequestResponse { PullRequestInfo pull_request = 1; }
+
+message ListPullRequestsRequest {
+    string repo = 1;
+    string status = 2;
+    int32 limit = 3;
+    int32 offset = 4;
+}
+
+message ListPullRequestsResponse {
+    repeated PullRequestInfo pull_requests = 1;
+    int32 total = 2;
+    int32 open_count = 3;
+    int32 closed_count = 4;
+}
+
+message CreatePullRequestRequest {
+    string repo = 1;
+    string title = 2;
+    string body = 3;
+    string author = 4;
+    string source_branch = 5;
+    string target_branch = 6;
+    repeated string labels = 7;
+}
+
+message CreatePullRequestResponse {
+    bool success = 1;
+    string error = 2;
+    int64 id = 3;
+}
+
+message UpdatePullRequestRequest {
+    int64 id = 1;
+    string title = 2;
+    string body = 3;
+    string status = 4;
+    repeated string labels = 5;
+    string assignee = 6;
+}
+
+message UpdatePullRequestResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message MergePullRequestRequest {
+    int64 id = 1;
+}
+
+message MergePullRequestResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// ============================================================
+// Comments (shared by issues and pull requests)
+// ============================================================
+
+message CommentInfo {
+    int64 id = 1;
+    string repo = 2;
+    int64 issue_id = 3;       // issue or PR id
+    string kind = 4;          // "issue" or "pull_request"
+    string author = 5;
+    string body = 6;
+    int64 created_at = 7;
+    int64 updated_at = 8;
+}
+
+message ListCommentsRequest {
+    string repo = 1;
+    int64 issue_id = 2;       // issue or PR id
+    string kind = 3;          // "issue" or "pull_request"
+}
+message ListCommentsResponse { repeated CommentInfo comments = 1; }
+
+message CreateCommentRequest {
+    string repo = 1;
+    int64 issue_id = 2;
+    string kind = 3;          // "issue" or "pull_request"
+    string author = 4;
+    string body = 5;
+}
+message CreateCommentResponse { bool success = 1; string error = 2; int64 id = 3; }
+
+message UpdateCommentRequest {
+    int64 id = 1;
+    string body = 2;
+}
+message UpdateCommentResponse { bool success = 1; string error = 2; }
+
+message DeleteCommentRequest { int64 id = 1; }
+message DeleteCommentResponse { bool success = 1; string error = 2; }

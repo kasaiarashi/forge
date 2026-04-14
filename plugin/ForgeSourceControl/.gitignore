@@ -1,0 +1,21 @@
+# UE build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Build/
+Saved/
+.vs/
+*.sln
+*.suo
+.idea/
+
+# Keep plugin binaries (shipped in general-download zip for direct install)
+!Plugins/ForgeSourceControl/Binaries/
+!Plugins/ForgeSourceControl/Binaries/**
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Forge workspace
+.forge/

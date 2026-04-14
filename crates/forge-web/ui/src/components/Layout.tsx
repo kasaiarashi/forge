@@ -1,0 +1,227 @@
+import { type ReactNode } from 'react';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
+import {
+  Header,
+  ActionMenu,
+  ActionList,
+  Avatar,
+} from '@primer/react';
+import {
+  SignInIcon,
+  SunIcon,
+  MoonIcon,
+  SearchIcon,
+  PlusIcon,
+  BellIcon,
+} from '@primer/octicons-react';
+import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
+
+interface LayoutProps {
+  children: ReactNode;
+}
+
+export default function Layout({ children }: LayoutProps) {
+  const { user, loading, logout } = useAuth();
+  const { colorMode, setColorMode, resolvedMode } = useTheme();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const pathParts = location.pathname.split('/').filter(Boolean);
+  const nonRepoRoots = ['login', 'admin', 'account', 'settings', 'new'];
+  const isRepoUrl = pathParts.length >= 2 && !nonRepoRoots.includes(pathParts[0]);
+  const repoOwner = isRepoUrl ? pathParts[0] : null;
+  const repoName = isRepoUrl ? pathParts[1] : null;
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login');
+  };
+
+  const isActive = (path: string) =>
+    location.pathname === path || location.pathname.startsWith(path + '/');
+
+  const linkClass = (path: string) =>
+    isActive(path) ? 'active-link' : '';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+      <Header style={{ background: 'var(--header-bg)', padding: 'var(--space-4) var(--space-6)', borderBottom: 'none' }}>
+        <Header.Item>
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-logo)', display: 'flex', alignItems: 'center' }}>
+            {/* Compact 48x48 brand mark. The navbar background is always
+                dark (a deep slate, regardless of day/night theme), so we
+                always serve the white-on-transparent simple variant — no
+                CSS invert hack. The actual hero placement is on the
+                Dashboard page itself (see Dashboard.tsx). */}
+            <img
+              src="/forge-logo-simple-dark.svg"
+              alt="Forge VCS"
+              width={48}
+              height={48}
+              style={{ display: 'block' }}
+            />
+          </Header.Link>
+        </Header.Item>
+
+        {isRepoUrl && (
+          <Header.Item>
+            <div style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+              <Link to={`/${repoOwner}`} style={{ color: 'var(--header-logo)', textDecoration: 'none' }}>
+                {repoOwner}
+              </Link>
+              <span style={{ color: 'var(--header-fg)', opacity: 0.5, margin: '0 var(--space-2)' }}>/</span>
+              <Link to={`/${repoOwner}/${repoName}`} style={{ color: 'var(--header-logo)', textDecoration: 'none', fontWeight: 600 }}>
+                {repoName}
+              </Link>
+            </div>
+          </Header.Item>
+        )}
+
+        <Header.Item>
+          <div style={{ display: 'flex', alignItems: 'center', background: 'var(--header-search-bg)', border: '1px solid var(--header-search-border)', borderRadius: '6px', padding: '4px 8px', width: '272px' }}>
+            <span style={{ color: 'var(--header-fg)', display: 'flex' }}><SearchIcon size={16} /></span>
+            <input 
+              type="text" 
+              placeholder="Search or jump to..." 
+              style={{ background: 'transparent', border: 'none', color: 'var(--header-fg)', outline: 'none', marginLeft: '8px', flex: 1, fontSize: '14px' }}
+            />
+            <div style={{ border: '1px solid var(--header-search-border)', borderRadius: '4px', padding: '0 4px', fontSize: '10px', marginLeft: '8px', color: 'var(--header-fg)' }}>/</div>
+          </div>
+        </Header.Item>
+
+        <Header.Item>
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Pull requests</Header.Link>
+        </Header.Item>
+        <Header.Item>
+          <Header.Link as={Link} to="/" style={{ color: 'var(--header-fg)', fontWeight: 600 }}>Issues</Header.Link>
+        </Header.Item>
+
+        <Header.Item full />
+
+        {user?.is_admin && (
+          <Header.Item>
+            <Header.Link as={Link} to="/admin" className={linkClass('/admin')} style={{ color: 'var(--header-fg)', fontWeight: 600 }}>
+              Admin
+            </Header.Link>
+          </Header.Item>
+        )}
+
+        <Header.Item>
+          <button
+            onClick={() => {
+              const next = colorMode === 'auto' ? 'night' : colorMode === 'night' ? 'day' : 'auto';
+              setColorMode(next);
+            }}
+            style={{ background: 'none', border: 'none', color: 'var(--header-fg)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '4px' }}
+            title={`Theme: ${colorMode}`}
+          >
+            {resolvedMode === 'night' ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+          </button>
+        </Header.Item>
+
+        <Header.Item>
+          <Header.Link href="#" style={{ color: 'var(--header-fg)' }}><BellIcon size={16} /></Header.Link>
+        </Header.Item>
+        <Header.Item>
+          <Header.Link href="#" style={{ color: 'var(--header-fg)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <PlusIcon size={16} />
+            <span style={{ fontSize: '10px' }}>▾</span>
+          </Header.Link>
+        </Header.Item>
+
+        <Header.Item>
+          {loading ? null : user ? (
+            <ActionMenu>
+              <ActionMenu.Button variant="invisible" style={{ color: 'var(--header-fg)', padding: 0, paddingLeft: '8px' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <Avatar
+                    src={`https://github.com/identicons/${user.username}.png`}
+                    size={20}
+                  />
+                  <span style={{ fontSize: '10px', marginLeft: '2px' }}>▾</span>
+                </span>
+              </ActionMenu.Button>
+              <ActionMenu.Overlay>
+                <ActionList>
+                  <ActionList.Item onSelect={() => navigate('/')}>
+                    Your repositories
+                  </ActionList.Item>
+                  <ActionList.Item onSelect={() => navigate('/account')}>
+                    Account settings
+                  </ActionList.Item>
+                  {user?.is_admin && (
+                    <ActionList.Item onSelect={() => navigate('/admin')}>
+                      Server administration
+                    </ActionList.Item>
+                  )}
+                  <ActionList.Divider />
+                  <ActionList.Item variant="danger" onSelect={handleLogout}>
+                    Sign out
+                  </ActionList.Item>
+                </ActionList>
+              </ActionMenu.Overlay>
+            </ActionMenu>
+          ) : (
+            <Header.Link as={Link} to="/login" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--header-logo)' }}>
+              <SignInIcon size={16} />
+              Sign in
+            </Header.Link>
+          )}
+        </Header.Item>
+      </Header>
+
+      <main style={{ flex: 1, width: '100%' }}>
+        {children}
+      </main>
+
+      {/* `gap: 32px` + `flex-wrap: wrap` keeps the © block and the link
+          row from kissing on wide screens AND lets them stack cleanly on
+          narrow ones. `space-between` still expands the gap to fill the
+          row when there's room. */}
+      <footer className="forge-footer" style={{ borderTop: 'none', paddingTop: 'var(--space-12)', paddingBottom: 'var(--space-12)', maxWidth: '1012px', margin: 'var(--space-12) auto 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 'var(--space-8)', color: 'var(--fg-muted)', fontSize: '12px', background: 'transparent' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginRight: '24px' }}>
+          {/* Footer glyph swaps with the active theme — BW on the day
+              theme's white-ish background, WB on the night theme's dark
+              background. Slightly muted with opacity to match the rest
+              of the footer copy. */}
+          <img
+            src={resolvedMode === 'night' ? '/forge-logo-simple-dark.svg' : '/forge-logo-simple.svg'}
+            alt=""
+            width={24}
+            height={24}
+            style={{ display: 'block', opacity: 0.7 }}
+          />
+          {/* Non-breaking space after the © glyph so the year doesn't
+              wrap onto a new line on narrow viewports. */}
+          <span>©&nbsp;2026 Forge VCS</span>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
+          <FooterLink to="/terms">Terms</FooterLink>
+          <FooterLink to="/privacy">Privacy</FooterLink>
+          <FooterLink to="/security">Security</FooterLink>
+          <FooterLink to="/status">Status</FooterLink>
+          <FooterLink to="/docs">Docs</FooterLink>
+          <FooterLink to="/contact">Contact</FooterLink>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+/**
+ * Footer link styled like the rest of the footer row, but routed via
+ * react-router so navigation stays inside the SPA (no full-page reload).
+ */
+function FooterLink({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      style={{ color: 'var(--fg-accent)', textDecoration: 'none' }}
+      onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+      onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}
+    >
+      {children}
+    </Link>
+  );
+}
