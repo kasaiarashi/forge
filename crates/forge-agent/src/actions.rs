@@ -23,6 +23,12 @@ pub struct ComposedStep {
     pub uses: Option<String>,
     #[serde(default)]
     pub with: IndexMap<String, String>,
+    /// Explicit shell for `run:` steps. See
+    /// `forge-server::services::actions::shell` for the accepted values;
+    /// the agent mirrors that mapping so a workflow runs identically
+    /// whether the server or an agent executes it.
+    #[serde(default)]
+    pub shell: Option<String>,
     #[serde(rename = "timeout-minutes", default)]
     pub timeout_minutes: Option<u64>,
 }

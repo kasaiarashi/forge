@@ -12,6 +12,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 pub mod sqlite;
+pub mod kms;
 pub mod master_key;
 pub mod mask;
 

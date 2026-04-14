@@ -5,4 +5,5 @@ pub mod db;
 pub mod yaml;
 pub mod workspace;
 pub mod engine;
+pub mod shell;
 pub mod trigger;

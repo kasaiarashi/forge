@@ -432,6 +432,7 @@ pub(crate) async fn serve_inner(
         .route("/repos/:repo/workflows", get(api_actions::list_workflows))
         .route("/repos/:repo/runs", get(api_actions::list_runs))
         .route("/repos/:repo/runs/:run_id", get(api_actions::get_run))
+        .route("/repos/:repo/runs/:run_id/logs", get(api_actions::stream_run_logs))
         .route("/repos/:repo/runs/:run_id/artifacts", get(api_actions::list_artifacts))
         .route("/repos/:repo/releases", get(api_actions::list_releases))
         .route("/repos/:repo/releases/:release_id", get(api_actions::get_release));

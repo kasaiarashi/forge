@@ -158,6 +158,7 @@ async fn execute_run(
                 );
                 let result = execute_command_streaming(
                     &expanded_cmd,
+                    step_def.shell.as_deref(),
                     &workspace_dir,
                     &resolved_env,
                     &run,
@@ -223,6 +224,7 @@ async fn execute_run(
 
 async fn execute_command_streaming(
     cmd: &str,
+    shell_spec: Option<&str>,
     working_dir: &std::path::Path,
     env_vars: &std::collections::HashMap<String, String>,
     run: &crate::services::actions::db::RunRecord,
@@ -232,11 +234,7 @@ async fn execute_command_streaming(
     mask: &Mask,
     timeout: std::time::Duration,
 ) -> Result<(i32, String)> {
-    let (shell, flag) = if cfg!(target_os = "windows") {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
+    let (shell, flag) = super::shell::resolve_shell(shell_spec);
 
     let mut command = tokio::process::Command::new(shell);
     command

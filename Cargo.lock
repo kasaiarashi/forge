@@ -1339,12 +1339,14 @@ name = "forge-web"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum",
  "axum-server",
  "chrono",
  "clap",
  "forge-core",
  "forge-proto",
+ "futures",
  "hex",
  "if-addrs",
  "percent-encoding",

@@ -15,6 +15,7 @@ use std::pin::Pin;
 
 pub mod fs;
 pub mod retention;
+pub mod s3;
 pub mod signed_url;
 
 /// Handle returned after a successful upload. `path` is backend-specific

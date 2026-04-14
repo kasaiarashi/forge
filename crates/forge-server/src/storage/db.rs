@@ -343,6 +343,45 @@ impl MetadataDb {
         }
     }
 
+    /// Find runs claimed by agents whose `last_seen` is older than
+    /// `cutoff_ts` (or never). Drops the claim and re-queues the run so
+    /// another agent can pick it up. Returns the number of runs requeued.
+    pub fn requeue_stale_runs(&self, cutoff_ts: i64) -> Result<usize> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction()?;
+        // Collect stale (run_id, agent_id) pairs first; we need the ids
+        // to scope the workflow_runs reset to runs still in 'running'.
+        let mut stmt = tx.prepare(
+            "SELECT c.run_id, c.agent_id
+             FROM run_claims c
+             JOIN agents a ON a.id = c.agent_id
+             WHERE COALESCE(a.last_seen, 0) < ?1",
+        )?;
+        let stale: Vec<(i64, i64)> = stmt
+            .query_map([cutoff_ts], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut n = 0usize;
+        for (run_id, _agent_id) in &stale {
+            tx.execute("DELETE FROM run_claims WHERE run_id = ?1", [run_id])?;
+            // Only rewind runs that are still 'running'; if the agent
+            // already reported success/failure we must not flip them back.
+            let changed = tx.execute(
+                "UPDATE workflow_runs
+                 SET status = 'queued', started_at = NULL
+                 WHERE id = ?1 AND status = 'running'",
+                [run_id],
+            )?;
+            if changed > 0 {
+                n += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     pub fn get_run_claim_agent(&self, run_id: i64) -> Result<Option<i64>> {
         let conn = self.conn()?;
         let result = conn

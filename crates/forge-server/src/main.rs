@@ -483,9 +483,16 @@ pub(crate) async fn serve_inner(
                 artifacts_root.clone(),
             )),
             "s3" => {
-                anyhow::bail!(
-                    "artifact backend 's3' requested but this build was compiled without the s3 feature"
+                // Trait-compatible stub: constructs fine, validates config,
+                // but every put/get returns a clear "not implemented" error.
+                // Keeps the wiring honest so a real S3 client is a drop-in.
+                warn!(
+                    "artifacts backend = \"s3\" is a stub in this build; \
+                     uploads will fail. Use backend = \"fs\" for production."
                 );
+                Arc::new(services::artifacts::s3::S3ArtifactStore::new(
+                    config.artifacts.s3.clone(),
+                )?)
             }
             other => anyhow::bail!("unknown artifact backend: {}", other),
         };
@@ -496,6 +503,10 @@ pub(crate) async fn serve_inner(
         Arc::clone(&artifacts),
         config.artifacts.retention.clone(),
     );
+
+    // Agent heartbeat sweeper. Requeues runs whose owning agent has gone
+    // silent so a crashed worker can't hold a claim forever.
+    services::agent_sweeper::spawn(Arc::clone(&db));
 
     // Live step-log broadcast hub. Engine + (future) agents publish;
     // StreamStepLogs readers subscribe.

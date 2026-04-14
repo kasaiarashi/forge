@@ -424,6 +424,22 @@ impl ForgeGrpcClient {
         Ok(resp.into_inner())
     }
 
+    /// Open a streaming `StreamStepLogs` RPC and return the raw tonic
+    /// stream. The caller (SSE bridge) adapts chunks into browser events.
+    /// Passing `step_id = 0` tails every step in the run.
+    pub async fn stream_step_logs(
+        &self,
+        run_id: i64,
+        step_id: i64,
+        no_follow: bool,
+    ) -> anyhow::Result<tonic::Streaming<StepLogChunk>> {
+        let mut client = self.forge();
+        let resp = client
+            .stream_step_logs(StreamStepLogsRequest { run_id, step_id, no_follow })
+            .await?;
+        Ok(resp.into_inner())
+    }
+
     pub async fn cancel_workflow_run(&self, run_id: i64) -> anyhow::Result<CancelWorkflowRunResponse> {
         let mut client = self.forge();
         let resp = client.cancel_workflow_run(CancelWorkflowRunRequest { run_id }).await?;

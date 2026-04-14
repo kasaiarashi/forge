@@ -21,6 +21,7 @@ use forge_proto::forge::*;
 mod actions;
 mod primitives;
 mod runner;
+mod shell;
 
 #[derive(Parser)]
 #[command(name = "forge-agent", about = "Forge CI agent", version)]

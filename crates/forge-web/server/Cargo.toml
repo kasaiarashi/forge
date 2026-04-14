@@ -9,6 +9,8 @@ forge-proto = { path = "../../forge-proto" }
 forge-core = { path = "../../forge-core" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
+async-stream = "0.3"
+futures = "0.3"
 tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors", "set-header"] }

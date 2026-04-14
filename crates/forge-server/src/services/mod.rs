@@ -12,3 +12,4 @@ pub mod secrets;
 pub mod artifacts;
 pub mod logs;
 pub mod agents;
+pub mod agent_sweeper;

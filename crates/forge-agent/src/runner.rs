@@ -150,6 +150,7 @@ async fn execute_step(
             step_counter,
             &step.name,
             &expanded,
+            step.shell.as_deref(),
             workspace,
             env,
             step.timeout_minutes.unwrap_or(30),
@@ -239,6 +240,7 @@ async fn execute_step(
                     step_counter,
                     &step.name,
                     &cmd,
+                    step.shell.as_deref(),
                     workspace,
                     env,
                     step.timeout_minutes.unwrap_or(30),
@@ -331,6 +333,7 @@ async fn run_shell(
     step_counter: &mut i32,
     step_name: &str,
     cmd: &str,
+    shell_spec: Option<&str>,
     workspace: &PathBuf,
     env: &HashMap<String, String>,
     timeout_minutes: u64,
@@ -339,11 +342,7 @@ async fn run_shell(
 ) -> Result<bool> {
     use tokio::io::AsyncReadExt;
 
-    let (shell, flag) = if cfg!(target_os = "windows") {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
+    let (shell, flag) = crate::shell::resolve_shell(shell_spec);
     let mut command = tokio::process::Command::new(shell);
     command
         .arg(flag)

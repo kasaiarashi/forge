@@ -278,6 +278,64 @@ pub async fn get_run(
     }
 }
 
+/// Server-Sent Events bridge for live step logs.
+///
+/// Opens a gRPC `StreamStepLogs` call and emits each chunk as an SSE
+/// `log` event carrying `{ step_id, data, is_final }`. Browsers can
+/// consume it with `new EventSource('/api/repos/:repo/runs/:id/logs')`.
+///
+/// The browser's `EventSource` can't attach custom auth headers, but it
+/// does forward cookies — the session_token_layer middleware picks the
+/// session cookie up and our gRPC interceptor injects the bearer token.
+/// Query `?step=<id>` to filter to a single step.
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    #[serde(default)]
+    step: i64,
+    #[serde(default)]
+    no_follow: bool,
+}
+
+pub async fn stream_run_logs(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, run_id)): Path<(String, i64)>,
+    Query(q): Query<LogsQuery>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let stream = match grpc.stream_step_logs(run_id, q.step, q.no_follow).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(e),
+    };
+
+    // Adapt tonic chunks → SSE events. Log data is raw bytes; convert with
+    // `from_utf8_lossy` so control bytes in compiler output don't kill the
+    // event. The browser side decodes the JSON payload, not the raw text.
+    let events = stream.map(|item| match item {
+        Ok(chunk) => {
+            let payload = serde_json::json!({
+                "step_id": chunk.step_id,
+                "data": String::from_utf8_lossy(&chunk.data),
+                "is_final": chunk.is_final,
+            });
+            Event::default().event("log").json_data(payload)
+        }
+        Err(e) => {
+            let payload = serde_json::json!({ "error": e.message() });
+            Event::default().event("error").json_data(payload)
+        }
+    });
+
+    Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
 pub async fn cancel_run(
     State(state): State<Arc<AppState>>,
     Path((_repo, run_id)): Path<(String, i64)>,

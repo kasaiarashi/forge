@@ -44,6 +44,12 @@ pub struct StepDef {
     pub name: String,
     /// Shell command to run.
     pub run: Option<String>,
+    /// Explicit shell for the command. One of: `sh`, `bash`, `cmd`,
+    /// `powershell`, `pwsh`. Unset → host default (`cmd` on Windows,
+    /// `sh` elsewhere). Authors who want portable workflows should pin
+    /// this so `$VAR` vs `%VAR%` ambiguity can't bite on a Windows runner.
+    #[serde(default)]
+    pub shell: Option<String>,
     /// Upload an artifact.
     pub artifact: Option<ArtifactDef>,
     /// Create a release.
