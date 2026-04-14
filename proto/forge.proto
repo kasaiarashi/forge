@@ -227,6 +227,9 @@ service ForgeService {
     rpc UploadArtifact(stream UploadArtifactChunk) returns (UploadArtifactResponse);
     rpc DownloadArtifact(DownloadArtifactRequest) returns (stream ArtifactChunk);
     rpc GetArtifactSignedUrl(GetArtifactSignedUrlRequest) returns (GetArtifactSignedUrlResponse);
+    // Live step-log tail. Emits the persisted log first (catch-up) then
+    // switches to live chunks via the in-memory broadcast hub.
+    rpc StreamStepLogs(StreamStepLogsRequest) returns (stream StepLogChunk);
 
     // Issues
     rpc ListIssues(ListIssuesRequest) returns (ListIssuesResponse);
@@ -272,6 +275,19 @@ message UploadArtifactResponse {
 
 message DownloadArtifactRequest { int64 artifact_id = 1; }
 message ArtifactChunk { bytes data = 1; }
+
+message StreamStepLogsRequest {
+    int64 run_id = 1;
+    // Optional: filter to a single step. 0 = all steps in the run.
+    int64 step_id = 2;
+    // When true, don't follow — replay persisted log then end stream.
+    bool no_follow = 3;
+}
+message StepLogChunk {
+    int64 step_id = 1;
+    bytes data = 2;
+    bool is_final = 3;
+}
 
 message GetArtifactSignedUrlRequest {
     int64 artifact_id = 1;

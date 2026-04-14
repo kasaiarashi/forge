@@ -47,6 +47,9 @@ pub struct ForgeGrpcService {
     /// Master key, used to sign short-lived artifact download URLs for the
     /// web UI. Held as raw bytes so the signer module stays dep-free.
     pub artifact_signer_key: [u8; 32],
+    /// Live step-log broadcast hub. Engine/agents publish per-run chunks;
+    /// `StreamStepLogs` subscribers tail them.
+    pub log_hub: Arc<crate::services::logs::LogHub>,
 }
 
 /// Normalize a repo identifier into the canonical `<owner>/<name>` form
@@ -129,6 +132,7 @@ fn is_ancestor_or_equal(os: &ObjectStore, ancestor: &ForgeHash, descendant: &For
 impl ForgeService for ForgeGrpcService {
     type PullObjectsStream = ReceiverStream<Result<ObjectChunk, Status>>;
     type DownloadArtifactStream = Pin<Box<dyn futures::Stream<Item = Result<ArtifactChunk, Status>> + Send>>;
+    type StreamStepLogsStream = Pin<Box<dyn futures::Stream<Item = Result<StepLogChunk, Status>> + Send>>;
 
     async fn push_objects(
         &self,
@@ -1926,6 +1930,79 @@ impl ForgeService for ForgeGrpcService {
                     .map_err(|e| Status::internal(format!("read: {e}")))?;
                 if n == 0 { break; }
                 yield ArtifactChunk { data: buf[..n].to_vec() };
+            }
+        };
+        Ok(Response::new(Box::pin(out)))
+    }
+
+    async fn stream_step_logs(
+        &self,
+        request: Request<StreamStepLogsRequest>,
+    ) -> Result<Response<Self::StreamStepLogsStream>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+
+        let run = self
+            .db
+            .get_run(req.run_id)
+            .map_err(|e| internal_err("stream_logs_run", e))?
+            .ok_or_else(|| Status::not_found("run not found"))?;
+        require_repo_read(&caller, &self.user_store, &run.repo, false)?;
+
+        // DB catch-up: pull whatever's already persisted. Filter to one
+        // step when caller asked for a specific one.
+        let steps = self
+            .db
+            .list_steps(req.run_id)
+            .map_err(|e| internal_err("stream_logs_steps", e))?;
+        let want_step = req.step_id;
+        let mut initial: Vec<StepLogChunk> = Vec::new();
+        for s in &steps {
+            if want_step != 0 && s.id != want_step {
+                continue;
+            }
+            if !s.log.is_empty() {
+                initial.push(StepLogChunk {
+                    step_id: s.id,
+                    data: s.log.as_bytes().to_vec(),
+                    is_final: s.status == "success"
+                        || s.status == "failure"
+                        || s.status == "cancelled",
+                });
+            }
+        }
+
+        // If the run is finished or caller said no-follow, just replay and
+        // close. Otherwise subscribe for live tail.
+        let run_done = run.status == "success"
+            || run.status == "failure"
+            || run.status == "cancelled";
+
+        if req.no_follow || run_done {
+            let out = async_stream::try_stream! {
+                for c in initial { yield c; }
+            };
+            return Ok(Response::new(Box::pin(out)));
+        }
+
+        let mut rx = self.log_hub.subscribe(req.run_id);
+        let out = async_stream::try_stream! {
+            for c in initial { yield c; }
+            loop {
+                match rx.recv().await {
+                    Ok(chunk) => {
+                        if want_step != 0 && chunk.step_id != want_step { continue; }
+                        yield StepLogChunk {
+                            step_id: chunk.step_id,
+                            data: chunk.data,
+                            is_final: chunk.is_final,
+                        };
+                    }
+                    // Lagging subscribers get a `Lagged` — keep going; the
+                    // DB fallback on reconnect covers the gap.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         };
         Ok(Response::new(Box::pin(out)))

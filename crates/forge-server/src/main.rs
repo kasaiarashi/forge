@@ -465,6 +465,10 @@ pub(crate) async fn serve_inner(
         config.artifacts.retention.clone(),
     );
 
+    // Live step-log broadcast hub. Engine + (future) agents publish;
+    // StreamStepLogs readers subscribe.
+    let log_hub = Arc::new(services::logs::LogHub::new());
+
     // Workflow engine is opt-in. See [actions] in forge-server.toml; the
     // post-audit default is OFF because steps run shell commands as the
     // forge-server process user.
@@ -479,6 +483,7 @@ pub(crate) async fn serve_inner(
             Arc::clone(&db),
             Arc::clone(&fs),
             Arc::clone(&secrets),
+            Arc::clone(&log_hub),
         );
         info!("Actions engine started (executor: {})", config.actions.executor);
         Some(tx)
@@ -495,6 +500,7 @@ pub(crate) async fn serve_inner(
         secrets: Arc::clone(&secrets),
         artifacts: Arc::clone(&artifacts),
         artifact_signer_key: master_key,
+        log_hub: Arc::clone(&log_hub),
     };
 
     let addr: std::net::SocketAddr = config.server.listen.parse()?;

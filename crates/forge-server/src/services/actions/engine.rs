@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::config::ServerConfig;
+use crate::services::logs::{LogChunk, LogHub};
 use crate::services::secrets::mask::Mask;
 use crate::services::secrets::SecretBackend;
 use crate::storage::db::MetadataDb;
@@ -27,6 +28,7 @@ pub fn start(
     db: Arc<MetadataDb>,
     fs: Arc<FsStorage>,
     secrets: Arc<dyn SecretBackend>,
+    log_hub: Arc<LogHub>,
 ) -> mpsc::Sender<i64> {
     let (tx, rx) = mpsc::channel::<i64>(64);
 
@@ -41,6 +43,7 @@ pub fn start(
         db,
         fs,
         secrets,
+        log_hub,
         workspaces_path,
         artifacts_path,
     ));
@@ -52,6 +55,7 @@ async fn run_loop(
     db: Arc<MetadataDb>,
     fs: Arc<FsStorage>,
     secrets: Arc<dyn SecretBackend>,
+    log_hub: Arc<LogHub>,
     workspaces_path: PathBuf,
     artifacts_path: PathBuf,
 ) {
@@ -61,6 +65,7 @@ async fn run_loop(
             &db,
             &fs,
             secrets.as_ref(),
+            log_hub.as_ref(),
             &workspaces_path,
             &artifacts_path,
         )
@@ -69,6 +74,7 @@ async fn run_loop(
             error!("Workflow run {} failed: {}", run_id, e);
             let _ = db.update_run_status(run_id, "failure");
         }
+        log_hub.close(run_id);
     }
 }
 
@@ -77,6 +83,7 @@ async fn execute_run(
     db: &MetadataDb,
     fs: &FsStorage,
     secrets: &dyn SecretBackend,
+    log_hub: &LogHub,
     workspaces_path: &PathBuf,
     artifacts_path: &PathBuf,
 ) -> Result<()> {
@@ -146,19 +153,30 @@ async fn execute_run(
                 // `curl -u user:$TOKEN`). The mask covers the log side so we
                 // don't leak the plaintext back into DB rows.
                 let expanded_cmd = expand_secret_refs(cmd, &resolved_env);
-                let result = execute_command(&expanded_cmd, &workspace_dir, &resolved_env, &run).await;
+                let result = execute_command_streaming(
+                    &expanded_cmd,
+                    &workspace_dir,
+                    &resolved_env,
+                    &run,
+                    run_id,
+                    step_id,
+                    log_hub,
+                    &mask,
+                )
+                .await;
                 match result {
                     Ok((exit_code, output)) => {
                         let status = if exit_code == 0 { "success" } else { "failure" };
-                        let masked = mask.apply(&output);
-                        db.update_step(step_id, status, Some(exit_code), &masked)?;
+                        // Output is already masked by the streaming capture.
+                        db.update_step(step_id, status, Some(exit_code), &output)?;
                         if exit_code != 0 {
                             all_success = false;
                             break;
                         }
                     }
                     Err(e) => {
-                        db.update_step(step_id, "failure", Some(-1), &e.to_string())?;
+                        let msg = mask.apply(&e.to_string());
+                        db.update_step(step_id, "failure", Some(-1), &msg)?;
                         all_success = false;
                         break;
                     }
@@ -199,11 +217,15 @@ async fn execute_run(
     Ok(())
 }
 
-async fn execute_command(
+async fn execute_command_streaming(
     cmd: &str,
     working_dir: &std::path::Path,
     env_vars: &std::collections::HashMap<String, String>,
     run: &crate::services::actions::db::RunRecord,
+    run_id: i64,
+    step_id: i64,
+    log_hub: &LogHub,
+    mask: &Mask,
 ) -> Result<(i32, String)> {
     let (shell, flag) = if cfg!(target_os = "windows") {
         ("cmd", "/C")
@@ -221,30 +243,86 @@ async fn execute_command(
         .env("FORGE_REF", &run.trigger_ref)
         .env("FORGE_COMMIT", &run.commit_hash)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        // Kill the child when this task is dropped (e.g. server shutdown).
+        // Without this a hung `sleep infinity` keeps the process alive
+        // even after forge-server exits.
+        .kill_on_drop(true);
 
     for (k, v) in env_vars {
         command.env(k, v);
     }
 
-    let timeout = std::time::Duration::from_secs(30 * 60); // 30 minute step timeout
-    let output = match tokio::time::timeout(timeout, command.output()).await {
-        Ok(result) => result?,
-        Err(_) => anyhow::bail!("step timed out after 30 minutes"),
-    };
-    let exit_code = output.status.code().unwrap_or(-1);
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut log = stdout.to_string();
-    if !stderr.is_empty() {
-        if !log.is_empty() {
-            log.push('\n');
+    let sender = log_hub.sender(run_id);
+    let acc = Arc::new(tokio::sync::Mutex::new(String::new()));
+
+    let stdout_task = tokio::spawn(forward_stream(stdout, sender.clone(), step_id, run_id, mask.clone_values(), Arc::clone(&acc)));
+    let stderr_task = tokio::spawn(forward_stream(stderr, sender.clone(), step_id, run_id, mask.clone_values(), Arc::clone(&acc)));
+
+    let timeout = std::time::Duration::from_secs(30 * 60);
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(r) => r?,
+        Err(_) => {
+            let _ = child.start_kill();
+            anyhow::bail!("step timed out after 30 minutes");
         }
-        log.push_str(&stderr);
-    }
+    };
 
-    Ok((exit_code, log))
+    // Drain readers before reading the accumulator.
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+
+    let exit_code = status.code().unwrap_or(-1);
+    let log_str = acc.lock().await.clone();
+
+    // Final sentinel chunk so live tailers know the step ended.
+    let _ = sender.send(LogChunk {
+        run_id,
+        step_id,
+        data: Vec::new(),
+        is_final: true,
+    });
+
+    Ok((exit_code, log_str))
+}
+
+async fn forward_stream<R>(
+    reader: R,
+    sender: tokio::sync::broadcast::Sender<LogChunk>,
+    step_id: i64,
+    run_id: i64,
+    mask_values: Vec<String>,
+    acc: Arc<tokio::sync::Mutex<String>>,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+    let mut reader = reader;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mask = Mask::new(mask_values);
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        // Apply mask *before* broadcasting or persisting so no subscriber
+        // ever sees the raw secret, even in the narrow window between
+        // capture and DB persist at step end.
+        let chunk_str = String::from_utf8_lossy(&buf[..n]).to_string();
+        let masked = mask.apply(&chunk_str);
+        acc.lock().await.push_str(&masked);
+        let _ = sender.send(LogChunk {
+            run_id,
+            step_id,
+            data: masked.into_bytes(),
+            is_final: false,
+        });
+    }
 }
 
 fn collect_artifact(

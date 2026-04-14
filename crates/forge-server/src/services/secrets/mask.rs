@@ -25,6 +25,13 @@ impl Mask {
         Self { values: v }
     }
 
+    /// Clone the raw masked values. Used when spawning per-stream masker
+    /// clones without wrapping Mask in Arc (the values list is tiny — a
+    /// handful of strings per run).
+    pub fn clone_values(&self) -> Vec<String> {
+        self.values.clone()
+    }
+
     pub fn apply(&self, s: &str) -> String {
         if self.values.is_empty() {
             return s.to_string();
