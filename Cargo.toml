@@ -57,6 +57,8 @@ globset = "0.4"
 bytes = "1"
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
 # Internal
 forge-core = { path = "crates/forge-core" }
 forge-diff = { path = "crates/forge-diff" }

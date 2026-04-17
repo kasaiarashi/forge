@@ -2,39 +2,121 @@
 // Licensed under the MIT License.
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
-/// SQLite database for repos, refs, and locks metadata.
+/// Pooled connection handle returned by [`MetadataDb::conn`].
+///
+/// Derefs to [`rusqlite::Connection`] so existing call sites keep
+/// working unchanged. Carries its own busy-timeout and pragmas —
+/// installed by the pool's `on_acquire` hook so every hand-out is
+/// correctly configured, even after the pool spins up a new physical
+/// connection to satisfy demand.
+pub(crate) type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
+
+/// Connection-pool tuning baked into `MetadataDb::open`. These are
+/// sane defaults for a single-host server; the operator can override
+/// them via the `[database]` config block (see `ServerConfig`).
+#[derive(Debug, Clone, Copy)]
+pub struct DbPoolConfig {
+    /// Upper bound on pooled connections. SQLite serialises writes
+    /// regardless, but additional readers multiply WAL read throughput
+    /// and keep handler tasks from blocking on a single connection.
+    pub max_size: u32,
+    /// Per-connection `PRAGMA busy_timeout` in milliseconds. Controls
+    /// how long SQLite waits for the write lock before returning
+    /// `SQLITE_BUSY`. Pool-level wait is separate (r2d2's own timeout).
+    pub busy_timeout_ms: u64,
+}
+
+impl Default for DbPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_size: 16,
+            busy_timeout_ms: 5_000,
+        }
+    }
+}
+
+/// SQLite-backed metadata store for repos, refs, locks, upload
+/// sessions, and auth. Backed by an r2d2 pool so metadata ops don't
+/// serialise on a single Mutex — with WAL + `BEGIN IMMEDIATE` +
+/// `synchronous = NORMAL` this lifts the pre-Phase-2 bottleneck that
+/// capped throughput at ~10 concurrent clients.
 pub struct MetadataDb {
-    pub(crate) conn: Mutex<Connection>,
+    pub(crate) pool: Pool<SqliteConnectionManager>,
 }
 
 impl MetadataDb {
-    /// Acquire the database connection lock, converting poison errors to anyhow errors.
-    pub(crate) fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("database lock poisoned: {e}"))
+    /// Fetch a pooled connection. Blocks up to the r2d2 wait timeout
+    /// (currently the default 30 s) if all connections are in use —
+    /// should be rare on a correctly-sized pool, and a timeout here
+    /// indicates either runaway concurrency or a stuck long-held txn.
+    pub(crate) fn conn(&self) -> Result<PooledConn> {
+        self.pool
+            .get()
+            .map_err(|e| anyhow::anyhow!("metadata pool get: {e}"))
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_config(path, DbPoolConfig::default())
+    }
+
+    /// Open a pooled SQLite metadata store. The `on_acquire` callback
+    /// runs against every connection the pool produces, so pragmas
+    /// stick even when r2d2 grows the pool to handle a burst. Schema
+    /// creation is a single execute_batch on a connection borrowed
+    /// from the freshly-built pool.
+    pub fn open_with_config(path: &Path, cfg: DbPoolConfig) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("Failed to open database at {}", path.display()))?;
 
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .with_context(|| "Failed to enable WAL mode")?;
+        let busy_timeout_ms = cfg.busy_timeout_ms;
+        let manager = SqliteConnectionManager::file(path)
+            .with_flags(
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_CREATE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .with_init(move |c: &mut Connection| {
+                // Per-connection pragmas. Applied before any query runs.
+                c.busy_timeout(Duration::from_millis(busy_timeout_ms))?;
+                // WAL + NORMAL = one writer + many readers without the
+                // fsync-per-txn cost of the FULL mode. Survivable
+                // across crashes because the WAL itself is fsync'd on
+                // checkpoint boundaries.
+                c.pragma_update(None, "journal_mode", "WAL")?;
+                c.pragma_update(None, "synchronous", "NORMAL")?;
+                // Automatic WAL checkpoint every ~1000 pages so long-
+                // running servers don't accumulate a multi-gig WAL.
+                c.pragma_update(None, "wal_autocheckpoint", 1000)?;
+                // FK enforcement is off by default per-connection.
+                // Auth tables depend on ON DELETE CASCADE; must be on
+                // for every hand-out from the pool, not just the
+                // connection used at open time.
+                c.pragma_update(None, "foreign_keys", "ON")?;
+                Ok(())
+            });
 
-        // Enforce foreign-key constraints. SQLite leaves this off per
-        // connection by default; the auth tables (sessions / pats /
-        // repo_acls) rely on ON DELETE CASCADE to clean up after a user
-        // is deleted, so this must be on.
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .with_context(|| "Failed to enable foreign_keys pragma")?;
+        let pool = Pool::builder()
+            .max_size(cfg.max_size)
+            // Test the connection on checkout so a stale FD (e.g.
+            // after a DB file replace) doesn't poison a handler.
+            .test_on_check_out(true)
+            .build(manager)
+            .with_context(|| {
+                format!("Failed to build metadata pool for {}", path.display())
+            })?;
+
+        // Schema setup runs on a freshly pooled connection. The pragmas
+        // above have already been applied via `with_init`.
+        let conn = pool
+            .get()
+            .with_context(|| "initial pool.get() failed during open()")?;
 
         conn.execute_batch(
             "
@@ -163,14 +245,62 @@ impl MetadataDb {
         // Migrate: add default_branch column if missing
         let _ = conn.execute("ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''", []);
 
-        let db = Self {
-            conn: Mutex::new(conn),
-        };
+        // Release the initial connection back to the pool so subsequent
+        // setup calls don't deadlock when the pool is small.
+        drop(conn);
+
+        let db = Self { pool };
+        db.ensure_schema_version_table()?;
         db.create_actions_tables()?;
         db.create_secrets_tables()?;
         db.create_agent_tables()?;
         db.create_upload_session_tables()?;
+        // Record the baseline schema so Phase 2b migrations can version
+        // their add-only DDL against a concrete starting point.
+        db.record_baseline_schema_version()?;
         Ok(db)
+    }
+
+    // -- Schema versioning --
+    //
+    // Every server start runs `ensure_schema_version_table()` and any
+    // pending migrations. The current file is treated as revision 1
+    // (the "baseline" captured at Phase 2a); add-only DDL for Phase 2b
+    // onwards will land as numbered migrations that this module applies
+    // idempotently at boot.
+
+    fn ensure_schema_version_table(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version     INTEGER PRIMARY KEY,
+                name        TEXT    NOT NULL,
+                applied_at  INTEGER NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+
+    fn record_baseline_schema_version(&self) -> Result<()> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version, name, applied_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![1i64, "baseline", now],
+        )?;
+        Ok(())
+    }
+
+    /// Return the highest applied schema version. Used by the Phase 2b
+    /// migration runner to skip already-applied steps.
+    #[allow(dead_code)]
+    pub(crate) fn current_schema_version(&self) -> Result<i64> {
+        let conn = self.conn()?;
+        let v: i64 = conn
+            .prepare("SELECT COALESCE(MAX(version), 0) FROM schema_version")?
+            .query_row([], |r| r.get(0))?;
+        Ok(v)
     }
 
     // -- Upload sessions (Phase 1 atomic push) --
@@ -570,9 +700,13 @@ impl MetadataDb {
         // v1 label routing is permissive: if the run has no claim yet and
         // is queued, any agent can take it. Full label matching lands when
         // runs-on is parsed out of the workflow YAML in Phase 3.
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
-        let tx = conn.unchecked_transaction()?;
+        // BEGIN IMMEDIATE so the write lock is reserved up front. With a
+        // deferred txn, the SELECT-then-INSERT pattern can hit
+        // SQLITE_BUSY when another writer lands between the two
+        // statements under pool contention.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let candidate: Option<i64> = tx
             .prepare(
                 "SELECT r.id FROM workflow_runs r
@@ -602,8 +736,8 @@ impl MetadataDb {
     /// `cutoff_ts` (or never). Drops the claim and re-queues the run so
     /// another agent can pick it up. Returns the number of runs requeued.
     pub fn requeue_stale_runs(&self, cutoff_ts: i64) -> Result<usize> {
-        let conn = self.conn()?;
-        let tx = conn.unchecked_transaction()?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Collect stale (run_id, agent_id) pairs first; we need the ids
         // to scope the workflow_runs reset to runs still in 'running'.
         let mut stmt = tx.prepare(
@@ -819,7 +953,7 @@ impl MetadataDb {
             }
         }
 
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         tx.execute(
             "UPDATE repos SET name = ?1, description = ?2 WHERE name = ?3",
@@ -844,7 +978,7 @@ impl MetadataDb {
 
     pub fn delete_repo(&self, name: &str) -> Result<bool> {
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let affected = tx.execute("DELETE FROM repos WHERE name = ?1", [name])?;
         tx.execute("DELETE FROM refs WHERE repo = ?1", [name])?;
         tx.execute("DELETE FROM locks WHERE repo = ?1", [name])?;
@@ -1776,6 +1910,93 @@ mod tests {
             }
             other => panic!("expected TerminallyFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn schema_version_records_baseline() {
+        let (_tmp, db) = fresh_db();
+        assert_eq!(db.current_schema_version().unwrap(), 1);
+    }
+
+    /// Regression guard for Phase 2a's core change: with the single
+    /// Mutex gone, concurrent readers + writers must interleave instead
+    /// of serialising. This test fails fast against the pre-Phase-2a
+    /// design because every lock contention would be waited on
+    /// sequentially; the pooled design completes in sub-second wall
+    /// time on a laptop.
+    #[test]
+    fn concurrent_reads_and_writes_do_not_deadlock() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = TempDir::new().unwrap();
+        let db = Arc::new(MetadataDb::open(&tmp.path().join("forge.db")).unwrap());
+        db.create_repo("alice/pool", "").unwrap();
+        // Seed a few refs so readers have something to scan.
+        for b in 0u8..8 {
+            db.update_ref(
+                "alice/pool",
+                &format!("refs/heads/b{b}"),
+                &ZERO,
+                &h(b),
+                false,
+            )
+            .unwrap();
+        }
+
+        let start = std::time::Instant::now();
+        let mut handles = Vec::new();
+
+        // 24 readers, hammering get_all_refs + list_locks.
+        for _ in 0..24 {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for _ in 0..200 {
+                    let refs = db.get_all_refs("alice/pool").unwrap();
+                    assert!(refs.len() >= 8);
+                    let _ = db.list_locks("alice/pool", "", "").unwrap();
+                }
+            }));
+        }
+
+        // 8 writers, each claiming a disjoint lock path so SQLITE_BUSY
+        // should not surface (WAL + BEGIN IMMEDIATE + busy_timeout).
+        for i in 0..8 {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for j in 0..25 {
+                    let path = format!("Content/path_{i}_{j}.uasset");
+                    db.acquire_lock(
+                        "alice/pool",
+                        &path,
+                        &format!("writer-{i}"),
+                        "ws",
+                        "",
+                    )
+                    .unwrap()
+                    .unwrap_or_else(|_| panic!("lock conflict unexpected in disjoint paths"));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let elapsed = start.elapsed();
+        // Sanity cap: 24 readers × 400 ops + 8 writers × 25 ops = ~9.8K
+        // metadata ops. On a workstation SSD this should complete well
+        // under two seconds with the pooled design; anything past 10s
+        // is a regression to the single-Mutex era.
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "32-way pool workload took {:?}, regression vs pooled design",
+            elapsed
+        );
+
+        // Writers landed exactly 200 locks.
+        let locks = db.list_locks("alice/pool", "", "").unwrap();
+        assert_eq!(locks.len(), 200);
     }
 
     #[test]

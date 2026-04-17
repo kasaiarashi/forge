@@ -35,6 +35,64 @@ pub struct ServerConfig {
     /// Push / object-transfer limits.
     #[serde(default)]
     pub limits: LimitsSection,
+
+    /// Metadata database backend and pool tuning.
+    #[serde(default)]
+    pub database: DatabaseSection,
+}
+
+/// Metadata backend configuration. The default is SQLite with pooled
+/// connections so the server starts with zero external dependencies but
+/// no longer serialises every write on a single Mutex. Postgres lands
+/// behind the same section in Phase 2b.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseSection {
+    /// Backend selector. `"sqlite"` (default) uses the path at
+    /// `storage.db_path`. `"postgres"` is reserved for Phase 2b and
+    /// consults `url`.
+    #[serde(default = "default_db_backend")]
+    pub backend: String,
+
+    /// Connection string. Ignored for the SQLite backend (uses
+    /// `storage.db_path`); required for Postgres.
+    #[serde(default)]
+    pub url: String,
+
+    /// Max pool size. SQLite uses WAL so many readers are cheap; a single
+    /// writer still serialises on the DB file, but `BEGIN IMMEDIATE`
+    /// prevents the write-starvation that deferred txns suffered under
+    /// the old Mutex design. Default 16 is generous for a single-host
+    /// deploy.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+
+    /// How long (ms) a pooled connection waits for the SQLite write lock
+    /// before erroring. `busy_timeout` inside SQLite — not an r2d2 wait.
+    /// 5 s is enough to ride out a batch-push burst; longer risks
+    /// gRPC-side client timeouts.
+    #[serde(default = "default_busy_timeout_ms")]
+    pub busy_timeout_ms: u64,
+}
+
+fn default_db_backend() -> String {
+    "sqlite".into()
+}
+fn default_max_connections() -> u32 {
+    16
+}
+fn default_busy_timeout_ms() -> u64 {
+    5_000
+}
+
+impl Default for DatabaseSection {
+    fn default() -> Self {
+        Self {
+            backend: default_db_backend(),
+            url: String::new(),
+            max_connections: default_max_connections(),
+            busy_timeout_ms: default_busy_timeout_ms(),
+        }
+    }
 }
 
 /// Size + time ceilings applied to push and upload-session handling.
@@ -414,6 +472,7 @@ impl Default for ServerConfig {
             artifacts: ArtifactsSection::default(),
             logging: LoggingSection::default(),
             limits: LimitsSection::default(),
+            database: DatabaseSection::default(),
         }
     }
 }
