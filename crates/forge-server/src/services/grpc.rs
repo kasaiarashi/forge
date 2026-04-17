@@ -18,7 +18,8 @@ use crate::auth::authorize::{
 };
 use crate::auth::interceptor::caller_of;
 use crate::auth::UserStore;
-use crate::storage::db::MetadataDb;
+use crate::config::LimitsSection;
+use crate::storage::db::{CommitSessionOutcome, MetadataDb, RefUpdateSpec};
 use crate::storage::fs::FsStorage;
 
 /// Log the raw error server-side and return a generic `Status::internal`.
@@ -51,6 +52,9 @@ pub struct ForgeGrpcService {
     /// Live step-log broadcast hub. Engine/agents publish per-run chunks;
     /// `StreamStepLogs` subscribers tail them.
     pub log_hub: Arc<crate::services::logs::LogHub>,
+    /// Push/upload limits applied inside push_objects + commit_push. Owned
+    /// so the service doesn't need to keep a borrow on ServerConfig.
+    pub limits: LimitsSection,
 }
 
 /// Normalize a repo identifier into the canonical `<owner>/<name>` form
@@ -90,6 +94,75 @@ impl ForgeGrpcService {
         let store = self.fs.repo_store(repo);
         ObjectStore::new(store.root().to_path_buf())
     }
+}
+
+/// Cheap syntactic check on an upload session identifier. Clients
+/// generate UUIDv7 values; we refuse anything that could escape a
+/// filesystem path or collide with the `_staging` sentinel we use for
+/// session roots. Keeps a sweeper from ever recursing outside the repo's
+/// staging tree because a malicious client named its session `../../etc`.
+fn validate_session_id(sid: &str) -> Result<(), Status> {
+    if sid.is_empty() || sid.len() > 128 {
+        return Err(Status::invalid_argument(
+            "upload_session_id must be 1..=128 chars",
+        ));
+    }
+    // ASCII alphanumerics, dashes, underscores only. UUIDs satisfy this.
+    if !sid
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(Status::invalid_argument(
+            "upload_session_id must be alphanumerics, '-', or '_'",
+        ));
+    }
+    Ok(())
+}
+
+/// Flatten the tree rooted at `snapshot_hash` to a map of path -> hash.
+/// An all-zero snapshot_hash yields an empty map (used for "create
+/// branch" and "delete branch" flows so the diff degenerates to one
+/// side).
+fn flatten_snapshot_tree(
+    os: &ObjectStore,
+    snapshot_hash: &[u8],
+) -> Result<std::collections::BTreeMap<String, (ForgeHash, u64)>, anyhow::Error> {
+    if snapshot_hash.iter().all(|&b| b == 0) {
+        return Ok(Default::default());
+    }
+    let fh = ForgeHash::from_hex(&hex::encode(snapshot_hash))?;
+    let snap = match os.get_snapshot(&fh) {
+        Ok(s) => s,
+        Err(e) => return Err(anyhow::anyhow!("get snapshot: {e}")),
+    };
+    let root = match os.get_tree(&snap.tree) {
+        Ok(t) => t,
+        Err(e) => return Err(anyhow::anyhow!("get tree: {e}")),
+    };
+    let getter = |h: &ForgeHash| os.get_tree(h).ok();
+    Ok(forge_core::diff::flatten_tree(&root, "", &getter))
+}
+
+/// Paths added / removed / modified between `old_hash` and `new_hash`
+/// snapshots. Used by the CommitPush lock-gate.
+fn compute_touched_paths(
+    os: &ObjectStore,
+    old_hash: &[u8],
+    new_hash: &[u8],
+) -> Result<Vec<String>, anyhow::Error> {
+    let old = flatten_snapshot_tree(os, old_hash)?;
+    let new = flatten_snapshot_tree(os, new_hash)?;
+    let changes = forge_core::diff::diff_maps(&old, &new);
+    let mut paths = Vec::with_capacity(changes.len());
+    for c in changes {
+        let p = match c {
+            forge_core::diff::DiffEntry::Added { path, .. }
+            | forge_core::diff::DiffEntry::Deleted { path, .. }
+            | forge_core::diff::DiffEntry::Modified { path, .. } => path,
+        };
+        paths.push(p);
+    }
+    Ok(paths)
 }
 
 /// Return true if `ancestor` is reachable from `descendant` via parent links
@@ -141,141 +214,506 @@ impl ForgeService for ForgeGrpcService {
     ) -> Result<Response<PushResponse>, Status> {
         let caller = caller_of(&request);
         let mut stream = request.into_inner();
+
+        // Bytes received, per object, identified by hash. Accumulated
+        // incrementally to staging — only held in memory long enough for a
+        // single gRPC chunk. For objects that arrive in one chunk we write
+        // once; for multi-chunk objects we append. Either way, the whole
+        // object never lives in RAM at once, which is what lets us lift
+        // the 512 MiB cap.
         let mut received: Vec<Vec<u8>> = Vec::new();
-        // Buffer for reassembling multi-chunk objects.
-        let mut current_buf: Vec<u8> = Vec::new();
-        let mut current_hash: Option<Vec<u8>> = None;
-        let mut store: Option<forge_core::store::chunk_store::ChunkStore> = None;
+        let mut seen_hashes: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
-        // Channel for handing completed objects to background disk writers.
-        // The stream loop validates and reassembles; writers do the slow I/O.
-        let (write_tx, write_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>, bool)>(8);
+        // Session state, bound on the first chunk.
+        let mut session_id: Option<String> = None;
+        let mut repo_full: Option<String> = None;
+        let mut staging: Option<crate::storage::fs::StagingStore> = None;
+        // Tracks which hashes already had `StagingStore::ensure_shard_dirs`
+        // amortised, and multi-chunk accumulators per hash.
+        let mut pending_multichunk: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+            std::collections::HashMap::new();
 
-        // Spawn a pool of blocking writer threads (one per CPU core, capped at 8).
-        let num_writers = rayon::current_num_threads().min(8);
-        let write_rx = Arc::new(write_rx);
-        let write_error: Arc<std::sync::Mutex<Option<String>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let mut writer_handles = Vec::with_capacity(num_writers);
-        // Store is set on first chunk; writers wait on the channel so this is fine.
-        let store_slot: Arc<tokio::sync::OnceCell<forge_core::store::chunk_store::ChunkStore>> =
-            Arc::new(tokio::sync::OnceCell::new());
-
-        for _ in 0..num_writers {
-            let rx = Arc::clone(&write_rx);
-            let err = Arc::clone(&write_error);
-            let slot = Arc::clone(&store_slot);
-            writer_handles.push(std::thread::spawn(move || {
-                while let Ok((hash, data, pre_compressed)) = rx.recv() {
-                    // Wait for store to be set (happens on first chunk).
-                    let s = loop {
-                        if let Some(s) = slot.get() {
-                            break s;
-                        }
-                        std::thread::yield_now();
-                    };
-                    let result: Result<(), _> = if pre_compressed {
-                        s.put_raw_direct(&hash, &data)
-                    } else {
-                        s.put(&hash, &data).map(|_| ())
-                    };
-                    if let Err(e) = result {
-                        let mut guard = err.lock().unwrap();
-                        if guard.is_none() {
-                            *guard = Some(e.to_string());
-                        }
-                        break;
-                    }
-                }
-            }));
-        }
+        let max_object_size = self.limits.max_object_size;
+        let ttl = self.limits.upload_session_ttl_seconds;
 
         while let Some(chunk) = stream
             .message()
             .await
             .map_err(|e| internal_err("grpc", e))?
         {
-            // Read repo from the first chunk.
-            if store.is_none() {
+            // First chunk: bind session, authorise, allocate staging dir.
+            if session_id.is_none() {
+                if chunk.upload_session_id.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "upload_session_id is required on the first chunk of a push",
+                    ));
+                }
+                validate_session_id(&chunk.upload_session_id)?;
                 let repo = resolve_repo(&chunk.repo, &caller)?;
                 require_repo_write(&caller, &self.user_store, &repo)?;
-                self.db.create_repo(&repo, "")
+                self.db
+                    .create_repo(&repo, "")
                     .map_err(|e| internal_err("failed to register repo", e))?;
-                let s = self.fs.repo_store(&repo);
-                // Pre-create all 256 shard dirs so writers skip create_dir_all per object.
-                s.ensure_shard_dirs()
-                    .map_err(|e| internal_err("shard dirs", e))?;
-                let _ = store_slot.set(self.fs.repo_store(&repo));
-                store = Some(s);
+                self.db
+                    .create_upload_session(
+                        &chunk.upload_session_id,
+                        &repo,
+                        caller.user_id(),
+                        ttl,
+                    )
+                    .map_err(|e| internal_err("create upload session", e))?;
+                // Guard against cross-session writes: if the session
+                // already existed and belongs to a different repo, reject.
+                if let Some(existing) = self
+                    .db
+                    .get_upload_session(&chunk.upload_session_id)
+                    .map_err(|e| internal_err("get upload session", e))?
+                {
+                    if existing.repo != repo {
+                        return Err(Status::permission_denied(
+                            "upload session belongs to a different repo",
+                        ));
+                    }
+                    if existing.state != "uploading" {
+                        return Err(Status::failed_precondition(format!(
+                            "upload session is '{}' — start a new one",
+                            existing.state
+                        )));
+                    }
+                }
+                let st = self.fs.session_staging_store(&repo, &chunk.upload_session_id);
+                st.ensure_shard_dirs()
+                    .map_err(|e| internal_err("staging shard dirs", e))?;
+                staging = Some(st);
+                repo_full = Some(repo);
+                session_id = Some(chunk.upload_session_id.clone());
+            } else if chunk.upload_session_id != *session_id.as_ref().unwrap() {
+                return Err(Status::invalid_argument(
+                    "upload_session_id must be identical across all chunks of a push",
+                ));
             }
 
-            if current_hash.as_ref() != Some(&chunk.hash) {
-                current_buf.clear();
-                current_hash = Some(chunk.hash.clone());
+            let st = staging.as_ref().expect("staging bound above");
+
+            // Per-object size guard. Checked against `total_size` declared
+            // by the client so we can reject before burning disk.
+            if chunk.total_size > max_object_size {
+                return Err(Status::resource_exhausted(format!(
+                    "object {} exceeds max_object_size ({} > {})",
+                    hex::encode(&chunk.hash),
+                    chunk.total_size,
+                    max_object_size
+                )));
             }
 
-            const MAX_OBJECT_SIZE: usize = 512 * 1024 * 1024;
-            if current_buf.len() + chunk.data.len() > MAX_OBJECT_SIZE {
-                return Err(Status::resource_exhausted("object exceeds maximum size"));
+            let hash_bytes: [u8; 32] = chunk
+                .hash
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("invalid hash length"))?;
+            let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
+                .map_err(|e| internal_err("grpc", e))?;
+
+            // Object-type is legacy — pre_compressed = 1 means the client
+            // already zstd-framed the payload. Validate the magic on the
+            // first chunk of each object so corrupted streams fail fast
+            // instead of polluting staging.
+            let pre_compressed = chunk.object_type == 1;
+            if pre_compressed && chunk.offset == 0 && !chunk.data.is_empty() {
+                if chunk.data.len() < 4
+                    || chunk.data[0] != 0x28
+                    || chunk.data[1] != 0xB5
+                    || chunk.data[2] != 0x2F
+                    || chunk.data[3] != 0xFD
+                {
+                    return Err(Status::data_loss(format!(
+                        "invalid compressed data for {} (bad magic bytes)",
+                        hex::encode(&hash_bytes)
+                    )));
+                }
             }
-            current_buf.extend_from_slice(&chunk.data);
+
+            // Fast path: whole object in a single chunk. Write it once.
+            if chunk.is_last && chunk.offset == 0 && !pending_multichunk.contains_key(&chunk.hash) {
+                st.put(&forge_hash, &chunk.data)
+                    .map_err(|e| internal_err("staging put", e))?;
+                if seen_hashes.insert(chunk.hash.clone()) {
+                    received.push(chunk.hash.clone());
+                    if let Some(sid) = &session_id {
+                        let _ = self.db.record_session_object(
+                            sid,
+                            &chunk.hash,
+                            chunk.total_size as i64,
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // Multi-chunk object: append to the staged file. We append
+            // directly to disk rather than buffering in RAM so a 10 GiB
+            // object doesn't OOM the server.
+            //
+            // The `pending_multichunk` map only holds a marker (empty
+            // Vec) so we know which hashes have at least one appended
+            // chunk. We never accumulate bytes in it.
+            pending_multichunk
+                .entry(chunk.hash.clone())
+                .or_insert_with(Vec::new);
+            st.append(&forge_hash, &chunk.data)
+                .map_err(|e| internal_err("staging append", e))?;
 
             if chunk.is_last {
-                let hash_bytes: [u8; 32] = chunk
-                    .hash
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Status::invalid_argument("invalid hash length"))?;
-                let forge_hash = ForgeHash::from_hex(&hex::encode(hash_bytes))
-                    .map_err(|e| internal_err("grpc", e))?;
-
-                let pre_compressed = chunk.object_type == 1;
-                if pre_compressed {
-                    if current_buf.len() < 4
-                        || current_buf[0] != 0x28
-                        || current_buf[1] != 0xB5
-                        || current_buf[2] != 0x2F
-                        || current_buf[3] != 0xFD
-                    {
+                pending_multichunk.remove(&chunk.hash);
+                // Sanity check: the staged file size should match what the
+                // client advertised. A mismatch is a protocol error or a
+                // truncated stream — either way we refuse to trust the
+                // object. (It stays in staging; the session sweeper will
+                // reclaim it if the client doesn't retry or commit.)
+                if let Some(actual) = st.file_size(&forge_hash) {
+                    if actual != chunk.total_size {
                         return Err(Status::data_loss(format!(
-                            "invalid compressed data for {} (bad magic bytes)",
+                            "staged size {} ≠ declared total_size {} for {}",
+                            actual,
+                            chunk.total_size,
                             hex::encode(&hash_bytes)
                         )));
                     }
                 }
-
-                // Hand off to writer threads — non-blocking unless channel is full,
-                // which provides natural backpressure.
-                let data = std::mem::take(&mut current_buf);
-                write_tx
-                    .send((forge_hash, data, pre_compressed))
-                    .map_err(|_| Status::internal("writer thread crashed"))?;
-
-                received.push(chunk.hash.clone());
-                current_hash = None;
-
-                // Check for write errors periodically.
-                if let Some(e) = write_error.lock().unwrap().take() {
-                    return Err(internal_err("grpc", e));
+                if seen_hashes.insert(chunk.hash.clone()) {
+                    received.push(chunk.hash.clone());
+                    if let Some(sid) = &session_id {
+                        let _ = self.db.record_session_object(
+                            sid,
+                            &chunk.hash,
+                            chunk.total_size as i64,
+                        );
+                    }
                 }
             }
         }
 
-        // Drop sender to signal writers to finish, then wait for them.
-        drop(write_tx);
-        for h in writer_handles {
-            let _ = h.join();
+        // A push with zero chunks is legal (client had no missing objects).
+        // Return an empty response in that case — CommitPush still runs
+        // against whatever session id the client has locally, and the
+        // server will create the session lazily there.
+        let sid = session_id.unwrap_or_default();
+        if !pending_multichunk.is_empty() {
+            // Stream ended mid-object. Do not finalise receipts for the
+            // partial object; the session sweeper cleans staging.
+            return Err(Status::aborted(
+                "push stream ended before the final chunk of an object was received",
+            ));
         }
 
-        // Final error check.
-        if let Some(e) = write_error.lock().unwrap().take() {
-            return Err(internal_err("grpc", e));
-        }
-
+        let _ = repo_full;
         Ok(Response::new(PushResponse {
             received_hashes: received,
             error: String::new(),
+            upload_session_id: sid,
         }))
+    }
+
+    async fn commit_push(
+        &self,
+        request: Request<CommitPushRequest>,
+    ) -> Result<Response<CommitPushResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
+        require_repo_write(&caller, &self.user_store, repo)?;
+
+        if req.upload_session_id.is_empty() {
+            return Err(Status::invalid_argument("upload_session_id is required"));
+        }
+        validate_session_id(&req.upload_session_id)?;
+
+        let session = self
+            .db
+            .get_upload_session(&req.upload_session_id)
+            .map_err(|e| internal_err("get upload session", e))?;
+
+        let session = match session {
+            Some(s) if s.repo == repo => s,
+            Some(_) => {
+                return Err(Status::permission_denied(
+                    "upload session belongs to a different repo",
+                ));
+            }
+            None => {
+                // The client advertises a session we never observed. This
+                // can happen if the push stream never reached the server
+                // (network blip), or if the client is buggy. Either way,
+                // we refuse to commit — there are no staged objects.
+                return Err(Status::not_found("upload session not found"));
+            }
+        };
+
+        // Idempotent retry short-circuit: a committed session returns the
+        // same CommitPushResponse it returned the first time. A failed
+        // session cannot be revived.
+        if session.state == "committed" {
+            let results: Vec<crate::storage::db::RefUpdateOutcome> = session
+                .result_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            return Ok(Response::new(CommitPushResponse {
+                success: true,
+                error: String::new(),
+                blocking_locks: Vec::new(),
+                ref_results: results
+                    .into_iter()
+                    .map(|o| RefUpdateResult {
+                        ref_name: o.ref_name,
+                        success: o.success,
+                        error: o.error,
+                    })
+                    .collect(),
+            }));
+        }
+        if session.state == "failed" || session.state == "abandoned" {
+            return Ok(Response::new(CommitPushResponse {
+                success: false,
+                error: session.failure.clone().unwrap_or_else(|| session.state.clone()),
+                blocking_locks: Vec::new(),
+                ref_results: Vec::new(),
+            }));
+        }
+
+        // At this point state == "uploading". Proceed with lock-gate +
+        // promote + ref CAS.
+
+        // 1. Compute touched paths from the proposed tree diffs. The
+        //    staged objects still live in staging, so we promote *first*,
+        //    then diff against the live tree. Objects are
+        //    content-addressed so a later failure just leaves unreferenced
+        //    objects that GC will reclaim.
+        let staging = self.fs.session_staging_store(repo, &req.upload_session_id);
+        let live = self.fs.repo_store(repo);
+        let hash_list = self
+            .db
+            .list_session_object_hashes(&req.upload_session_id)
+            .map_err(|e| internal_err("list session objects", e))?;
+        let forge_hashes: Vec<ForgeHash> = hash_list
+            .iter()
+            .filter_map(|h| {
+                if h.len() == 32 {
+                    ForgeHash::from_hex(&hex::encode(h)).ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        staging
+            .promote_into(&live, &forge_hashes)
+            .map_err(|e| internal_err("promote session", e))?;
+
+        // 2. Compute touched paths via tree-diff for each ref update.
+        let os = self.object_store(repo);
+        let mut touched: std::collections::BTreeSet<String> = Default::default();
+        for u in &req.ref_updates {
+            let paths = compute_touched_paths(&os, &u.old_hash, &u.new_hash)
+                .map_err(|e| internal_err("tree diff", e))?;
+            for p in paths {
+                touched.insert(p);
+            }
+        }
+        // Honour an optional client-supplied hint. If the server and
+        // client disagree, trust the server — but widen the set so any
+        // path either side thinks is touched gets lock-checked.
+        for p in &req.touched_paths {
+            touched.insert(p.clone());
+        }
+
+        // 3. Lock gate: any lock owned by someone other than the caller
+        //    that covers a touched path blocks the commit. P4-style strict
+        //    enforcement; typemap broadens this in Phase 5.
+        let caller_user = caller
+            .username()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let blocking = if !caller_user.is_empty() {
+            let all = self
+                .db
+                .list_locks(repo, "", "")
+                .map_err(|e| internal_err("list locks", e))?;
+            all.into_iter()
+                .filter(|l| touched.contains(&l.path) && l.owner != caller_user)
+                .collect::<Vec<_>>()
+        } else {
+            // Anonymous / agent callers don't own locks by definition —
+            // any lock on a touched path blocks them.
+            let all = self
+                .db
+                .list_locks(repo, "", "")
+                .map_err(|e| internal_err("list locks", e))?;
+            all.into_iter()
+                .filter(|l| touched.contains(&l.path))
+                .collect()
+        };
+
+        if !blocking.is_empty() {
+            let blocking_infos: Vec<LockInfo> = blocking
+                .into_iter()
+                .map(|l| LockInfo {
+                    path: l.path,
+                    owner: l.owner,
+                    workspace_id: l.workspace_id,
+                    created_at: l.created_at,
+                    reason: l.reason,
+                })
+                .collect();
+            // Record the rejection on the session so a retry returns the
+            // same answer without re-running the tree diff. Session is
+            // left "failed"; client must start a new push.
+            let json = serde_json::to_string(&blocking_infos).unwrap_or_default();
+            let _ = self.db.fail_upload_session(
+                &req.upload_session_id,
+                "lock_conflict",
+                &json,
+            );
+            audit!(
+                action = "push.lock_rejected",
+                outcome = "denied",
+                actor_id = caller.user_id(),
+                repo = repo,
+                session_id = %req.upload_session_id,
+                blocking_count = blocking_infos.len()
+            );
+            return Ok(Response::new(CommitPushResponse {
+                success: false,
+                error: "one or more paths are locked by another user".into(),
+                blocking_locks: blocking_infos,
+                ref_results: Vec::new(),
+            }));
+        }
+
+        // 4. Fast-forward guard for non-force updates (same semantics as
+        //    update_ref). Done after lock-gate so a locked push doesn't
+        //    even see the FF check error.
+        for u in &req.ref_updates {
+            super::validate::ref_name(&u.ref_name)?;
+            if u.force || u.old_hash.iter().all(|&b| b == 0) {
+                continue;
+            }
+            let old = ForgeHash::from_hex(&hex::encode(&u.old_hash))
+                .map_err(|e| internal_err("grpc", e))?;
+            let new = ForgeHash::from_hex(&hex::encode(&u.new_hash))
+                .map_err(|e| internal_err("grpc", e))?;
+            if !is_ancestor_or_equal(&os, &old, &new) {
+                return Ok(Response::new(CommitPushResponse {
+                    success: false,
+                    error: format!(
+                        "non-fast-forward: new tip for {} is not a descendant of remote tip",
+                        u.ref_name
+                    ),
+                    blocking_locks: Vec::new(),
+                    ref_results: vec![RefUpdateResult {
+                        ref_name: u.ref_name.clone(),
+                        success: false,
+                        error: "non-fast-forward".into(),
+                    }],
+                }));
+            }
+        }
+
+        // 5. Apply the ref updates atomically inside the DB transaction.
+        let specs: Vec<RefUpdateSpec<'_>> = req
+            .ref_updates
+            .iter()
+            .map(|u| RefUpdateSpec {
+                ref_name: u.ref_name.as_str(),
+                old_hash: u.old_hash.as_slice(),
+                new_hash: u.new_hash.as_slice(),
+                force: u.force,
+            })
+            .collect();
+
+        let outcome = self
+            .db
+            .commit_upload_session(&req.upload_session_id, &specs)
+            .map_err(|e| internal_err("commit session", e))?;
+
+        match outcome {
+            CommitSessionOutcome::Unknown => {
+                // Raced with another caller that deleted the session.
+                Err(Status::not_found("upload session not found"))
+            }
+            CommitSessionOutcome::AlreadyCommitted { result_json } => {
+                let results: Vec<crate::storage::db::RefUpdateOutcome> =
+                    serde_json::from_str(&result_json).unwrap_or_default();
+                Ok(Response::new(CommitPushResponse {
+                    success: true,
+                    error: String::new(),
+                    blocking_locks: Vec::new(),
+                    ref_results: results
+                        .into_iter()
+                        .map(|o| RefUpdateResult {
+                            ref_name: o.ref_name,
+                            success: o.success,
+                            error: o.error,
+                        })
+                        .collect(),
+                }))
+            }
+            CommitSessionOutcome::TerminallyFailed { reason, .. } => {
+                Ok(Response::new(CommitPushResponse {
+                    success: false,
+                    error: reason,
+                    blocking_locks: Vec::new(),
+                    ref_results: Vec::new(),
+                }))
+            }
+            CommitSessionOutcome::Committed {
+                ref_results,
+                all_success,
+            } => {
+                if all_success {
+                    // Fire post-push hooks exactly as update_ref does.
+                    for u in &req.ref_updates {
+                        audit!(
+                            action = "ref.update",
+                            outcome = "success",
+                            actor_id = caller.user_id(),
+                            repo = repo,
+                            ref_name = %u.ref_name,
+                            old_hash = %hex::encode(&u.old_hash),
+                            new_hash = %hex::encode(&u.new_hash),
+                            force = u.force,
+                            session_id = %req.upload_session_id
+                        );
+                        if let Some(engine_tx) = &self.workflow_engine {
+                            crate::services::actions::trigger::check_push_triggers(
+                                &self.db,
+                                engine_tx,
+                                repo,
+                                &u.ref_name,
+                                &u.new_hash,
+                            );
+                        }
+                    }
+                }
+                Ok(Response::new(CommitPushResponse {
+                    success: all_success,
+                    error: if all_success {
+                        String::new()
+                    } else {
+                        "one or more ref updates failed (see ref_results)".into()
+                    },
+                    blocking_locks: Vec::new(),
+                    ref_results: ref_results
+                        .into_iter()
+                        .map(|o| RefUpdateResult {
+                            ref_name: o.ref_name,
+                            success: o.success,
+                            error: o.error,
+                        })
+                        .collect(),
+                }))
+            }
+        }
     }
 
     async fn pull_objects(
@@ -333,6 +771,7 @@ impl ForgeService for ForgeGrpcService {
                         data: compressed,
                         is_last: true,
                         repo: String::new(),
+                        upload_session_id: String::new(),
                     };
                     if tx.blocking_send(Ok(msg)).is_err() {
                         return;
@@ -349,6 +788,7 @@ impl ForgeService for ForgeGrpcService {
                             data: slice.to_vec(),
                             is_last,
                             repo: String::new(),
+                            upload_session_id: String::new(),
                         };
                         if tx.blocking_send(Ok(msg)).is_err() {
                             return;

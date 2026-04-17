@@ -31,6 +31,47 @@ pub struct ServerConfig {
     /// Logging + audit output.
     #[serde(default)]
     pub logging: LoggingSection,
+
+    /// Push / object-transfer limits.
+    #[serde(default)]
+    pub limits: LimitsSection,
+}
+
+/// Size + time ceilings applied to push and upload-session handling.
+/// Raising the per-object cap costs nothing on disk — objects stream
+/// through staging — but an excessively high ceiling lets a rogue client
+/// exhaust server disk, so keep the default high enough for UE cooked
+/// builds (a few GiB) but below the full disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimitsSection {
+    /// Per-object size cap (bytes). Any single object whose total size
+    /// exceeds this is rejected at chunk time. Default 16 GiB — large
+    /// enough for typical UE5 cooked `.pak` files, small enough that a
+    /// single bug can't fill a production disk in one push.
+    #[serde(default = "default_max_object_size")]
+    pub max_object_size: u64,
+
+    /// Seconds an upload session lives before the sweeper reclaims its
+    /// staging directory. Resumed pushes (Phase 3) push expires_at
+    /// forward as they land chunks.
+    #[serde(default = "default_upload_ttl")]
+    pub upload_session_ttl_seconds: i64,
+}
+
+fn default_max_object_size() -> u64 {
+    16 * 1024 * 1024 * 1024 // 16 GiB
+}
+fn default_upload_ttl() -> i64 {
+    60 * 60 // 1 hour
+}
+
+impl Default for LimitsSection {
+    fn default() -> Self {
+        Self {
+            max_object_size: default_max_object_size(),
+            upload_session_ttl_seconds: default_upload_ttl(),
+        }
+    }
 }
 
 /// Logging configuration. All fields optional; safe defaults apply.
@@ -372,6 +413,7 @@ impl Default for ServerConfig {
             actions: ActionsSection::default(),
             artifacts: ArtifactsSection::default(),
             logging: LoggingSection::default(),
+            limits: LimitsSection::default(),
         }
     }
 }

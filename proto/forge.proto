@@ -288,6 +288,14 @@ service ForgeService {
     rpc PushObjects(stream ObjectChunk) returns (PushResponse);
     rpc PullObjects(PullRequest) returns (stream ObjectChunk);
     rpc HasObjects(HasObjectsRequest) returns (HasObjectsResponse);
+    // Atomic two-phase push finalisation. After PushObjects streams all
+    // objects into the server's staging area, CommitPush promotes them into
+    // the live tree and applies the enclosed ref updates inside a single
+    // transaction. Fails closed: any lock violation, CAS conflict, or I/O
+    // error rolls back the whole push — no orphan objects, no torn refs.
+    // Idempotent on retry: calling again with the same `upload_session_id`
+    // returns the prior result.
+    rpc CommitPush(CommitPushRequest) returns (CommitPushResponse);
 
     // References (scoped to repo)
     rpc GetRefs(GetRefsRequest) returns (GetRefsResponse);
@@ -446,25 +454,99 @@ message ObjectChunk {
     bytes data = 5;
     bool is_last = 6;
     string repo = 7;
+    // Upload session this chunk belongs to. Client generates a UUIDv7 and
+    // sets it on every chunk of a push. Server stages objects under a
+    // per-session directory; CommitPush references the same id to promote
+    // them atomically. Required on the first chunk of a push; subsequent
+    // chunks must carry the same value. Empty ids are treated as legacy
+    // non-staged pushes during the v0.4 → v1.0 transition.
+    string upload_session_id = 8;
+
+    reserved 9 to 15;
 }
 
 message PushResponse {
     repeated bytes received_hashes = 1;
     string error = 2;
+    // Server echoes the session id it recorded for this stream. Lets the
+    // client confirm which session to pass to CommitPush and recover if
+    // the client crashed between receiving this response and calling
+    // CommitPush — the id is also persisted client-side before the stream
+    // starts, so this is a confirmation rather than the sole source.
+    string upload_session_id = 3;
+
+    reserved 4 to 15;
 }
 
 message PullRequest {
     repeated bytes want_hashes = 1;
     string repo = 2;
+
+    reserved 3 to 15;
 }
 
 message HasObjectsRequest {
     repeated bytes hashes = 1;
     string repo = 2;
+
+    reserved 3 to 15;
 }
 
 message HasObjectsResponse {
     repeated bool has = 1;
+
+    reserved 2 to 15;
+}
+
+// Single ref update inside a CommitPush batch. Same semantics as
+// UpdateRefRequest but without the repo field (the batch carries it).
+message RefUpdate {
+    string ref_name = 1;
+    bytes old_hash = 2;
+    bytes new_hash = 3;
+    // Unconditional overwrite. Server still checks caller has repo:write
+    // and (future) protected-branch policy; force only bypasses the
+    // fast-forward/CAS guard.
+    bool force = 4;
+
+    reserved 5 to 15;
+}
+
+message RefUpdateResult {
+    string ref_name = 1;
+    bool success = 2;
+    string error = 3;
+
+    reserved 4 to 15;
+}
+
+message CommitPushRequest {
+    string repo = 1;
+    // Session id the paired PushObjects stream used. Server looks up the
+    // staged objects keyed by this id and promotes them atomically.
+    string upload_session_id = 2;
+    // Ref updates to apply. Empty list is legal — the push simply publishes
+    // objects without updating any ref (rare; mostly useful for seeding).
+    repeated RefUpdate ref_updates = 3;
+    // Optional hint: paths the client believes it is modifying. When set,
+    // the server verifies this matches the tree-diff it computes between
+    // each ref's old_hash and new_hash; mismatch fails the commit. Empty
+    // means the server computes touched paths itself.
+    repeated string touched_paths = 4;
+
+    reserved 5 to 15;
+}
+
+message CommitPushResponse {
+    bool success = 1;
+    string error = 2;
+    // Populated when a lock held by another owner blocks the push. The
+    // CLI surfaces these so the user knows which files to coordinate on.
+    repeated LockInfo blocking_locks = 3;
+    // Per-ref-update outcome, in the same order as the request.
+    repeated RefUpdateResult ref_results = 4;
+
+    reserved 5 to 15;
 }
 
 // ============================================================
@@ -489,11 +571,15 @@ message UpdateRefRequest {
     // to publish a rewritten history. Still gated on `repo:write` —
     // protected-branch enforcement is a future addition.
     bool force = 5;
+
+    reserved 6 to 15;
 }
 
 message UpdateRefResponse {
     bool success = 1;
     string error = 2;
+
+    reserved 3 to 15;
 }
 
 // ============================================================

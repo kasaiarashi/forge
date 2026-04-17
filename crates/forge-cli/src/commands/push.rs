@@ -171,6 +171,12 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
             .collect::<Vec<ForgeHash>>()
     };
 
+    // Allocate a session id for this push. The same id is sent on every
+    // chunk of PushObjects and again in CommitPush; it lets the server
+    // stage objects per-session and make the final promote + ref CAS
+    // atomic. UUIDv7 embeds a timestamp so sweeper logs sort nicely.
+    let session_id = uuid::Uuid::now_v7().to_string();
+
     if !missing.is_empty() {
         let store = forge_core::store::chunk_store::ChunkStore::new(ws.forge_dir().join("objects"));
 
@@ -211,6 +217,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         // multi-chunk objects are never interleaved in the stream.
         const CHUNK_SIZE: usize = 4 * 1024 * 1024;
         let repo_name_owned = repo_name.to_string();
+        let session_id_owned = session_id.clone();
         // gRPC channel holds ≤4 MiB chunks, so 64 slots = 256 MiB max.
         // Read channel holds full objects — keep small for large assets.
         let (grpc_tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(64);
@@ -243,6 +250,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
                         data,
                         is_last: true,
                         repo: repo_name_owned.clone(),
+                        upload_session_id: session_id_owned.clone(),
                     }).is_err() {
                         break;
                     }
@@ -261,6 +269,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
                             data: slice.to_vec(),
                             is_last,
                             repo: repo_name_owned.clone(),
+                            upload_session_id: session_id_owned.clone(),
                         }).is_err() {
                             break;
                         }
@@ -284,21 +293,43 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         }
     }
 
-    // Update remote ref. Pass `force` through so the server knows whether
-    // to do an atomic compare-and-swap (default) or an unconditional
-    // overwrite (--force).
-    let update_resp = client
-        .update_ref(UpdateRefRequest {
-            repo: repo_name.to_string(),
-            ref_name: ref_name.clone(),
-            old_hash: remote_tip_bytes.clone(),
-            new_hash: local_tip.as_bytes().to_vec(),
-            force,
-        })
-        .await?
-        .into_inner();
+    // Finalise the push: promote staged objects into the live tree and
+    // apply the ref update atomically. The server keeps CommitPush
+    // idempotent for the same `upload_session_id`, so we can retry on a
+    // transient error without worrying about double-applying.
+    let ref_update = RefUpdate {
+        ref_name: ref_name.clone(),
+        old_hash: remote_tip_bytes.clone(),
+        new_hash: local_tip.as_bytes().to_vec(),
+        force,
+    };
+    let commit_req = CommitPushRequest {
+        repo: repo_name.to_string(),
+        upload_session_id: session_id.clone(),
+        ref_updates: vec![ref_update],
+        touched_paths: Vec::new(),
+    };
 
-    if update_resp.success {
+    // One automatic retry on a transient network error. The session id is
+    // the same across both attempts, so if the server committed on the
+    // first call the retry hits the idempotent-replay path.
+    let commit_resp = match client.commit_push(commit_req.clone()).await {
+        Ok(r) => r.into_inner(),
+        Err(e)
+            if matches!(
+                e.code(),
+                tonic::Code::Unavailable
+                    | tonic::Code::DeadlineExceeded
+                    | tonic::Code::Aborted
+            ) =>
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            client.commit_push(commit_req).await?.into_inner()
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    if commit_resp.success {
         let remote_short = ForgeHash::from_hex(&hex::encode(&remote_tip_bytes))
             .map(|h| h.short())
             .unwrap_or_else(|_| "(new)".to_string());
@@ -313,11 +344,27 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
                 remote_short, local_tip.short(), branch, remote_name, branch
             );
         }
+    } else if !commit_resp.blocking_locks.is_empty() {
+        let mut msg = String::from(
+            "Push rejected: one or more paths are locked by another user.\n",
+        );
+        for lock in &commit_resp.blocking_locks {
+            msg.push_str(&format!(
+                "    {}  (locked by {})\n",
+                lock.path, lock.owner
+            ));
+        }
+        msg.push_str(
+            "\nAsk the lock holder to release, or use `forge locks` to \
+             inspect. Non-blocking workflow:  `forge pull`, coordinate \
+             with the owner, then push again.",
+        );
+        bail!("{msg}");
     } else if force {
         bail!(
             "Force push to {} rejected: {}.",
             ref_name,
-            update_resp.error
+            commit_resp.error
         );
     } else {
         bail!(
@@ -325,12 +372,13 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
              Pull and rebase, then push again — or use `forge push --force` \
              to overwrite the remote (rewrites history; use with care).",
             ref_name,
-            update_resp.error
+            commit_resp.error
         );
     }
 
     Ok(())
 }
+
 
 /// Return true if `ancestor` is reachable from `descendant` via parent links
 /// (or equal). Used as a client-side fast-forward pre-flight.

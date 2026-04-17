@@ -169,7 +169,262 @@ impl MetadataDb {
         db.create_actions_tables()?;
         db.create_secrets_tables()?;
         db.create_agent_tables()?;
+        db.create_upload_session_tables()?;
         Ok(db)
+    }
+
+    // -- Upload sessions (Phase 1 atomic push) --
+    //
+    // A push is a two-phase operation: PushObjects streams bytes into a
+    // per-session staging area, and CommitPush promotes those bytes into the
+    // live tree plus applies ref CAS updates inside a single transaction.
+    // These two tables track the session so CommitPush retries stay
+    // idempotent and a sweeper can reclaim staging from clients that crashed
+    // mid-push.
+
+    pub fn create_upload_session_tables(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS upload_sessions (
+                id           TEXT PRIMARY KEY,
+                repo         TEXT NOT NULL,
+                user_id      INTEGER,
+                state        TEXT NOT NULL
+                    CHECK(state IN ('uploading','committed','failed','abandoned'))
+                    DEFAULT 'uploading',
+                created_at   INTEGER NOT NULL,
+                expires_at   INTEGER NOT NULL,
+                committed_at INTEGER,
+                -- JSON-encoded CommitPush outcome captured at commit time so
+                -- an idempotent retry returns the same response.
+                result_json  TEXT,
+                -- Free-form error label when state='failed'. Not shown to
+                -- clients directly; useful for operator debugging.
+                failure      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_upload_sessions_state
+                ON upload_sessions(state, expires_at);
+            CREATE TABLE IF NOT EXISTS session_objects (
+                session_id TEXT NOT NULL
+                    REFERENCES upload_sessions(id) ON DELETE CASCADE,
+                hash       BLOB NOT NULL,
+                size       INTEGER NOT NULL,
+                PRIMARY KEY (session_id, hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_objects_session
+                ON session_objects(session_id);
+            ",
+        )?;
+        Ok(())
+    }
+
+    /// Create an upload session if it doesn't already exist. No-op on a
+    /// duplicate id so retried first-chunks (same session) are safe.
+    pub fn create_upload_session(
+        &self,
+        sid: &str,
+        repo: &str,
+        user_id: Option<i64>,
+        ttl_seconds: i64,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        let expires = now + ttl_seconds;
+        conn.execute(
+            "INSERT OR IGNORE INTO upload_sessions
+                (id, repo, user_id, state, created_at, expires_at)
+             VALUES (?1, ?2, ?3, 'uploading', ?4, ?5)",
+            rusqlite::params![sid, repo, user_id, now, expires],
+        )?;
+        Ok(())
+    }
+
+    /// Record a successfully-staged object against a session. `OR IGNORE`
+    /// because a client resending a chunk for dedup is fine.
+    pub fn record_session_object(&self, sid: &str, hash: &[u8], size: i64) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO session_objects (session_id, hash, size)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![sid, hash, size],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>> {
+        let conn = self.conn()?;
+        let row = conn
+            .prepare(
+                "SELECT id, repo, user_id, state, created_at, expires_at,
+                        committed_at, result_json, failure
+                 FROM upload_sessions WHERE id = ?1",
+            )?
+            .query_row([sid], |r| {
+                Ok(UploadSessionRecord {
+                    id: r.get(0)?,
+                    repo: r.get(1)?,
+                    user_id: r.get(2)?,
+                    state: r.get(3)?,
+                    created_at: r.get(4)?,
+                    expires_at: r.get(5)?,
+                    committed_at: r.get(6)?,
+                    result_json: r.get(7)?,
+                    failure: r.get(8)?,
+                })
+            })
+            .ok();
+        Ok(row)
+    }
+
+    pub fn list_session_object_hashes(&self, sid: &str) -> Result<Vec<Vec<u8>>> {
+        let conn = self.conn()?;
+        let mut stmt =
+            conn.prepare("SELECT hash FROM session_objects WHERE session_id = ?1")?;
+        let rows = stmt.query_map([sid], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Mark a session failed. Retries of CommitPush against a failed session
+    /// will surface the same failure reason without re-running the work.
+    pub fn fail_upload_session(&self, sid: &str, reason: &str, result_json: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE upload_sessions
+             SET state = 'failed', failure = ?2, result_json = ?3
+             WHERE id = ?1 AND state = 'uploading'",
+            rusqlite::params![sid, reason, result_json],
+        )?;
+        Ok(())
+    }
+
+    /// Atomic commit: inside a single `BEGIN IMMEDIATE`, verify the session
+    /// is still in `uploading` state, apply each ref update (with the same
+    /// CAS / create / force semantics as `update_ref`), capture per-ref
+    /// outcomes, and mark the session committed. On retry against an
+    /// already-committed session, returns the cached result without doing
+    /// any writes.
+    ///
+    /// The caller is responsible for having already promoted objects from
+    /// staging → live before invoking this. Ref updates that reference
+    /// missing objects will fail the reachability check higher in the stack.
+    pub fn commit_upload_session(
+        &self,
+        sid: &str,
+        updates: &[RefUpdateSpec<'_>],
+    ) -> Result<CommitSessionOutcome> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let session: Option<(String, Option<String>)> = tx
+            .prepare(
+                "SELECT state, result_json FROM upload_sessions WHERE id = ?1",
+            )?
+            .query_row([sid], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .ok();
+
+        let (state, cached_result) = match session {
+            Some(s) => s,
+            None => return Ok(CommitSessionOutcome::Unknown),
+        };
+
+        match state.as_str() {
+            "committed" => {
+                return Ok(CommitSessionOutcome::AlreadyCommitted {
+                    result_json: cached_result.unwrap_or_default(),
+                });
+            }
+            "failed" | "abandoned" => {
+                return Ok(CommitSessionOutcome::TerminallyFailed {
+                    reason: state,
+                    result_json: cached_result.unwrap_or_default(),
+                });
+            }
+            "uploading" => {}
+            other => {
+                anyhow::bail!("unexpected upload session state: {other}");
+            }
+        }
+
+        let repo: String = tx
+            .prepare("SELECT repo FROM upload_sessions WHERE id = ?1")?
+            .query_row([sid], |r| r.get(0))?;
+
+        // Apply ref updates one at a time. The whole thing is inside a
+        // single IMMEDIATE transaction so the outcomes we record match the
+        // state we leave on disk.
+        let mut ref_results = Vec::with_capacity(updates.len());
+        for u in updates {
+            let success = apply_ref_update_tx(&tx, &repo, u)?;
+            let error = if success {
+                String::new()
+            } else if u.force {
+                "force update failed".to_string()
+            } else if u.old_hash.iter().all(|&b| b == 0) {
+                "ref already exists".to_string()
+            } else {
+                "ref has been updated by another client".to_string()
+            };
+            ref_results.push(RefUpdateOutcome {
+                ref_name: u.ref_name.to_string(),
+                success,
+                error,
+            });
+        }
+
+        let all_success = ref_results.iter().all(|r| r.success);
+        let now = chrono::Utc::now().timestamp();
+
+        let result_json = serde_json::to_string(&ref_results).unwrap_or_else(|_| "[]".into());
+
+        if all_success {
+            tx.execute(
+                "UPDATE upload_sessions
+                 SET state = 'committed', committed_at = ?2, result_json = ?3
+                 WHERE id = ?1",
+                rusqlite::params![sid, now, result_json],
+            )?;
+        } else {
+            // Leave session in 'uploading' so the client can adjust (e.g.
+            // rebase) and retry without losing its staged objects. The
+            // sweeper still reclaims if the client never retries.
+        }
+
+        tx.commit()?;
+
+        Ok(CommitSessionOutcome::Committed {
+            ref_results,
+            all_success,
+        })
+    }
+
+    /// Return (id, repo) for sessions eligible for garbage collection:
+    /// state = 'uploading' and expires_at <= cutoff, or state in
+    /// ('failed','abandoned','committed') older than the cutoff.
+    pub fn list_stale_upload_sessions(&self, cutoff_ts: i64) -> Result<Vec<(String, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, repo FROM upload_sessions
+             WHERE (state = 'uploading' AND expires_at <= ?1)
+                OR (state IN ('failed','abandoned','committed') AND
+                    COALESCE(committed_at, created_at) <= ?1)",
+        )?;
+        let rows = stmt.query_map([cutoff_ts], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Delete a session row. Cascades to session_objects via FK. Caller is
+    /// responsible for having already cleaned up the staging directory.
+    pub fn delete_upload_session(&self, sid: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM upload_sessions WHERE id = ?1", [sid])?;
+        Ok(())
     }
 
     // -- Agents (Phase 2 distributed runners) --
@@ -1105,6 +1360,96 @@ pub struct LockInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct UploadSessionRecord {
+    pub id: String,
+    pub repo: String,
+    pub user_id: Option<i64>,
+    pub state: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub committed_at: Option<i64>,
+    pub result_json: Option<String>,
+    pub failure: Option<String>,
+}
+
+/// One ref update inside an atomic CommitPush. Borrowed to avoid cloning
+/// hash buffers on the hot path.
+#[derive(Debug, Clone)]
+pub struct RefUpdateSpec<'a> {
+    pub ref_name: &'a str,
+    pub old_hash: &'a [u8],
+    pub new_hash: &'a [u8],
+    pub force: bool,
+}
+
+/// Per-ref outcome captured inside the commit transaction.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RefUpdateOutcome {
+    pub ref_name: String,
+    pub success: bool,
+    pub error: String,
+}
+
+/// High-level result of `commit_upload_session`.
+#[derive(Debug)]
+pub enum CommitSessionOutcome {
+    /// Session id is not known to the server.
+    Unknown,
+    /// First-time commit completed. `all_success` is false when one or
+    /// more refs failed their CAS (the session is left in 'uploading' so
+    /// the client can rebase + retry without re-uploading objects).
+    Committed {
+        ref_results: Vec<RefUpdateOutcome>,
+        all_success: bool,
+    },
+    /// Retry against an already-committed session. The client should
+    /// decode `result_json` and return the same response it would have
+    /// gotten the first time.
+    AlreadyCommitted { result_json: String },
+    /// Retry against a session that was already failed. Client surfaces
+    /// the prior outcome to the user (the session cannot be revived —
+    /// start a new push).
+    TerminallyFailed {
+        reason: String,
+        result_json: String,
+    },
+}
+
+/// Apply one ref update using the same semantics as [`MetadataDb::update_ref`]
+/// but inside an existing transaction. Kept private — callers go through
+/// [`MetadataDb::commit_upload_session`].
+fn apply_ref_update_tx(
+    tx: &rusqlite::Transaction<'_>,
+    repo: &str,
+    u: &RefUpdateSpec<'_>,
+) -> Result<bool> {
+    if u.force {
+        let affected = tx.execute(
+            "INSERT INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)
+             ON CONFLICT(repo, name) DO UPDATE SET hash = excluded.hash",
+            rusqlite::params![repo, u.ref_name, u.new_hash],
+        )?;
+        return Ok(affected > 0);
+    }
+
+    let is_create = u.old_hash.iter().all(|&b| b == 0);
+
+    let affected = if is_create {
+        tx.execute(
+            "INSERT OR IGNORE INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)",
+            rusqlite::params![repo, u.ref_name, u.new_hash],
+        )?
+    } else {
+        tx.execute(
+            "UPDATE refs SET hash = ?1 WHERE repo = ?2 AND name = ?3 AND hash = ?4",
+            rusqlite::params![u.new_hash, repo, u.ref_name, u.old_hash],
+        )?
+    };
+
+    Ok(affected > 0)
+}
+
+#[derive(Debug, Clone)]
 pub struct RepoRecord {
     pub name: String,
     pub description: String,
@@ -1261,5 +1606,192 @@ mod tests {
             db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
             h(0xAA)
         );
+    }
+
+    // ── upload sessions (Phase 1 atomic push) ───────────────────────────
+
+    #[test]
+    fn session_create_is_idempotent() {
+        let (_tmp, db) = fresh_db();
+        // First create — inserts.
+        db.create_upload_session("sid-1", "alice/forcetest", Some(42), 60).unwrap();
+        // Second call is a silent no-op via INSERT OR IGNORE.
+        db.create_upload_session("sid-1", "alice/forcetest", Some(99), 60).unwrap();
+
+        let rec = db.get_upload_session("sid-1").unwrap().unwrap();
+        assert_eq!(rec.id, "sid-1");
+        assert_eq!(rec.state, "uploading");
+        // First insertion wins — user_id stays 42, not 99.
+        assert_eq!(rec.user_id, Some(42));
+    }
+
+    #[test]
+    fn session_objects_dedup() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+        db.record_session_object("sid-1", &h(0x11), 100).unwrap();
+        // Duplicate hash must not blow up; INSERT OR IGNORE handles it.
+        db.record_session_object("sid-1", &h(0x11), 100).unwrap();
+        db.record_session_object("sid-1", &h(0x22), 200).unwrap();
+
+        let hashes = db.list_session_object_hashes("sid-1").unwrap();
+        assert_eq!(hashes.len(), 2, "dup hash should not produce dup row");
+        assert!(hashes.iter().any(|h| h == &vec![0x11u8; 32]));
+        assert!(hashes.iter().any(|h| h == &vec![0x22u8; 32]));
+    }
+
+    #[test]
+    fn commit_session_applies_ref_and_marks_committed() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+
+        let update = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xAA),
+            force: false,
+        };
+        let outcome = db.commit_upload_session("sid-1", &[update]).unwrap();
+        match outcome {
+            CommitSessionOutcome::Committed {
+                ref_results,
+                all_success,
+            } => {
+                assert!(all_success);
+                assert_eq!(ref_results.len(), 1);
+                assert!(ref_results[0].success);
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+        // Ref is in place.
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            h(0xAA)
+        );
+        // Session marked committed.
+        let rec = db.get_upload_session("sid-1").unwrap().unwrap();
+        assert_eq!(rec.state, "committed");
+        assert!(rec.committed_at.is_some());
+    }
+
+    #[test]
+    fn commit_session_is_idempotent_on_retry() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+
+        let update = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xAA),
+            force: false,
+        };
+
+        // First commit moves the ref and marks session committed.
+        let first = db.commit_upload_session("sid-1", &[update.clone()]).unwrap();
+        assert!(matches!(first, CommitSessionOutcome::Committed { .. }));
+
+        // Retry against the same session returns AlreadyCommitted WITHOUT
+        // re-applying the ref. This is what makes a CommitPush retry safe
+        // when the client loses its connection between the stream and the
+        // commit reply.
+        let retry = db.commit_upload_session("sid-1", &[update]).unwrap();
+        match retry {
+            CommitSessionOutcome::AlreadyCommitted { result_json } => {
+                assert!(result_json.contains("refs/heads/main"));
+            }
+            other => panic!("expected AlreadyCommitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit_session_cas_failure_leaves_session_uploading() {
+        let (_tmp, db) = fresh_db();
+        // Start with main@0xAA already there (someone else won the race).
+        db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
+            .unwrap();
+
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+
+        // Our push thinks main was at zero — a stale view.
+        let stale = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xBB),
+            force: false,
+        };
+        let outcome = db.commit_upload_session("sid-1", &[stale]).unwrap();
+        match outcome {
+            CommitSessionOutcome::Committed {
+                ref_results,
+                all_success,
+            } => {
+                assert!(!all_success);
+                assert_eq!(ref_results.len(), 1);
+                assert!(!ref_results[0].success);
+            }
+            other => panic!("expected Committed with failure, got {other:?}"),
+        }
+
+        // Session is NOT marked committed so the client can re-plan (pull,
+        // rebase, retry) without re-uploading objects.
+        let rec = db.get_upload_session("sid-1").unwrap().unwrap();
+        assert_eq!(rec.state, "uploading");
+
+        // Ref is unchanged.
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            h(0xAA)
+        );
+    }
+
+    #[test]
+    fn commit_session_rejects_unknown_id() {
+        let (_tmp, db) = fresh_db();
+        let update = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xAA),
+            force: false,
+        };
+        let outcome = db.commit_upload_session("does-not-exist", &[update]).unwrap();
+        assert!(matches!(outcome, CommitSessionOutcome::Unknown));
+    }
+
+    #[test]
+    fn commit_session_surfaces_prior_failure() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+        db.fail_upload_session("sid-1", "lock_conflict", "[]").unwrap();
+
+        let update = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xAA),
+            force: false,
+        };
+        let outcome = db.commit_upload_session("sid-1", &[update]).unwrap();
+        match outcome {
+            CommitSessionOutcome::TerminallyFailed { reason, .. } => {
+                assert_eq!(reason, "failed");
+            }
+            other => panic!("expected TerminallyFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_sessions_surface_for_sweeping() {
+        let (_tmp, db) = fresh_db();
+        // Short TTL so the session is immediately stale in wall-clock
+        // terms once we query with a future cutoff.
+        db.create_upload_session("sid-stale", "alice/forcetest", None, 60).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        // Pretend 24h have passed.
+        let list = db.list_stale_upload_sessions(now + 24 * 3600).unwrap();
+        assert!(list.iter().any(|(sid, _)| sid == "sid-stale"));
+
+        // Delete and confirm.
+        db.delete_upload_session("sid-stale").unwrap();
+        let list = db.list_stale_upload_sessions(now + 24 * 3600).unwrap();
+        assert!(list.iter().all(|(sid, _)| sid != "sid-stale"));
     }
 }

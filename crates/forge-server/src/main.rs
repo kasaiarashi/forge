@@ -521,6 +521,7 @@ pub(crate) async fn serve_inner(
     // Agent heartbeat sweeper. Requeues runs whose owning agent has gone
     // silent so a crashed worker can't hold a claim forever.
     services::agent_sweeper::spawn(Arc::clone(&db));
+    services::session_sweeper::spawn(Arc::clone(&db), Arc::clone(&fs));
 
     // Live step-log broadcast hub. Engine + (future) agents publish;
     // StreamStepLogs readers subscribe.
@@ -569,6 +570,7 @@ pub(crate) async fn serve_inner(
         artifacts: Arc::clone(&artifacts),
         artifact_signer_key: master_key,
         log_hub: Arc::clone(&log_hub),
+        limits: config.limits.clone(),
     };
 
     let addr: std::net::SocketAddr = config.server.listen.parse()?;
