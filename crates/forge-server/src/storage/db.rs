@@ -258,7 +258,33 @@ impl MetadataDb {
         // Record the baseline schema so Phase 2b migrations can version
         // their add-only DDL against a concrete starting point.
         db.record_baseline_schema_version()?;
+        // Apply any numbered migrations beyond the baseline. Errors
+        // propagate — a half-applied schema is worse than a server
+        // that refuses to start.
+        db.apply_pending_migrations()?;
         Ok(db)
+    }
+
+    /// Run every SQLite migration whose version is greater than the
+    /// currently-recorded schema_version. Each migration lands in its
+    /// own BEGIN IMMEDIATE transaction alongside the `schema_version`
+    /// insert, so a crash in the middle of a migration leaves the DB
+    /// on the previous revision (never half-applied).
+    fn apply_pending_migrations(&self) -> Result<()> {
+        let current = self.current_schema_version()?;
+        let mut conn = self.conn()?;
+        let applied = crate::storage::migrations::apply_pending(
+            &mut conn,
+            current,
+            crate::storage::migrations::SQLITE_MIGRATIONS,
+        )?;
+        if applied == 0 {
+            tracing::debug!(
+                current_version = current,
+                "no pending migrations"
+            );
+        }
+        Ok(())
     }
 
     // -- Schema versioning --
@@ -1913,9 +1939,65 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_records_baseline() {
+    fn schema_version_records_baseline_then_migrations() {
         let (_tmp, db) = fresh_db();
-        assert_eq!(db.current_schema_version().unwrap(), 1);
+        // Baseline is 1; the runner_bootstrap_check migration bumps to
+        // at least 2. Future phases may push this higher — assert ≥ 2
+        // rather than == 2 so this test doesn't need touching every
+        // time a new migration lands.
+        let v = db.current_schema_version().unwrap();
+        assert!(
+            v >= 2,
+            "expected migrations to advance schema_version past baseline, got {v}"
+        );
+    }
+
+    #[test]
+    fn migration_runner_is_idempotent_across_opens() {
+        // Open, close, re-open against the same DB file — the second
+        // open() must be a no-op from the runner's perspective.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("forge.db");
+        let v1 = {
+            let db = MetadataDb::open(&path).unwrap();
+            db.current_schema_version().unwrap()
+        };
+        let v2 = {
+            let db = MetadataDb::open(&path).unwrap();
+            db.current_schema_version().unwrap()
+        };
+        assert_eq!(v1, v2, "re-open must not change schema_version");
+
+        // And the runner_bootstrap_check sentinel row is still there
+        // exactly once (confirming ON CONFLICT DO NOTHING held).
+        let db = MetadataDb::open(&path).unwrap();
+        let conn = db.conn().unwrap();
+        let count: i64 = conn
+            .prepare("SELECT COUNT(*) FROM schema_runner_check")
+            .unwrap()
+            .query_row([], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "bootstrap-check row must be singleton");
+    }
+
+    #[test]
+    fn migration_apply_pending_detects_ascending_only() {
+        // The runner's debug-only invariant: migration versions must
+        // ascend strictly. Constructing an out-of-order list and
+        // passing it through apply_pending would trip the assert —
+        // we verify the same condition logically here so Postgres (or
+        // future maintainers) can't accidentally land a regression.
+        use crate::storage::migrations::SQLITE_MIGRATIONS;
+        let mut prev: i64 = 0;
+        for m in SQLITE_MIGRATIONS {
+            assert!(
+                m.version > prev,
+                "migration {} must have a higher version than {}",
+                m.name,
+                prev
+            );
+            prev = m.version;
+        }
     }
 
     /// Regression guard for Phase 2a's core change: with the single
