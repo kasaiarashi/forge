@@ -99,6 +99,28 @@ enum Commands {
     /// the current schema version. Picks the backend out of the
     /// `[database]` config block — same knob the server uses.
     Migrate,
+    /// Offline repack — consolidate small loose objects into pack
+    /// files to relieve NTFS file-count pressure and speed up cold
+    /// server restarts. Run this while the server is stopped; a
+    /// concurrent push is safe but may leave duplicate loose copies
+    /// that the next repack cleans up.
+    Repack {
+        /// Scan and report candidates without writing. Useful to
+        /// preview how many objects and how many bytes a live run
+        /// would move.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Loose objects whose compressed on-disk size is at or
+        /// under this threshold get packed. Default 4096 bytes
+        /// (NTFS cluster size).
+        #[arg(long, default_value_t = crate::services::repack::DEFAULT_MAX_LOOSE_BYTES)]
+        max_loose_bytes: u64,
+
+        /// Restrict to a single repo. Omit to repack every repo.
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// Run garbage collection and exit. Mark-and-sweep over every
     /// repo's object store; unreachable objects older than the grace
     /// window are deleted. Safe to invoke against a running server
@@ -395,6 +417,11 @@ fn main() -> Result<()> {
         Some(Commands::Gc { dry_run, grace_hours, ref repo }) => {
             let config = load_config_for_admin(&cli)?;
             cli_admin::gc(&config, dry_run, grace_hours, repo.as_deref())?;
+            return Ok(());
+        }
+        Some(Commands::Repack { dry_run, max_loose_bytes, ref repo }) => {
+            let config = load_config_for_admin(&cli)?;
+            cli_admin::repack(&config, dry_run, max_loose_bytes, repo.as_deref())?;
             return Ok(());
         }
         _ => {}

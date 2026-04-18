@@ -15,3 +15,4 @@ pub mod agents;
 pub mod agent_sweeper;
 pub mod session_sweeper;
 pub mod gc;
+pub mod repack;

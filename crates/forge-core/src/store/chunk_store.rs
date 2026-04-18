@@ -1,20 +1,74 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::compress;
 use crate::error::ForgeError;
 use crate::hash::ForgeHash;
 use crate::store::backend::ObjectBackend;
+use crate::store::pack::PackStore;
+
+/// Subdirectory holding `.pack` + `.idx` pairs underneath a repo's
+/// objects root. A packfile is opened read-only at `ChunkStore::new`
+/// time and participates in every read-path fallback (has, get,
+/// get_raw, iter_all). Writes always land as loose objects — a
+/// follow-up `forge-server repack` pass consolidates them.
+const PACKS_SUBDIR: &str = "packs";
 
 /// Content-addressable store on disk.
 /// Objects are stored in shard directories: `objects/ab/cd1234...`
 #[derive(Clone)]
 pub struct ChunkStore {
     root: PathBuf,
+    /// Read-only pack index. Cloned `ChunkStore`s share the same
+    /// backing map via `Arc`. An empty `packs/` directory yields an
+    /// empty PackStore — the fall-through paths are all O(1) on
+    /// that.
+    packs: Arc<PackStore>,
 }
 
 impl ChunkStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root: PathBuf = root.into();
+        // PackStore::open tolerates a missing dir; still attempt it so
+        // a later `repack` that populates the dir is picked up on the
+        // next server start without any bookkeeping.
+        let packs_dir = root.join(PACKS_SUBDIR);
+        let packs = match PackStore::open(&packs_dir) {
+            Ok(ps) => Arc::new(ps),
+            Err(e) => {
+                tracing::warn!(
+                    packs_dir = %packs_dir.display(),
+                    error = %e,
+                    "ChunkStore: failed to open packs dir — continuing without packs"
+                );
+                Arc::new(PackStore::open(std::path::PathBuf::new()).unwrap_or_else(|_| {
+                    // Impossible path: open() tolerates missing dirs. If
+                    // it really can't construct, fall back to an empty
+                    // store by way of a dummy temp dir.
+                    PackStore::open(std::env::temp_dir().join("forge-empty-packs"))
+                        .expect("empty PackStore")
+                }))
+            }
+        };
+        Self { root, packs }
+    }
+
+    /// Directory that [`new`] scans for packs. Exposed so the repack
+    /// CLI knows where to drop the freshly-written `.pack` / `.idx`
+    /// pair.
+    pub fn packs_dir(&self) -> PathBuf {
+        self.root.join(PACKS_SUBDIR)
+    }
+
+    /// Number of objects currently resolved via packs. Useful for
+    /// `forge-server repack --dry-run` reports.
+    pub fn packed_object_count(&self) -> usize {
+        self.packs.object_count()
+    }
+
+    /// Number of open pack files backing this store.
+    pub fn pack_file_count(&self) -> usize {
+        self.packs.pack_count()
     }
 
     pub fn root(&self) -> &Path {
@@ -43,11 +97,16 @@ impl ChunkStore {
         Ok(true)
     }
 
-    /// Retrieve, decompress, and verify data by hash.
+    /// Retrieve, decompress, and verify data by hash. Checks the loose
+    /// layout first (fast path for freshly written objects), then
+    /// falls through to the pack index.
     pub fn get(&self, hash: &ForgeHash) -> Result<Vec<u8>, ForgeError> {
         let path = self.object_path(hash);
         if !path.exists() {
-            return Err(ForgeError::ObjectNotFound(hash.to_hex()));
+            // Pack fall-through. PackStore::get re-verifies BLAKE3
+            // just like the loose path, so a tampered pack surfaces
+            // here rather than round-tripping as wrong data.
+            return self.packs.get(hash);
         }
         let compressed = std::fs::read(&path)?;
         let data = compress::decompress(&compressed)?;
@@ -64,10 +123,11 @@ impl ChunkStore {
     }
 
     /// Read compressed bytes directly from disk (no decompression).
+    /// Loose-first, pack fall-through — symmetrical to `get`.
     pub fn get_raw(&self, hash: &ForgeHash) -> Result<Vec<u8>, ForgeError> {
         let path = self.object_path(hash);
         if !path.exists() {
-            return Err(ForgeError::ObjectNotFound(hash.to_hex()));
+            return self.packs.get_raw(hash);
         }
         Ok(std::fs::read(&path)?)
     }
@@ -112,12 +172,16 @@ impl ChunkStore {
     /// Return the on-disk size of a stored object (compressed), or `None`
     /// if the object doesn't exist.  Uses metadata, no file read.
     pub fn file_size(&self, hash: &ForgeHash) -> Option<u64> {
-        std::fs::metadata(self.object_path(hash)).ok().map(|m| m.len())
+        if let Ok(m) = std::fs::metadata(self.object_path(hash)) {
+            return Some(m.len());
+        }
+        self.packs.file_size(hash)
     }
 
-    /// Check if an object exists in the store.
+    /// Check if an object exists in the store. Loose layout first,
+    /// then pack index — matches the read-path fall-through order.
     pub fn has(&self, hash: &ForgeHash) -> bool {
-        self.object_path(hash).exists()
+        self.object_path(hash).exists() || self.packs.has(hash)
     }
 
     /// Delete an object from the store.
@@ -141,15 +205,28 @@ impl ChunkStore {
     pub fn iter_all(
         &self,
     ) -> Result<impl Iterator<Item = Result<ForgeHash, ForgeError>>, ForgeError> {
-        // Shard dirs that haven't been written to simply don't exist
-        // yet. Treat an absent root as an empty store, not an error —
-        // happens on a brand-new repo before its first push.
-        if !self.root.exists() {
-            let empty: Vec<Result<ForgeHash, ForgeError>> = Vec::new();
-            return Ok(empty.into_iter());
+        let mut hashes: Vec<Result<ForgeHash, ForgeError>> = Vec::new();
+
+        // Pack-resident hashes come first so the enumerator surfaces a
+        // full listing even for a repo whose loose tree has been fully
+        // repacked (shard dirs emptied). GC's mark-and-sweep relies on
+        // seeing every stored hash here. We also record them in a
+        // HashSet so the loose walk can skip duplicates — a repack
+        // that's written the pack but not yet deleted the loose copy
+        // would otherwise surface both.
+        let mut packed: std::collections::HashSet<ForgeHash> =
+            std::collections::HashSet::with_capacity(self.packs.object_count());
+        for h in self.packs.iter_hashes() {
+            packed.insert(h);
+            hashes.push(Ok(h));
         }
 
-        let mut hashes: Vec<Result<ForgeHash, ForgeError>> = Vec::new();
+        // Shard dirs that haven't been written to simply don't exist
+        // yet. Treat an absent root as an empty loose layer, not an
+        // error — happens on a brand-new repo before its first push.
+        if !self.root.exists() {
+            return Ok(hashes.into_iter());
+        }
         // Shard directories are 2-hex (00..ff). Staging lives under
         // `_staging/`; skip anything that isn't a 2-hex directory so
         // a stray `_staging` (or tmp files) doesn't show up as an
@@ -195,7 +272,14 @@ impl ChunkStore {
                 }
                 let hex = format!("{shard_str}{rest_str}");
                 match ForgeHash::from_hex(&hex) {
-                    Ok(h) => hashes.push(Ok(h)),
+                    Ok(h) => {
+                        if packed.contains(&h) {
+                            // Pack has this hash already — avoid
+                            // double-reporting to iter_all callers.
+                            continue;
+                        }
+                        hashes.push(Ok(h));
+                    }
                     Err(e) => hashes.push(Err(e)),
                 }
             }
@@ -341,5 +425,98 @@ mod tests {
         assert_eq!(seen, 1);
         assert!(trait_ref.delete(&h).unwrap());
         assert!(!trait_ref.has(&h));
+    }
+
+    /// Write a packfile under `<root>/packs/` containing the given
+    /// `(hash, plaintext)` entries so ChunkStore's fall-through path
+    /// has something to resolve against.
+    fn seed_pack(root: &std::path::Path, name: &str, entries: &[(ForgeHash, &[u8])]) {
+        let compressed: Vec<(ForgeHash, Vec<u8>)> = entries
+            .iter()
+            .map(|(h, p)| (*h, crate::compress::compress(p).unwrap()))
+            .collect();
+        crate::store::pack::write_pack(root.join("packs"), name, compressed).unwrap();
+    }
+
+    #[test]
+    fn has_and_get_fall_through_to_pack_when_loose_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("objects");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let payload = b"only-in-pack";
+        let hash = ForgeHash::from_bytes(payload);
+        seed_pack(&root, "p1", &[(hash, payload)]);
+
+        let store = ChunkStore::new(&root);
+        assert!(store.has(&hash));
+        assert_eq!(store.get(&hash).unwrap(), payload);
+        assert!(store.file_size(&hash).unwrap() > 0);
+        assert_eq!(store.packed_object_count(), 1);
+        assert_eq!(store.pack_file_count(), 1);
+    }
+
+    #[test]
+    fn loose_shadows_pack_on_read_but_iter_dedups() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("objects");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let payload = b"shared-blob";
+        let hash = ForgeHash::from_bytes(payload);
+
+        // Seed the pack first …
+        seed_pack(&root, "pfx", &[(hash, payload)]);
+        // … then write a loose copy. Both exist on disk.
+        let store = ChunkStore::new(&root);
+        store.put(&hash, payload).unwrap();
+
+        // Loose wins the read (fast path). Pack is still consulted on
+        // other queries so GC sees a consistent world.
+        assert!(store.has(&hash));
+        assert_eq!(store.get(&hash).unwrap(), payload);
+
+        // iter_all must yield exactly one entry for the duplicated hash.
+        let count = store
+            .iter_all()
+            .unwrap()
+            .filter(|r| r.as_ref().unwrap() == &hash)
+            .count();
+        assert_eq!(count, 1, "duplicated hash across pack + loose must dedup");
+    }
+
+    #[test]
+    fn iter_all_merges_pack_and_loose_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("objects");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let packed_only = ForgeHash::from_bytes(b"p-only");
+        let loose_only = ForgeHash::from_bytes(b"l-only");
+        seed_pack(&root, "a", &[(packed_only, b"p-only")]);
+
+        let store = ChunkStore::new(&root);
+        store.put(&loose_only, b"l-only").unwrap();
+
+        let seen: std::collections::HashSet<_> = store
+            .iter_all()
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(seen.contains(&packed_only));
+        assert!(seen.contains(&loose_only));
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn missing_packs_dir_is_fine() {
+        // Brand-new repo with no `packs/` subdir — ChunkStore still
+        // constructs and the pack-aware read path just no-ops.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChunkStore::new(dir.path().join("objects"));
+        let h = ForgeHash::from_bytes(b"nothing");
+        assert!(!store.has(&h));
+        assert_eq!(store.pack_file_count(), 0);
+        assert_eq!(store.packed_object_count(), 0);
     }
 }

@@ -388,6 +388,96 @@ pub fn migrate(config: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+// ── Repack subcommand ────────────────────────────────────────────────────────
+
+/// `forge-server repack`: offline pack-builder. Consolidates small
+/// loose objects into `<repo>/objects/packs/<uuid>.{pack,idx}` and
+/// deletes the loose copies after the pack is durable on disk.
+///
+/// See [`crate::services::repack`] for the per-repo semantics. This
+/// wrapper just resolves config, lists repos, and prints a per-repo
+/// report table.
+pub fn repack(
+    config: &ServerConfig,
+    dry_run: bool,
+    max_loose_bytes: u64,
+    repo: Option<&str>,
+) -> Result<()> {
+    use crate::services::repack;
+    use crate::storage::fs::FsStorage;
+
+    if config.database.backend.as_str() != "sqlite" {
+        bail!(
+            "forge-server repack currently supports only the sqlite backend \
+             ([database] backend = \"sqlite\"). Postgres support lands alongside \
+             the full-server trait migration."
+        );
+    }
+
+    let base = config.storage.base_path.clone();
+    std::fs::create_dir_all(base.join("repos")).ok();
+    let db = open_db(config)?;
+    let repo_overrides: std::collections::HashMap<String, std::path::PathBuf> = config
+        .repos
+        .iter()
+        .filter_map(|(name, rc)| rc.path.as_ref().map(|p| (name.clone(), p.clone())))
+        .collect();
+    let fs = FsStorage::new(base.join("repos"), repo_overrides);
+
+    let repos: Vec<String> = if let Some(name) = repo {
+        vec![name.to_string()]
+    } else {
+        db.list_repos()?.into_iter().map(|r| r.name).collect()
+    };
+
+    let reports = repack::run(&fs, &repos, max_loose_bytes, dry_run)?;
+
+    println!(
+        "{:<32} {:>8} {:>8} {:>8} {:>10} {:>10} {:>14} {:>14} {:>7}",
+        "REPO",
+        "SCANNED",
+        "PACKED",
+        "LARGE",
+        "DUP",
+        "DELETED",
+        "LOOSE_BYTES",
+        "PACK_BYTES",
+        "ERRORS"
+    );
+    println!("{}", "-".repeat(118));
+    let mut total_packed = 0u64;
+    let mut total_loose = 0u64;
+    let mut total_pack = 0u64;
+    let mut total_errors = 0u64;
+    for r in &reports {
+        total_packed += r.packed;
+        total_loose += r.bytes_loose_before;
+        total_pack += r.bytes_pack;
+        total_errors += r.errors;
+        println!(
+            "{:<32} {:>8} {:>8} {:>8} {:>10} {:>10} {:>14} {:>14} {:>7}",
+            truncate(&r.repo, 32),
+            r.scanned,
+            r.packed,
+            r.skipped_large,
+            r.already_packed,
+            r.loose_deleted,
+            r.bytes_loose_before,
+            r.bytes_pack,
+            r.errors,
+        );
+    }
+    println!();
+    println!(
+        "Total: packed={total_packed}, loose_bytes_before={total_loose}, \
+         pack_bytes={total_pack}, errors={total_errors}"
+    );
+    if dry_run {
+        println!("(dry run — no packs written, no loose copies removed)");
+    }
+    Ok(())
+}
+
 // ── GC subcommand ────────────────────────────────────────────────────────────
 
 /// `forge-server gc`: run a mark-and-sweep pass over every repo (or a
