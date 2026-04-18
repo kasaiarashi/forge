@@ -21,7 +21,7 @@ pub mod pager;
 // The shared client surface lives in the `forge-client` crate; re-
 // export here so in-crate imports (`crate::client::...`) continue to
 // resolve whether the binary or the library is compiling.
-pub(crate) use forge_client::{client, credentials, tofu, url_resolver};
+pub(crate) use forge_client::{client, credentials, edge, tofu, url_resolver};
 
 // Thread-local "current command server URL hint". Commands that know
 // the target server up-front (`forge clone <url>`) stash it here so

@@ -261,9 +261,41 @@ fn open_db(config: &ServerConfig) -> Result<Arc<MetadataDb>> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let db = MetadataDb::open(&db_path)
-        .with_context(|| format!("open metadata db at {}", db_path.display()))?;
-    Ok(Arc::new(db))
+    match config.database.backend.as_str() {
+        "sqlite" => {
+            let db = MetadataDb::open(&db_path)
+                .with_context(|| format!("open metadata db at {}", db_path.display()))?;
+            Ok(Arc::new(db))
+        }
+        "postgres" => {
+            #[cfg(feature = "postgres")]
+            {
+                if config.database.url.is_empty() {
+                    bail!(
+                        "[database] url is required when backend = \"postgres\"; \
+                         run `forge-server postgres up` first"
+                    );
+                }
+                let pg_cfg = crate::storage::postgres::PgPoolConfig {
+                    url: config.database.url.clone(),
+                    max_size: config.database.max_connections,
+                    statement_timeout_ms: config.database.busy_timeout_ms,
+                    ..Default::default()
+                };
+                let db = MetadataDb::open_with_postgres(&db_path, pg_cfg)
+                    .context("open postgres metadata backend")?;
+                Ok(Arc::new(db))
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                bail!(
+                    "[database] backend = \"postgres\" requires the `postgres` Cargo \
+                     feature. Rebuild forge-server with `--features postgres`."
+                );
+            }
+        }
+        other => bail!("unknown [database] backend '{other}'"),
+    }
 }
 
 pub fn agent_add(config: &ServerConfig, name: &str, labels: &[String]) -> Result<()> {
@@ -442,11 +474,11 @@ pub fn repack(
     use crate::services::repack;
     use crate::storage::fs::FsStorage;
 
-    if config.database.backend.as_str() != "sqlite" {
+    if config.objects.backend.as_str() == "s3" {
         bail!(
-            "forge-server repack currently supports only the sqlite backend \
-             ([database] backend = \"sqlite\"). Postgres support lands alongside \
-             the full-server trait migration."
+            "forge-server repack currently supports only the fs object backend \
+             ([objects] backend = \"fs\"). Packfiles are a local-disk optimisation; \
+             S3 already consolidates via multipart + storage-class policies."
         );
     }
 
@@ -520,9 +552,13 @@ pub fn repack(
 /// single repo via `--repo`). Intended for operators who want an
 /// explicit reclaim window in addition to the scheduled sweep.
 ///
-/// Refuses `postgres` backend for now — GC reads the metadata via
-/// `MetadataDb` directly since the trait-covered surface is enough for
-/// the push path but the CLI path also touches concrete helpers.
+/// Works with both SQLite and Postgres metadata backends — `list_repos`
+/// and `get_all_refs` both dispatch through the `MetadataBackend` trait.
+///
+/// Refuses `[objects] backend = "s3"` because GC's mark-and-sweep is
+/// implemented against `FsStorage` / `ChunkStore` directly; the S3
+/// object store has its own lifecycle semantics and would need a
+/// separate mark-and-delete pass (not yet implemented).
 pub fn gc(
     config: &ServerConfig,
     dry_run: bool,
@@ -532,11 +568,11 @@ pub fn gc(
     use crate::services::gc;
     use crate::storage::fs::FsStorage;
 
-    if config.database.backend.as_str() != "sqlite" {
+    if config.objects.backend.as_str() == "s3" {
         bail!(
-            "forge-server gc currently supports only the sqlite backend \
-             ([database] backend = \"sqlite\"). Postgres GC lands in a \
-             later phase once the server fully runs on the trait."
+            "forge-server gc currently supports only the fs object backend \
+             ([objects] backend = \"fs\"). S3 GC needs a separate list+delete \
+             pass and is not yet implemented."
         );
     }
 

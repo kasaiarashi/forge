@@ -46,7 +46,7 @@ pub fn set(key: &str, value: Option<String>, file: Option<String>, json_out: boo
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut client = crate::client::connect_forge(&server_url).await?;
+        let mut client = crate::client::connect_forge_write(&server_url).await?;
         let resp = client
             .create_secret(CreateSecretRequest {
                 repo: repo.clone(),
@@ -74,7 +74,7 @@ pub fn delete(key: &str, json_out: bool) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut client = crate::client::connect_forge(&server_url).await?;
+        let mut client = crate::client::connect_forge_write(&server_url).await?;
         let resp = client
             .delete_secret(DeleteSecretRequest {
                 repo,

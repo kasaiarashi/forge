@@ -20,7 +20,7 @@ pub fn run(path: String, force: bool, json: bool) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut client = crate::client::connect_forge(&server_url).await?;
+        let mut client = crate::client::connect_forge_write(&server_url).await?;
 
         let resp = client
             .release_lock(UnlockRequest {
