@@ -96,6 +96,19 @@ pub trait MetadataBackend: Send + Sync {
         ttl_seconds: i64,
     ) -> Result<()>;
     fn record_session_object(&self, sid: &str, hash: &[u8], size: i64) -> Result<()>;
+    /// Batched variant used by the push hot path. A single transaction
+    /// covers up to N `INSERT OR IGNORE` rows, which amortises SQLite's
+    /// write-mutex cost across the batch (~100 µs → ~1 µs per row).
+    /// The default impl just loops over [`Self::record_session_object`]
+    /// so backends that can't implement a bulk-insert cheaply still
+    /// compile, but both in-tree impls override it with a real bulk
+    /// txn for the hot-path win.
+    fn record_session_objects(&self, sid: &str, rows: &[(Vec<u8>, i64)]) -> Result<()> {
+        for (h, s) in rows {
+            self.record_session_object(sid, h, *s)?;
+        }
+        Ok(())
+    }
     fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>>;
     fn list_session_object_hashes(&self, sid: &str) -> Result<Vec<Vec<u8>>>;
     /// Hash + declared size per object recorded against the session.

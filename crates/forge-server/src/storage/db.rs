@@ -593,6 +593,40 @@ impl MetadataDb {
         Ok(())
     }
 
+    /// Bulk-insert a batch of `(hash, size)` rows under the same
+    /// session id, all inside a single `BEGIN IMMEDIATE` transaction
+    /// with one prepared statement. On SQLite this is dramatically
+    /// cheaper than N autocommit inserts because each autocommit
+    /// acquires + releases the write mutex + writes a WAL frame;
+    /// batching runs the WAL write once for the whole group. Used
+    /// by the push handler to drop per-object DB cost from the hot
+    /// path — see `services::grpc::push_objects`.
+    pub fn record_session_objects(
+        &self,
+        sid: &str,
+        rows: &[(Vec<u8>, i64)],
+    ) -> Result<()> {
+        dispatch_pg!(self, record_session_objects, sid, rows);
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO session_objects (session_id, hash, size)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for (hash, size) in rows {
+                stmt.execute(rusqlite::params![sid, hash, size])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>> {
         dispatch_pg!(self, get_upload_session, sid);
         let conn = self.conn()?;
@@ -2240,6 +2274,9 @@ impl crate::storage::backend::MetadataBackend for MetadataDb {
     fn record_session_object(&self, sid: &str, hash: &[u8], size: i64) -> Result<()> {
         MetadataDb::record_session_object(self, sid, hash, size)
     }
+    fn record_session_objects(&self, sid: &str, rows: &[(Vec<u8>, i64)]) -> Result<()> {
+        MetadataDb::record_session_objects(self, sid, rows)
+    }
     fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>> {
         MetadataDb::get_upload_session(self, sid)
     }
@@ -2512,6 +2549,34 @@ mod tests {
         assert_eq!(hashes.len(), 2, "dup hash should not produce dup row");
         assert!(hashes.iter().any(|h| h == &vec![0x11u8; 32]));
         assert!(hashes.iter().any(|h| h == &vec![0x22u8; 32]));
+    }
+
+    #[test]
+    fn record_session_objects_batch_inserts_all_rows() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-bulk", "alice/forcetest", None, 60)
+            .unwrap();
+
+        // Mix of unique + duplicate hashes across two batches — the
+        // bulk path has to honour INSERT OR IGNORE the same way the
+        // single-row path does.
+        let first: Vec<(Vec<u8>, i64)> = (0u8..50)
+            .map(|i| (h(i).to_vec(), 100 + i as i64))
+            .collect();
+        db.record_session_objects("sid-bulk", &first).unwrap();
+
+        // Second batch: overlaps with first (should be ignored) + adds 10 new.
+        let second: Vec<(Vec<u8>, i64)> = (40u8..60)
+            .map(|i| (h(i).to_vec(), 900 + i as i64))
+            .collect();
+        db.record_session_objects("sid-bulk", &second).unwrap();
+
+        let hashes = db.list_session_object_hashes("sid-bulk").unwrap();
+        assert_eq!(hashes.len(), 60, "expected 60 unique rows after overlap");
+
+        // An empty batch is a valid no-op.
+        db.record_session_objects("sid-bulk", &[]).unwrap();
+        assert_eq!(db.list_session_object_hashes("sid-bulk").unwrap().len(), 60);
     }
 
     #[test]

@@ -104,6 +104,12 @@ impl FsStorage {
 /// `<repo>/objects/_staging/<sid>/<shard>/<rest>` and are promoted into
 /// the live `<repo>/objects/<shard>/<rest>` tree by `promote_into` —
 /// an atomic filesystem rename, not a copy.
+///
+/// `Clone` is cheap (a single `PathBuf` clone) and lets the gRPC push
+/// handler dispatch many `put`/`append` calls in parallel on the
+/// tokio blocking pool — each worker takes its own clone and doesn't
+/// fight over a shared handle.
+#[derive(Clone)]
 pub struct StagingStore {
     root: PathBuf,
 }
