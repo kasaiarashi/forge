@@ -312,6 +312,13 @@ service ForgeService {
     rpc ReleaseLock(UnlockRequest) returns (UnlockResponse);
     rpc ListLocks(ListLocksRequest) returns (ListLocksResponse);
     rpc VerifyLocks(VerifyLocksRequest) returns (VerifyLocksResponse);
+    // Phase 4d — subscribe to lock acquire/release events in real time.
+    // Kills the Unreal Engine plugin's polling loop over ListLocks.
+    // Server emits one LockEvent per acquire/release on the matching
+    // repo, plus a snapshot of the current state on subscription so
+    // clients don't need a separate ListLocks round-trip to prime
+    // their view.
+    rpc StreamLockEvents(StreamLockEventsRequest) returns (stream LockEvent);
 
     // Repository management
     rpc ListRepos(ListReposRequest) returns (ListReposResponse);
@@ -697,6 +704,36 @@ message ListLocksRequest {
 
 message ListLocksResponse {
     repeated LockInfo locks = 1;
+}
+
+// Phase 4d — subscribe to a live feed of lock acquire / release
+// events on `repo`. Subscription begins with a SNAPSHOT event per
+// currently-held lock so the client has a complete picture without a
+// separate ListLocks; every subsequent event is ACQUIRE or RELEASE.
+message StreamLockEventsRequest {
+    string repo = 1;
+    reserved 2 to 15;
+}
+
+message LockEvent {
+    enum Kind {
+        // Part of the initial state dump emitted on subscribe. Field
+        // `info` carries the current owner + timestamp.
+        SNAPSHOT = 0;
+        // A fresh lock was acquired after subscription.
+        ACQUIRE = 1;
+        // A lock was released after subscription. `info` describes
+        // the lock that went away (path is the load-bearing field).
+        RELEASE = 2;
+    }
+    Kind kind = 1;
+    LockInfo info = 2;
+    // Monotonic sequence number within this stream. Clients use it to
+    // detect dropped events on a slow-subscriber overflow (broadcast
+    // channel capacity exceeded) and request a re-subscribe.
+    uint64 seq = 3;
+
+    reserved 4 to 15;
 }
 
 message VerifyLocksRequest {

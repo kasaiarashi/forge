@@ -223,6 +223,38 @@ int forge_push(struct forge_session_t *session, int force, struct forge_error_t 
 int forge_pull(struct forge_session_t *session, struct forge_error_t *out_err);
 
 /**
+ * Start a background subscription to the server's `StreamLockEvents`
+ * for this workspace's default remote. Events land in the session's
+ * internal buffer; the caller drains them via
+ * [`forge_poll_lock_events_json`].
+ *
+ * Calling twice on the same session is a no-op — the subscriber
+ * task persists for the session's lifetime. Closing the session
+ * drops the runtime, which aborts the task.
+ *
+ * Returns 0 on success; non-zero populates `*out_err`.
+ *
+ * # Safety
+ * `session` non-null; `out_err` nullable writable.
+ */
+int forge_subscribe_lock_events(struct forge_session_t *session, struct forge_error_t *out_err);
+
+/**
+ * Drain the event buffer and return a JSON array of events. Each
+ * element mirrors the proto `LockEvent` shape:
+ * `{"kind":"snapshot"|"acquire"|"release", "seq":N, "info":{path,owner,workspace_id,reason,created_at}}`.
+ *
+ * Returns an empty array string `"[]"` when nothing is pending.
+ * Null on error. Non-null success values must be freed via
+ * [`forge_string_free`].
+ *
+ * # Safety
+ * `session` non-null; `out_err` nullable writable.
+ */
+char *forge_poll_lock_events_json(struct forge_session_t *session,
+                                  struct forge_error_t *out_err);
+
+/**
  * List the active locks on this workspace's default remote as a
  * JSON array. Each element is `{"path":..., "owner":..., "created_at":...}`.
  *

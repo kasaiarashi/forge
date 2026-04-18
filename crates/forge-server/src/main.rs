@@ -610,6 +610,11 @@ pub(crate) async fn serve_inner(
     // StreamStepLogs readers subscribe.
     let log_hub = Arc::new(services::logs::LogHub::new());
 
+    // Phase 4d — live lock-event broadcast hub. Acquire/release
+    // handlers publish; StreamLockEvents subscribers (UE plugin)
+    // tail them instead of polling ListLocks on a timer.
+    let lock_events_hub = Arc::new(services::lock_events::LockEventHub::new());
+
     // Composite actions registry: copy the bundled `actions/` tree (shipped
     // next to the server binary or resolved via the repo's actions dir)
     // into `<base>/actions/` on every start. Operator overrides dropped
@@ -653,6 +658,7 @@ pub(crate) async fn serve_inner(
         artifacts: Arc::clone(&artifacts),
         artifact_signer_key: master_key,
         log_hub: Arc::clone(&log_hub),
+        lock_events: Arc::clone(&lock_events_hub),
         limits: config.limits.clone(),
     };
 

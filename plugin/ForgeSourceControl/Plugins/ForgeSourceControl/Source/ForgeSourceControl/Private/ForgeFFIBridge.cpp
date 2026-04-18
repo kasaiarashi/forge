@@ -39,6 +39,8 @@ namespace
 	typedef int                   (*PFN_forge_commit)(forge_session_t*, const char*, forge_error_t*);
 	typedef int                   (*PFN_forge_push)(forge_session_t*, int, forge_error_t*);
 	typedef int                   (*PFN_forge_pull)(forge_session_t*, forge_error_t*);
+	typedef int                   (*PFN_forge_subscribe_lock_events)(forge_session_t*, forge_error_t*);
+	typedef char*                 (*PFN_forge_poll_lock_events_json)(forge_session_t*, forge_error_t*);
 
 	PFN_forge_version         GForgeVersion         = nullptr;
 	PFN_forge_abi_version     GForgeAbiVersion      = nullptr;
@@ -56,12 +58,14 @@ namespace
 	PFN_forge_commit              GForgeCommit            = nullptr;
 	PFN_forge_push                GForgePush              = nullptr;
 	PFN_forge_pull                GForgePull              = nullptr;
+	PFN_forge_subscribe_lock_events GForgeSubscribeLockEvents = nullptr;
+	PFN_forge_poll_lock_events_json GForgePollLockEventsJson  = nullptr;
 
 	// Minimum ABI version the plugin accepts. Bump when the header
 	// adds or breaks exported signatures so a stale `.dll` on disk
 	// after a plugin upgrade can't silently load and crash on a
 	// later call.
-	constexpr int32 kMinSupportedAbi = 3;
+	constexpr int32 kMinSupportedAbi = 4;
 
 	/** Resolve the expected location of `forge_ffi.dll` next to the
 	 *  plugin's Binaries/ dir so the user doesn't need to PATH-install. */
@@ -194,6 +198,8 @@ void FForgeFFI::Initialize()
 	FFI_RESOLVE(forge_commit);
 	FFI_RESOLVE(forge_push);
 	FFI_RESOLVE(forge_pull);
+	FFI_RESOLVE(forge_subscribe_lock_events);
+	FFI_RESOLVE(forge_poll_lock_events_json);
 
 	#undef FFI_RESOLVE
 
@@ -241,6 +247,8 @@ void FForgeFFI::Shutdown()
 	GForgeCommit = nullptr;
 	GForgePush = nullptr;
 	GForgePull = nullptr;
+	GForgeSubscribeLockEvents = nullptr;
+	GForgePollLockEventsJson = nullptr;
 #endif
 }
 
@@ -519,6 +527,52 @@ bool FForgeFFI::Push(
 #else
 	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
 	return false;
+#endif
+}
+
+bool FForgeFFI::SubscribeLockEvents(const FForgeFFISession& Session, FText& OutError)
+{
+#if FORGE_FFI_HAVE_HEADER
+	if (!IsAvailable() || !Session.IsValid())
+	{
+		OutError = LOCTEXT("SubUnavailable", "FFI session is not available.");
+		return false;
+	}
+	forge_error_t Err = {};
+	const int Rc = GForgeSubscribeLockEvents(Session.Get(), &Err);
+	if (Rc != 0)
+	{
+		OutError = ConsumeError(Err, (forge_status_t)1, TEXT("forge_subscribe_lock_events failed"));
+		return false;
+	}
+	OutError = FText::GetEmpty();
+	return true;
+#else
+	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
+	return false;
+#endif
+}
+
+FString FForgeFFI::PollLockEventsJson(const FForgeFFISession& Session, FText& OutError)
+{
+#if FORGE_FFI_HAVE_HEADER
+	if (!IsAvailable() || !Session.IsValid())
+	{
+		OutError = LOCTEXT("PollUnavailable", "FFI session is not available.");
+		return FString();
+	}
+	forge_error_t Err = {};
+	char* Raw = GForgePollLockEventsJson(Session.Get(), &Err);
+	if (Raw == nullptr)
+	{
+		OutError = ConsumeError(Err, (forge_status_t)1, TEXT("forge_poll_lock_events_json failed"));
+		return FString();
+	}
+	OutError = FText::GetEmpty();
+	return ConsumeOwnedString(Raw);
+#else
+	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
+	return FString();
 #endif
 }
 

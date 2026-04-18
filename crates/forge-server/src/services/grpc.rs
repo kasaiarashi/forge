@@ -19,6 +19,7 @@ use crate::auth::authorize::{
 use crate::auth::interceptor::caller_of;
 use crate::auth::UserStore;
 use crate::config::LimitsSection;
+use crate::services::lock_events::LockEventHub;
 use crate::storage::db::{CommitSessionOutcome, MetadataDb, RefUpdateSpec};
 use crate::storage::fs::FsStorage;
 
@@ -118,6 +119,9 @@ pub struct ForgeGrpcService {
     /// Live step-log broadcast hub. Engine/agents publish per-run chunks;
     /// `StreamStepLogs` subscribers tail them.
     pub log_hub: Arc<crate::services::logs::LogHub>,
+    /// Live lock-event broadcast hub. Phase 4d — UE plugin subscribes
+    /// to `StreamLockEvents` instead of polling `ListLocks` on a timer.
+    pub lock_events: Arc<LockEventHub>,
     /// Push/upload limits applied inside push_objects + commit_push. Owned
     /// so the service doesn't need to keep a borrow on ServerConfig.
     pub limits: LimitsSection,
@@ -273,6 +277,7 @@ impl ForgeService for ForgeGrpcService {
     type PullObjectsStream = ReceiverStream<Result<ObjectChunk, Status>>;
     type DownloadArtifactStream = Pin<Box<dyn futures::Stream<Item = Result<ArtifactChunk, Status>> + Send>>;
     type StreamStepLogsStream = Pin<Box<dyn futures::Stream<Item = Result<StepLogChunk, Status>> + Send>>;
+    type StreamLockEventsStream = ReceiverStream<Result<LockEvent, Status>>;
 
     async fn push_objects(
         &self,
@@ -1061,6 +1066,82 @@ impl ForgeService for ForgeGrpcService {
         }))
     }
 
+    async fn stream_lock_events(
+        &self,
+        request: Request<StreamLockEventsRequest>,
+    ) -> Result<Response<Self::StreamLockEventsStream>, Status> {
+        use forge_proto::forge::lock_event::Kind as LockEventKind;
+
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.clone();
+        require_repo_read(&caller, &self.user_store, &repo, self.db.is_repo_public(&repo))?;
+
+        // Seed the subscription with a SNAPSHOT set of the currently-
+        // held locks. Clients joining the feed get a complete view
+        // without a separate ListLocks round-trip; every ACQUIRE/
+        // RELEASE after subscription arrives on the same stream.
+        let snapshot = self
+            .db
+            .list_locks(&repo, "", "")
+            .map_err(|e| internal_err("stream_lock_events: list", e))?;
+        // Subscribe BEFORE emitting the snapshot — otherwise a lock
+        // event that lands in the window between list + subscribe
+        // vanishes from the client's view. Small duplicate risk
+        // remains (new event also appears on the live stream); the
+        // client dedupes via (path, seq).
+        let mut rx = self.lock_events.subscribe(&repo);
+
+        let (tx, out_rx) = tokio::sync::mpsc::channel::<Result<LockEvent, Status>>(64);
+
+        // Flush the snapshot into the channel on the spawned task —
+        // keeps this handler's critical section short.
+        tokio::spawn(async move {
+            for lock in snapshot {
+                let ev = LockEvent {
+                    kind: LockEventKind::Snapshot as i32,
+                    info: Some(LockInfo {
+                        path: lock.path,
+                        owner: lock.owner,
+                        workspace_id: lock.workspace_id,
+                        reason: lock.reason,
+                        created_at: lock.created_at,
+                    }),
+                    seq: 0, // Snapshots carry seq=0; live events use the global counter.
+                };
+                if tx.send(Ok(ev)).await.is_err() {
+                    return;
+                }
+            }
+            // Now forward the live feed.
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if tx.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Slow subscriber overflow. Tell the client via
+                        // a Status::data_loss so it can re-sync (list
+                        // + re-subscribe) instead of silently skipping
+                        // events.
+                        let _ = tx
+                            .send(Err(Status::data_loss(format!(
+                                "lock event stream lagged {n} events; resync required"
+                            ))))
+                            .await;
+                        return;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(out_rx)))
+    }
+
     async fn acquire_lock(
         &self,
         request: Request<LockRequest>,
@@ -1086,6 +1167,20 @@ impl ForgeService for ForgeGrpcService {
                     repo = repo,
                     path = %req.path,
                     owner = %req.owner
+                );
+                // Phase 4d — publish to subscribers (StreamLockEvents).
+                // We build a fresh LockInfo here rather than round-
+                // tripping through `list_locks` because acquire took
+                // the write lock and we already hold every field.
+                self.lock_events.publish_acquire(
+                    repo,
+                    LockInfo {
+                        path: req.path.clone(),
+                        owner: req.owner.clone(),
+                        workspace_id: req.workspace_id.clone(),
+                        reason: req.reason.clone(),
+                        created_at: chrono::Utc::now().timestamp(),
+                    },
                 );
                 Ok(Response::new(LockResponse {
                     granted: true,
@@ -1141,6 +1236,22 @@ impl ForgeService for ForgeGrpcService {
             path = %req.path,
             owner = %req.owner
         );
+
+        if success {
+            // Phase 4d — tell subscribers the lock went away. We
+            // emit the path + owner we already have; timestamp stays
+            // zero because the release event isn't a stored record.
+            self.lock_events.publish_release(
+                repo,
+                LockInfo {
+                    path: req.path.clone(),
+                    owner: req.owner.clone(),
+                    workspace_id: String::new(),
+                    reason: String::new(),
+                    created_at: 0,
+                },
+            );
+        }
 
         Ok(Response::new(UnlockResponse {
             success,

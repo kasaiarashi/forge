@@ -143,6 +143,16 @@ public:
 	 */
 	const FForgeFFISession* GetFFISession();
 
+	/**
+	 * Drain the session's pending lock-event buffer and mark the
+	 * provider dirty if anything interesting arrived. Called once
+	 * per Tick. When the FFI session isn't available (dev builds, or
+	 * session-open failure) this is a cheap no-op, and the periodic
+	 * UpdateStatus refresh keeps the lock cache fresh on a slower
+	 * cadence.
+	 */
+	void PumpLockEvents();
+
 private:
 	TSharedPtr<IForgeWorker, ESPMode::ThreadSafe> CreateWorker(const FName& InOperationName) const;
 	ECommandResult::Type IssueCommand(FForgeSourceControlCommand& InCommand);

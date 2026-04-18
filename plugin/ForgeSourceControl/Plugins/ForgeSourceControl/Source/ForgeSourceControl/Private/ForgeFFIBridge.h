@@ -211,6 +211,25 @@ public:
 		const FForgeFFISession& Session,
 		FText& OutError);
 
+	// ── Lock-event subscription (Phase 4d) ────────────────────────
+
+	/**
+	 * Start a background subscription to the server's live lock-event
+	 * stream. Idempotent — a second call on the same session is a
+	 * no-op. Events accumulate in the session's internal buffer;
+	 * drain them with [`PollLockEventsJson`].
+	 */
+	static bool SubscribeLockEvents(const FForgeFFISession& Session, FText& OutError);
+
+	/**
+	 * Drain the session's pending lock-event buffer and return a JSON
+	 * array. Each element is
+	 * `{"kind":"snapshot|acquire|release","seq":N,"info":{...}}`.
+	 * Safe to call on every editor Tick — returns `"[]"` when nothing
+	 * is pending.
+	 */
+	static FString PollLockEventsJson(const FForgeFFISession& Session, FText& OutError);
+
 private:
 	// Non-instantiable.
 	FForgeFFI() = delete;

@@ -139,6 +139,21 @@ const FForgeFFISession* FForgeSourceControlProvider::GetFFISession()
 		*WorkspaceRoot,
 		*FForgeFFI::GetLibraryVersion(),
 		FForgeFFI::GetAbiVersion());
+
+	// Phase 4d — kick off the live lock-event subscription in the
+	// background. The subscriber task lives on the session's tokio
+	// runtime; events buffer inside the Rust session and the
+	// provider drains them on Tick via PumpLockEvents. Best-effort:
+	// a subscription failure (no remote configured, server down) is
+	// logged and the polling fallback in UpdateStatus keeps
+	// lock-cache freshness reasonable.
+	FText SubError;
+	if (!FForgeFFI::SubscribeLockEvents(FFISession, SubError))
+	{
+		UE_LOG(LogSourceControl, Warning,
+			TEXT("Forge: lock-event subscribe failed (will rely on periodic UpdateStatus): %s"),
+			*SubError.ToString());
+	}
 	return &FFISession;
 }
 
@@ -413,8 +428,43 @@ ECommandResult::Type FForgeSourceControlProvider::ExecuteSynchronousCommand(
 
 // ── Tick ─────────────────────────────────────────────────────────────────────
 
+void FForgeSourceControlProvider::PumpLockEvents()
+{
+	const FForgeFFISession* FFI = GetFFISession();
+	if (FFI == nullptr)
+	{
+		return;
+	}
+	FText PollError;
+	const FString Json = FForgeFFI::PollLockEventsJson(*FFI, PollError);
+	if (Json.IsEmpty() || Json == TEXT("[]"))
+	{
+		return;
+	}
+
+	// Parsing the JSON into structured FForgeSourceControlState
+	// updates is the job of a follow-up (matches the same shape as
+	// UpdateStatus returns). For now we flag the provider dirty +
+	// fire an async UpdateStatus — that refreshes the cache with
+	// the canonical post-event state. Still a latency win over the
+	// old periodic polling: we trigger the refresh the instant the
+	// server reports a change, instead of waiting for the next
+	// polling cycle.
+	UE_LOG(LogSourceControl, Verbose,
+		TEXT("Forge: lock events received, refreshing cache: %s"),
+		*Json);
+	RefreshStatusAsync();
+}
+
 void FForgeSourceControlProvider::Tick()
 {
+	// Phase 4d — drain any lock events the background subscriber
+	// pushed into the FFI session's buffer since the last tick. When
+	// anything lands, flip the state-change flag so the next tick
+	// broadcasts. No polling, no subprocesses — the subscriber lives
+	// on the shared tokio runtime.
+	PumpLockEvents();
+
 	// Broadcast deferred from previous tick (gives renderer a full frame to finish).
 	if (bPendingBroadcast)
 	{

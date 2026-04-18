@@ -104,7 +104,8 @@ pub struct forge_session_t {
 
 mod session {
     use super::*;
-    use std::sync::{Arc, OnceLock};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex, OnceLock};
 
     /// The real struct behind [`super::forge_session_t`]. Only
     /// reachable inside this crate; C sees the opaque tag.
@@ -115,9 +116,37 @@ mod session {
     /// services every remote op for the session's lifetime — the
     /// UE editor keeps one session open across its whole run, so
     /// amortising the startup cost matters.
+    /// Buffered JSON representations of `LockEvent`s received from the
+    /// server's `StreamLockEvents`. The plugin drains this on its
+    /// Tick via [`super::forge_poll_lock_events_json`]. Bounded by
+    /// `EVENT_BUFFER_CAP` so a misbehaving subscriber that never
+    /// polls can't consume unbounded memory — a full buffer silently
+    /// drops the oldest event (with a monotonic `seq` the plugin
+    /// notices) rather than blocking the subscribe task.
+    pub type EventBuffer = Arc<Mutex<VecDeque<String>>>;
+    const EVENT_BUFFER_CAP: usize = 2048;
+
+    pub fn push_event(buf: &EventBuffer, json: String) {
+        let mut guard = buf.lock().expect("event buffer poisoned");
+        if guard.len() >= EVENT_BUFFER_CAP {
+            guard.pop_front();
+        }
+        guard.push_back(json);
+    }
+
+    pub fn drain_events(buf: &EventBuffer) -> Vec<String> {
+        let mut guard = buf.lock().expect("event buffer poisoned");
+        std::mem::take(&mut *guard).into_iter().collect()
+    }
+
     pub struct Session {
         pub workspace: Workspace,
         runtime: OnceLock<Arc<tokio::runtime::Runtime>>,
+        pub event_buffer: EventBuffer,
+        /// `true` once `forge_subscribe_lock_events` has spawned a
+        /// subscriber task. Prevents a double-subscribe from filling
+        /// the buffer twice per event.
+        pub lock_events_subscribed: Mutex<bool>,
     }
 
     impl Session {
@@ -127,6 +156,8 @@ mod session {
             Ok(Self {
                 workspace,
                 runtime: OnceLock::new(),
+                event_buffer: Arc::new(Mutex::new(VecDeque::new())),
+                lock_events_subscribed: Mutex::new(false),
             })
         }
 
@@ -632,6 +663,177 @@ pub unsafe extern "C" fn forge_pull(
     })
 }
 
+// ── Lock-event subscription (Phase 4d) ──────────────────────────────────────
+
+/// Start a background subscription to the server's `StreamLockEvents`
+/// for this workspace's default remote. Events land in the session's
+/// internal buffer; the caller drains them via
+/// [`forge_poll_lock_events_json`].
+///
+/// Calling twice on the same session is a no-op — the subscriber
+/// task persists for the session's lifetime. Closing the session
+/// drops the runtime, which aborts the task.
+///
+/// Returns 0 on success; non-zero populates `*out_err`.
+///
+/// # Safety
+/// `session` non-null; `out_err` nullable writable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_subscribe_lock_events(
+    session: *mut forge_session_t,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        match start_lock_event_subscription(sess) {
+            Ok(()) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_subscribe_lock_events",
+        );
+        1
+    })
+}
+
+/// Drain the event buffer and return a JSON array of events. Each
+/// element mirrors the proto `LockEvent` shape:
+/// `{"kind":"snapshot"|"acquire"|"release", "seq":N, "info":{path,owner,workspace_id,reason,created_at}}`.
+///
+/// Returns an empty array string `"[]"` when nothing is pending.
+/// Null on error. Non-null success values must be freed via
+/// [`forge_string_free`].
+///
+/// # Safety
+/// `session` non-null; `out_err` nullable writable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_poll_lock_events_json(
+    session: *mut forge_session_t,
+    out_err: *mut forge_error_t,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return ptr::null_mut();
+        };
+        let items = session::drain_events(&sess.event_buffer);
+        // Each item is already a JSON object string — splice them
+        // into an array with commas. Cheaper + simpler than
+        // re-parsing through serde_json::Value.
+        let mut out = String::with_capacity(2 + items.iter().map(|s| s.len() + 1).sum::<usize>());
+        out.push('[');
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(item);
+        }
+        out.push(']');
+        clear_error(out_err);
+        string_to_raw(out, out_err)
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_poll_lock_events_json",
+        );
+        ptr::null_mut()
+    })
+}
+
+fn start_lock_event_subscription(sess: &Session) -> Result<(), anyhow::Error> {
+    use forge_proto::forge::StreamLockEventsRequest;
+    use serde_json::json;
+
+    {
+        let mut guard = sess
+            .lock_events_subscribed
+            .lock()
+            .expect("session subscribe flag poisoned");
+        if *guard {
+            return Ok(()); // Idempotent.
+        }
+        *guard = true;
+    }
+
+    let (url, repo) = sess.remote()?;
+    let rt = sess.runtime()?;
+    let buffer = std::sync::Arc::clone(&sess.event_buffer);
+
+    rt.spawn(async move {
+        let mut client = match forge_client::connect_forge(&url).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "forge-ffi: lock-event subscribe: connect failed");
+                return;
+            }
+        };
+        let mut stream = match client
+            .stream_lock_events(StreamLockEventsRequest { repo: repo.clone() })
+            .await
+        {
+            Ok(resp) => resp.into_inner(),
+            Err(e) => {
+                tracing::warn!(error = %e, "forge-ffi: stream_lock_events rejected");
+                return;
+            }
+        };
+
+        loop {
+            match stream.message().await {
+                Ok(Some(ev)) => {
+                    // Map the proto enum to a stable string so the
+                    // plugin doesn't need proto-aware decoding.
+                    let kind = match ev.kind {
+                        0 => "snapshot",
+                        1 => "acquire",
+                        2 => "release",
+                        _ => "unknown",
+                    };
+                    let info = ev.info.unwrap_or_default();
+                    let json_obj = json!({
+                        "kind": kind,
+                        "seq": ev.seq,
+                        "info": {
+                            "path": info.path,
+                            "owner": info.owner,
+                            "workspace_id": info.workspace_id,
+                            "reason": info.reason,
+                            "created_at": info.created_at,
+                        },
+                    });
+                    session::push_event(&buffer, json_obj.to_string());
+                }
+                Ok(None) => {
+                    // Server closed cleanly. Session survives; the
+                    // plugin can re-subscribe on the next poll if it
+                    // cares. Logging at info level so an operator
+                    // notices a flapping stream.
+                    tracing::info!("forge-ffi: lock-event stream closed");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "forge-ffi: lock-event stream error");
+                    return;
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
 // ── Remote-backed ops ───────────────────────────────────────────────────────
 
 /// List the active locks on this workspace's default remote as a
@@ -1009,7 +1211,9 @@ pub extern "C" fn forge_abi_version() -> c_int {
     //   2 — locks (list/acquire/release), workspace_info_json,
     //       current_branch, tokio runtime on the session.
     //   3 — index + commit + push + pull via forge_cli::ops.
-    3
+    //   4 — lock-event subscription (subscribe + poll) + LockEvent
+    //       broadcast hub on the server.
+    4
 }
 
 // ── Tests (Rust-side; exercise the FFI contract as a C caller would) ────────
@@ -1217,8 +1421,39 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_bumped_to_three() {
-        assert_eq!(forge_abi_version(), 3);
+    fn abi_version_bumped_to_four() {
+        assert_eq!(forge_abi_version(), 4);
+    }
+
+    #[test]
+    fn poll_lock_events_empty_buffer_returns_empty_array() {
+        with_workspace(|root| {
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let ptr = unsafe { forge_poll_lock_events_json(sess, &mut err) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe {
+                forge_string_free(ptr);
+                forge_session_close(sess);
+            }
+            assert_eq!(s, "[]");
+            assert_eq!(err.code, forge_status_t::FORGE_OK);
+        });
+    }
+
+    #[test]
+    fn event_buffer_push_drain_roundtrip_and_cap() {
+        let buf = session::EventBuffer::default();
+        session::push_event(&buf, r#"{"kind":"acquire","seq":1}"#.into());
+        session::push_event(&buf, r#"{"kind":"release","seq":2}"#.into());
+        let drained = session::drain_events(&buf);
+        assert_eq!(drained.len(), 2);
+        // Drain empties the buffer.
+        assert!(session::drain_events(&buf).is_empty());
     }
 
     #[test]
