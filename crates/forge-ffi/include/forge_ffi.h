@@ -135,6 +135,49 @@ void forge_string_free(char *s);
 char *forge_status_json(struct forge_session_t *session, struct forge_error_t *out_err);
 
 /**
+ * Return a JSON document summarising the workspace: root path,
+ * workspace_id (used to match lock records), default remote URL,
+ * repo name, current branch (or detached hash), and user identity.
+ *
+ * Every field the UE plugin currently shells out to `forge` for is
+ * packed into one call — the bridge uses this to populate the
+ * `FForgeSourceControlProvider` fields at module init without ever
+ * running a subprocess.
+ *
+ * JSON shape:
+ * ```json
+ * {
+ *   "workspace_root": "...",
+ *   "workspace_id": "uuid-...",
+ *   "repo": "alice/game" | "",
+ *   "remote_url": "https://..." | null,
+ *   "head": {"kind":"branch","name":"main"} | {"kind":"detached","hash":"..."},
+ *   "user": {"name":"alice","email":"alice@example.com"},
+ *   "workflow": "lock" | "merge"
+ * }
+ * ```
+ *
+ * Returns null + populates `*out_err` on failure. Non-null success
+ * must be freed via [`forge_string_free`].
+ *
+ * # Safety
+ * `session` non-null; `out_err` nullable writable.
+ */
+char *forge_workspace_info_json(struct forge_session_t *session, struct forge_error_t *out_err);
+
+/**
+ * Return the current branch name as an owned string, or null when
+ * the workspace is in a detached state. `out_err` carries a real
+ * error only for failure modes (unreadable config, missing HEAD);
+ * detached HEAD is not an error.
+ *
+ * # Safety
+ * `session` non-null; `out_err` nullable writable. Success values
+ * must be freed via [`forge_string_free`].
+ */
+char *forge_current_branch(struct forge_session_t *session, struct forge_error_t *out_err);
+
+/**
  * List the active locks on this workspace's default remote as a
  * JSON array. Each element is `{"path":..., "owner":..., "created_at":...}`.
  *

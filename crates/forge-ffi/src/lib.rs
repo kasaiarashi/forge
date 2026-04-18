@@ -343,6 +343,139 @@ pub unsafe extern "C" fn forge_status_json(
     })
 }
 
+// ── Local-only workspace introspection ──────────────────────────────────────
+
+/// Return a JSON document summarising the workspace: root path,
+/// workspace_id (used to match lock records), default remote URL,
+/// repo name, current branch (or detached hash), and user identity.
+///
+/// Every field the UE plugin currently shells out to `forge` for is
+/// packed into one call — the bridge uses this to populate the
+/// `FForgeSourceControlProvider` fields at module init without ever
+/// running a subprocess.
+///
+/// JSON shape:
+/// ```json
+/// {
+///   "workspace_root": "...",
+///   "workspace_id": "uuid-...",
+///   "repo": "alice/game" | "",
+///   "remote_url": "https://..." | null,
+///   "head": {"kind":"branch","name":"main"} | {"kind":"detached","hash":"..."},
+///   "user": {"name":"alice","email":"alice@example.com"},
+///   "workflow": "lock" | "merge"
+/// }
+/// ```
+///
+/// Returns null + populates `*out_err` on failure. Non-null success
+/// must be freed via [`forge_string_free`].
+///
+/// # Safety
+/// `session` non-null; `out_err` nullable writable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_workspace_info_json(
+    session: *mut forge_session_t,
+    out_err: *mut forge_error_t,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return ptr::null_mut();
+        };
+        match build_workspace_info_json(sess) {
+            Ok(json) => {
+                clear_error(out_err);
+                string_to_raw(json, out_err)
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                ptr::null_mut()
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_workspace_info_json");
+        ptr::null_mut()
+    })
+}
+
+/// Return the current branch name as an owned string, or null when
+/// the workspace is in a detached state. `out_err` carries a real
+/// error only for failure modes (unreadable config, missing HEAD);
+/// detached HEAD is not an error.
+///
+/// # Safety
+/// `session` non-null; `out_err` nullable writable. Success values
+/// must be freed via [`forge_string_free`].
+#[no_mangle]
+pub unsafe extern "C" fn forge_current_branch(
+    session: *mut forge_session_t,
+    out_err: *mut forge_error_t,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return ptr::null_mut();
+        };
+        match sess.workspace.current_branch() {
+            Ok(Some(name)) => {
+                clear_error(out_err);
+                string_to_raw(name, out_err)
+            }
+            Ok(None) => {
+                // Detached — success, but no name to hand back. Callers
+                // distinguish "error" from "detached" by checking
+                // `out_err.code` (0 = OK).
+                clear_error(out_err);
+                ptr::null_mut()
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                ptr::null_mut()
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_current_branch");
+        ptr::null_mut()
+    })
+}
+
+fn build_workspace_info_json(sess: &Session) -> Result<String, anyhow::Error> {
+    use forge_core::workspace::HeadRef;
+    use serde_json::json;
+
+    let cfg = sess
+        .workspace
+        .config()
+        .map_err(|e| anyhow::anyhow!("load workspace config: {e}"))?;
+
+    let head = match sess
+        .workspace
+        .head()
+        .map_err(|e| anyhow::anyhow!("read HEAD: {e}"))?
+    {
+        HeadRef::Branch(name) => json!({"kind": "branch", "name": name}),
+        HeadRef::Detached(hash) => json!({"kind": "detached", "hash": hash.to_hex()}),
+    };
+
+    let remote_url = cfg.default_remote_url().map(str::to_string);
+    let workflow = serde_json::to_value(&cfg.workflow)
+        .unwrap_or_else(|_| serde_json::Value::Null);
+
+    Ok(json!({
+        "workspace_root": sess.workspace.root.display().to_string(),
+        "workspace_id": cfg.workspace_id,
+        "repo": cfg.repo,
+        "remote_url": remote_url,
+        "head": head,
+        "user": {
+            "name": cfg.user.name,
+            "email": cfg.user.email,
+        },
+        "workflow": workflow,
+    })
+    .to_string())
+}
+
 // ── Remote-backed ops ───────────────────────────────────────────────────────
 
 /// List the active locks on this workspace's default remote as a
@@ -713,9 +846,13 @@ unsafe fn clear_error(slot: *mut forge_error_t) {
 // symbol without pulling every function. Cheap, no-allocation smoke.
 #[no_mangle]
 pub extern "C" fn forge_abi_version() -> c_int {
-    // Bumped on any ABI-breaking change. Plugin pins a minimum and
-    // refuses to load a mismatched library.
-    1
+    // Bumped on additive or breaking changes to the exported surface
+    // so the plugin can pin a minimum and refuse a stale library.
+    // Numeric policy:
+    //   1 — session open/close, status_json, error/string free.
+    //   2 — locks (list/acquire/release), workspace_info_json,
+    //       current_branch, tokio runtime on the session.
+    2
 }
 
 // ── Tests (Rust-side; exercise the FFI contract as a C caller would) ────────
@@ -766,11 +903,6 @@ mod tests {
         assert!(!ptr.is_null());
         let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
         assert_eq!(s, env!("CARGO_PKG_VERSION"));
-    }
-
-    #[test]
-    fn abi_version_is_one() {
-        assert_eq!(forge_abi_version(), 1);
     }
 
     #[test]
@@ -862,6 +994,74 @@ mod tests {
         unsafe {
             forge_session_close(ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn workspace_info_json_has_stable_shape() {
+        with_workspace(|root| {
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let ptr = unsafe { forge_workspace_info_json(sess, &mut err) };
+            assert!(!ptr.is_null(), "workspace_info must succeed on a fresh init");
+            let json = unsafe { CStr::from_ptr(ptr) }
+                .to_str()
+                .unwrap()
+                .to_string();
+            unsafe {
+                forge_string_free(ptr);
+                forge_session_close(sess);
+            }
+
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert!(v["workspace_root"].is_string());
+            assert!(v["workspace_id"].is_string());
+            assert_eq!(v["head"]["kind"], "branch");
+            assert_eq!(v["head"]["name"], "main");
+            assert_eq!(v["user"]["name"], "t");
+            assert_eq!(v["user"]["email"], "t@t");
+            // Fresh init has no remote configured.
+            assert!(v["remote_url"].is_null());
+            assert!(v["workflow"].is_string());
+        });
+    }
+
+    #[test]
+    fn current_branch_returns_main_on_fresh_init() {
+        with_workspace(|root| {
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let ptr = unsafe { forge_current_branch(sess, &mut err) };
+            assert!(!ptr.is_null(), "fresh init has a branch HEAD");
+            let name = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe {
+                forge_string_free(ptr);
+                forge_session_close(sess);
+            }
+            assert_eq!(name, "main");
+            assert_eq!(err.code, forge_status_t::FORGE_OK);
+        });
+    }
+
+    #[test]
+    fn current_branch_null_session_errors() {
+        let mut err = forge_error_t::default();
+        let ptr = unsafe { forge_current_branch(ptr::null_mut(), &mut err) };
+        assert!(ptr.is_null());
+        assert_eq!(err.code, forge_status_t::FORGE_ERR_ARG);
+        unsafe {
+            forge_error_free(&mut err);
+        }
+    }
+
+    #[test]
+    fn abi_version_bumped_to_two() {
+        assert_eq!(forge_abi_version(), 2);
     }
 
     #[test]

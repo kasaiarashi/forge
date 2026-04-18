@@ -33,6 +33,8 @@ namespace
 	typedef char*                 (*PFN_forge_lock_list_json)(forge_session_t*, forge_error_t*);
 	typedef int                   (*PFN_forge_lock_acquire)(forge_session_t*, const char*, const char*, forge_error_t*);
 	typedef int                   (*PFN_forge_lock_release)(forge_session_t*, const char*, forge_error_t*);
+	typedef char*                 (*PFN_forge_workspace_info_json)(forge_session_t*, forge_error_t*);
+	typedef char*                 (*PFN_forge_current_branch)(forge_session_t*, forge_error_t*);
 
 	PFN_forge_version         GForgeVersion         = nullptr;
 	PFN_forge_abi_version     GForgeAbiVersion      = nullptr;
@@ -41,15 +43,17 @@ namespace
 	PFN_forge_error_free      GForgeErrorFree       = nullptr;
 	PFN_forge_string_free     GForgeStringFree      = nullptr;
 	PFN_forge_status_json     GForgeStatusJson      = nullptr;
-	PFN_forge_lock_list_json  GForgeLockListJson    = nullptr;
-	PFN_forge_lock_acquire    GForgeLockAcquire     = nullptr;
-	PFN_forge_lock_release    GForgeLockRelease     = nullptr;
+	PFN_forge_lock_list_json      GForgeLockListJson      = nullptr;
+	PFN_forge_lock_acquire        GForgeLockAcquire       = nullptr;
+	PFN_forge_lock_release        GForgeLockRelease       = nullptr;
+	PFN_forge_workspace_info_json GForgeWorkspaceInfoJson = nullptr;
+	PFN_forge_current_branch      GForgeCurrentBranch     = nullptr;
 
 	// Minimum ABI version the plugin accepts. Bump when the header
-	// changes shape; an older `.dll` sitting on a user's machine after
-	// an engine upgrade would otherwise be loaded and crash on a later
-	// call.
-	constexpr int32 kMinSupportedAbi = 1;
+	// adds or breaks exported signatures so a stale `.dll` on disk
+	// after a plugin upgrade can't silently load and crash on a
+	// later call.
+	constexpr int32 kMinSupportedAbi = 2;
 
 	/** Resolve the expected location of `forge_ffi.dll` next to the
 	 *  plugin's Binaries/ dir so the user doesn't need to PATH-install. */
@@ -176,6 +180,8 @@ void FForgeFFI::Initialize()
 	FFI_RESOLVE(forge_lock_list_json);
 	FFI_RESOLVE(forge_lock_acquire);
 	FFI_RESOLVE(forge_lock_release);
+	FFI_RESOLVE(forge_workspace_info_json);
+	FFI_RESOLVE(forge_current_branch);
 
 	#undef FFI_RESOLVE
 
@@ -217,6 +223,8 @@ void FForgeFFI::Shutdown()
 	GForgeLockListJson = nullptr;
 	GForgeLockAcquire = nullptr;
 	GForgeLockRelease = nullptr;
+	GForgeWorkspaceInfoJson = nullptr;
+	GForgeCurrentBranch = nullptr;
 #endif
 }
 
@@ -374,6 +382,60 @@ bool FForgeFFI::LockRelease(
 #else
 	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
 	return false;
+#endif
+}
+
+FString FForgeFFI::WorkspaceInfoJson(const FForgeFFISession& Session, FText& OutError)
+{
+#if FORGE_FFI_HAVE_HEADER
+	if (!IsAvailable() || !Session.IsValid())
+	{
+		OutError = LOCTEXT("InfoUnavailable", "FFI session is not available.");
+		return FString();
+	}
+	forge_error_t Err = {};
+	char* Raw = GForgeWorkspaceInfoJson(Session.Get(), &Err);
+	if (Raw == nullptr)
+	{
+		OutError = ConsumeError(Err, (forge_status_t)1, TEXT("forge_workspace_info_json failed"));
+		return FString();
+	}
+	OutError = FText::GetEmpty();
+	return ConsumeOwnedString(Raw);
+#else
+	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
+	return FString();
+#endif
+}
+
+FString FForgeFFI::CurrentBranch(const FForgeFFISession& Session, FText& OutError)
+{
+#if FORGE_FFI_HAVE_HEADER
+	if (!IsAvailable() || !Session.IsValid())
+	{
+		OutError = LOCTEXT("BranchUnavailable", "FFI session is not available.");
+		return FString();
+	}
+	forge_error_t Err = {};
+	char* Raw = GForgeCurrentBranch(Session.Get(), &Err);
+	if (Raw == nullptr)
+	{
+		// Null + OK = detached HEAD; null + non-OK = real error.
+		if (Err.code != 0)
+		{
+			OutError = ConsumeError(Err, (forge_status_t)1, TEXT("forge_current_branch failed"));
+		}
+		else
+		{
+			OutError = FText::GetEmpty();
+		}
+		return FString();
+	}
+	OutError = FText::GetEmpty();
+	return ConsumeOwnedString(Raw);
+#else
+	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
+	return FString();
 #endif
 }
 

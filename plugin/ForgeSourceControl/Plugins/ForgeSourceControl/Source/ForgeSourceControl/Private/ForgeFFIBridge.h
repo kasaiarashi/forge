@@ -169,6 +169,22 @@ public:
 		const FString& Path,
 		FText& OutError);
 
+	/**
+	 * One-shot introspection call that replaces several plugin-side
+	 * subprocess invocations: returns workspace_root, workspace_id,
+	 * repo name, default remote URL, current HEAD, user identity, and
+	 * workflow mode as a single JSON document. See the Rust doc on
+	 * `forge_workspace_info_json` for the full schema.
+	 */
+	static FString WorkspaceInfoJson(const FForgeFFISession& Session, FText& OutError);
+
+	/**
+	 * Returns the current branch name, or an empty FString when HEAD
+	 * is detached. `OutError` stays empty in the detached case —
+	 * detached HEAD is not an error condition.
+	 */
+	static FString CurrentBranch(const FForgeFFISession& Session, FText& OutError);
+
 private:
 	// Non-instantiable.
 	FForgeFFI() = delete;
