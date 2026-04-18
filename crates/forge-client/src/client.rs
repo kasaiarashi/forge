@@ -113,6 +113,22 @@ pub async fn connect_forge(
         .max_decoding_message_size(256 * 1024 * 1024))
 }
 
+/// Like [`connect_forge`] but consults the edge → primary cache before
+/// dialing. If `server_url` is a known read-only edge replica, the
+/// returned client is connected to the cached primary URL instead.
+/// Commands that perform write RPCs should prefer this entry point so
+/// a one-time edge failure seeds the cache + every subsequent run
+/// skips the round-trip.
+///
+/// Read-only commands keep calling [`connect_forge`] — the whole point
+/// of edge replicas is to absorb read load locally.
+pub async fn connect_forge_write(
+    server_url: &str,
+) -> Result<ForgeServiceClient<InterceptedService<Channel, AuthInterceptor>>> {
+    let effective = crate::edge::resolve_write_target(server_url);
+    connect_forge(&effective).await
+}
+
 /// Same as [`connect_forge`] but for the `AuthService` (used by login,
 /// whoami, PAT mint, etc.). Auth headers are still injected so that
 /// authenticated AuthService methods like `WhoAmI` work.

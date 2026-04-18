@@ -641,6 +641,34 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
 /// and offer a contextual next step (login prompt for Unauthenticated, etc).
 fn print_pretty_error(err: anyhow::Error) {
     if let Some(status) = find_tonic_status(&err) {
+        // Edge replica refused a write and handed us the primary's URL.
+        // Persist the mapping so the next run's `connect_forge_write`
+        // silently redirects, then print a concrete retry suggestion so
+        // the current run can proceed without the user guessing the
+        // flag to pass.
+        if let Some(primary) = forge_client::edge::extract_upstream_hint(status) {
+            if let Some(edge_url) = server_url_hint() {
+                forge_client::edge::record_edge_upstream(&edge_url, &primary);
+            } else if let Ok(cwd) = std::env::current_dir() {
+                if let Ok(ws) = forge_core::workspace::Workspace::discover(&cwd) {
+                    if let Ok(cfg) = ws.config() {
+                        if let Some(edge_url) = cfg.default_remote_url() {
+                            forge_client::edge::record_edge_upstream(edge_url, &primary);
+                        }
+                    }
+                }
+            }
+            eprintln!("\x1b[1;31merror:\x1b[0m read-only edge replica refused this write");
+            eprintln!("       \x1b[2m{}\x1b[0m", status.message());
+            eprintln!();
+            eprintln!("The primary server is at \x1b[1m{primary}\x1b[0m.");
+            eprintln!(
+                "This mapping has been cached; the next write against the same \
+                 edge URL will be routed to the primary automatically."
+            );
+            eprintln!("Re-run the command now to apply the redirect.");
+            return;
+        }
         match status.code() {
             tonic::Code::Unauthenticated => {
                 eprintln!("\x1b[1;31merror:\x1b[0m not authenticated");

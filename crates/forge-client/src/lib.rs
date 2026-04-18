@@ -19,8 +19,11 @@
 
 pub mod client;
 pub mod credentials;
+pub mod edge;
 pub mod tofu;
 pub mod url_resolver;
 
-pub use client::{connect_auth, connect_auth_anonymous, connect_forge, AuthInterceptor};
+pub use client::{
+    connect_auth, connect_auth_anonymous, connect_forge, connect_forge_write, AuthInterceptor,
+};
 pub use credentials::Credential;

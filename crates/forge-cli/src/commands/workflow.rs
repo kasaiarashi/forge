@@ -57,7 +57,7 @@ pub fn create(name: &str, file: &str, json_out: bool) -> Result<()> {
     let (server_url, repo) = remote(&ws)?;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut client = crate::client::connect_forge(&server_url).await?;
+        let mut client = crate::client::connect_forge_write(&server_url).await?;
         let resp = client
             .create_workflow(CreateWorkflowRequest {
                 repo,
@@ -84,7 +84,7 @@ pub fn delete(id: i64, json_out: bool) -> Result<()> {
     let (server_url, _repo) = remote(&ws)?;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut client = crate::client::connect_forge(&server_url).await?;
+        let mut client = crate::client::connect_forge_write(&server_url).await?;
         let resp = client
             .delete_workflow(DeleteWorkflowRequest { id })
             .await?
@@ -107,7 +107,7 @@ pub fn set_enabled(id: i64, enabled: bool, json_out: bool) -> Result<()> {
     let (server_url, _repo) = remote(&ws)?;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut client = crate::client::connect_forge(&server_url).await?;
+        let mut client = crate::client::connect_forge_write(&server_url).await?;
         // UpdateWorkflow re-submits the full definition; keep name + yaml
         // unchanged by reading them back first.
         let list = client
@@ -156,7 +156,7 @@ pub fn trigger(workflow_id: i64, ref_name: Option<String>, json_out: bool) -> Re
     let (server_url, repo) = remote(&ws)?;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut client = crate::client::connect_forge(&server_url).await?;
+        let mut client = crate::client::connect_forge_write(&server_url).await?;
         let _ = repo;
         let resp = client
             .trigger_workflow(TriggerWorkflowRequest {

@@ -134,7 +134,7 @@ pub fn run_in(
 }
 
 async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_name: &str, force: bool) -> Result<()> {
-    let mut client = crate::client::connect_forge(server_url).await?;
+    let mut client = crate::client::connect_forge_write(server_url).await?;
 
     // Get current branch and its tip.
     let branch = match ws.current_branch()? {

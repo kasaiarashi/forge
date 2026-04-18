@@ -30,6 +30,12 @@ use tonic::codegen::http::{Request as HttpRequest, Response as HttpResponse};
 use tonic::Status;
 use tower::{Layer, Service};
 
+/// Custom gRPC metadata key attached to every write-rejection Status.
+/// The value is the upstream write URL (same string that already appears
+/// in the human-readable message). Clients read this to populate their
+/// edge → primary cache without regex-parsing the message.
+pub const EDGE_UPSTREAM_HEADER: &str = "x-forge-upstream-write-url";
+
 /// Every gRPC method path that performs a write. Anything not in
 /// here passes through unchanged. We list paths explicitly rather
 /// than match by HTTP verb because gRPC is always POST — the only
@@ -157,11 +163,22 @@ where
     fn call(&mut self, req: HttpRequest<B>) -> Self::Future {
         let path = req.uri().path().to_string();
         if self.cfg.write_paths.contains(path.as_str()) {
-            let status = Status::failed_precondition(format!(
+            let mut status = Status::failed_precondition(format!(
                 "read-only edge replica refused write '{path}'; \
                  send writes to {}",
                 self.cfg.upstream_hint,
             ));
+            // Structured hint so smart clients can redirect without
+            // regex-parsing the human message. Keyed under a custom
+            // metadata header that the client looks for in its pretty-
+            // error path + edge cache.
+            if let Ok(v) =
+                tonic::metadata::MetadataValue::try_from(self.cfg.upstream_hint.as_str())
+            {
+                status
+                    .metadata_mut()
+                    .insert(EDGE_UPSTREAM_HEADER, v);
+            }
             let resp = status.into_http();
             return Box::pin(async move { Ok(resp) });
         }
@@ -185,6 +202,13 @@ mod tests {
         assert!(paths.contains("/forge.ForgeService/AcquireLock"));
         assert!(paths.contains("/forge.AuthService/CreatePersonalAccessToken"));
         assert!(paths.contains("/forge.AgentService/ClaimJob"));
+    }
+
+    #[test]
+    fn header_key_matches_client_expectation() {
+        // Keep the header name in lockstep with forge-client::edge — if
+        // this ever drifts the client silently loses the hint.
+        assert_eq!(EDGE_UPSTREAM_HEADER, "x-forge-upstream-write-url");
     }
 
     #[test]
