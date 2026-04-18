@@ -399,9 +399,17 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         let repo_name_owned = repo_name.to_string();
         let session_id_owned = session_id.clone();
         // gRPC channel holds ≤4 MiB chunks, so 64 slots = 256 MiB max.
-        // Read channel holds full objects — keep small for large assets.
+        // Read channel holds full objects — bumped 8→256 so the rayon
+        // disk-read workers don't park on every transient gRPC
+        // backpressure. At 17 KiB avg object size (typical UE push)
+        // this buys ~4 MiB of pipeline buffer, which is ~33 ms at a
+        // sustained 100 MB/s — enough to absorb a few WINDOW_UPDATE
+        // stalls without draining rayon. Worst-case memory is bounded
+        // by `max_object_size` (16 GiB default) × 256 which is absurd
+        // in practice but cheap to bound tighter if a real deployment
+        // ever hits it.
         let (grpc_tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(64);
-        let (read_tx, read_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>)>(8);
+        let (read_tx, read_rx) = crossbeam_channel::bounded::<(ForgeHash, Vec<u8>)>(256);
 
         // Stage 1: parallel disk reads.
         let reader_handle = std::thread::spawn(move || {
@@ -414,10 +422,21 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         });
 
         // Stage 2: single thread does chunking + sends to gRPC stream.
+        // Progress-bar updates are throttled — `set_position` fires on
+        // every chunk (indicatif debounces its own redraw cheaply) but
+        // `set_message` runs `format!` + interior-mutability state
+        // updates, which at 10k-100k objects/sec becomes a non-trivial
+        // fraction of the sender's CPU budget. Rate-limit to every
+        // 512 objects OR every 100 ms, whichever comes first.
         let pb_clone = pb.clone();
         let sender_handle = std::thread::spawn(move || {
+            use std::time::{Duration, Instant};
             let mut sent_bytes: u64 = 0;
             let mut sent_objs: usize = 0;
+            let mut last_msg_objs: usize = 0;
+            let mut last_msg_at = Instant::now();
+            let msg_min_interval = Duration::from_millis(100);
+            let msg_min_objects: usize = 512;
             while let Ok((hash, data)) = read_rx.recv() {
                 let hash_bytes = hash.as_bytes().to_vec();
                 if data.len() <= CHUNK_SIZE {
@@ -458,8 +477,21 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
                 }
                 sent_objs += 1;
                 pb_clone.set_position(sent_bytes);
-                pb_clone.set_message(format!("Writing objects: {sent_objs}/{obj_count} objects"));
+                if sent_objs - last_msg_objs >= msg_min_objects
+                    || last_msg_at.elapsed() >= msg_min_interval
+                {
+                    pb_clone.set_message(format!(
+                        "Writing objects: {sent_objs}/{obj_count} objects"
+                    ));
+                    last_msg_objs = sent_objs;
+                    last_msg_at = Instant::now();
+                }
             }
+            // Final message reflects the true final count in case the
+            // last batch was under the throttle threshold.
+            pb_clone.set_message(format!(
+                "Writing objects: {sent_objs}/{obj_count} objects"
+            ));
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -593,8 +625,35 @@ fn is_local_ancestor_of(
     Ok(false)
 }
 
-/// Walk the snapshot chain from `tip` and collect all reachable object hashes,
-/// stopping when we reach an object whose hash matches `stop_hash`.
+/// Walk the snapshot chain from `tip` and collect every reachable
+/// object hash, stopping at `stop_hash`.
+///
+/// ## Why this is a perf hot path
+///
+/// On a first push (remote empty), the walk has to enumerate the
+/// closure of every snapshot — for a mid-size UE project that's
+/// 100k-500k objects. A naive recursive walk does a sequential disk
+/// read + zstd-decompress + bincode-parse per object, which on a
+/// mechanical disk was taking the CLI 1-2 minutes between "forge
+/// push" and the first progress line.
+///
+/// Two optimisations here:
+///
+/// 1. **Tree BFS in rayon-parallel levels.** Snapshot-chain traversal
+///    is sequential (parent pointers form a chain, not a tree), but
+///    once we have the root trees, every tree read is independent.
+///    Each BFS level reads the current frontier's trees in parallel
+///    via `par_iter`, then advances to the next level. Scales with
+///    the drive's parallel-read throughput.
+///
+/// 2. **Skip `get_chunked_blob` for non-chunk-manifest files.**
+///    forge-core only writes a ChunkedBlob manifest when a file is
+///    either ≥ `SMALL_FILE_THRESHOLD` (1 MiB) or has an extension
+///    that triggers semantic chunking (.uasset/.umap/.uexp/.ubulk).
+///    Every other file is a raw blob with no manifest, so probing
+///    with `get_chunked_blob` pays a decompress+parse on every entry
+///    and always returns Err. Pre-filter the file entries by size
+///    and extension before probing.
 fn collect_snapshot_objects(
     ws: &Workspace,
     tip: &ForgeHash,
@@ -602,53 +661,115 @@ fn collect_snapshot_objects(
     objects: &mut Vec<ForgeHash>,
     seen: &mut HashSet<ForgeHash>,
 ) -> Result<()> {
+    use rayon::prelude::*;
+
     if tip.is_zero() || tip.as_bytes().as_slice() == stop_hash || !seen.insert(*tip) {
         return Ok(());
     }
 
-    objects.push(*tip);
-
-    let snapshot = ws.object_store.get_snapshot(tip)?;
-    collect_tree_objects(ws, &snapshot.tree, objects, seen)?;
-
-    for parent in &snapshot.parents {
-        collect_snapshot_objects(ws, parent, stop_hash, objects, seen)?;
+    // Phase 1: walk the snapshot chain sequentially. Collects tree
+    // roots for the parallel phase below. The chain is usually short
+    // (hundreds of commits max) so parallelising here adds overhead
+    // without saving wall-clock.
+    let mut tree_roots: Vec<ForgeHash> = Vec::new();
+    let mut pending_snapshots = vec![*tip];
+    while let Some(h) = pending_snapshots.pop() {
+        if h.is_zero() || h.as_bytes().as_slice() == stop_hash {
+            continue;
+        }
+        if !seen.insert(h) && h != *tip {
+            // `insert(*tip)` at function entry already returned true for `tip`,
+            // so `h == *tip` here means the sentinel re-insertion we want to
+            // allow through.
+            continue;
+        }
+        objects.push(h);
+        let snapshot = ws.object_store.get_snapshot(&h)?;
+        if seen.insert(snapshot.tree) {
+            tree_roots.push(snapshot.tree);
+        }
+        for parent in &snapshot.parents {
+            pending_snapshots.push(*parent);
+        }
     }
 
-    Ok(())
-}
+    // Phase 2: BFS the tree DAG level-by-level with rayon-parallel
+    // reads at each level. A level is a batch of tree hashes that
+    // are all novel (not yet in `seen`) and therefore safe to read
+    // concurrently without racing to insert duplicates.
+    let mut frontier: Vec<ForgeHash> = tree_roots;
+    while !frontier.is_empty() {
+        // Read every tree at this level in parallel.
+        let level_results: Vec<Result<Vec<forge_core::object::tree::TreeEntry>>> = frontier
+            .par_iter()
+            .map(|h| Ok(ws.object_store.get_tree(h)?.entries))
+            .collect();
+        objects.extend_from_slice(&frontier);
 
-fn collect_tree_objects(
-    ws: &Workspace,
-    tree_hash: &ForgeHash,
-    objects: &mut Vec<ForgeHash>,
-    seen: &mut HashSet<ForgeHash>,
-) -> Result<()> {
-    if !seen.insert(*tree_hash) {
-        return Ok(());
-    }
-    objects.push(*tree_hash);
-
-    let tree = ws.object_store.get_tree(tree_hash)?;
-    for entry in &tree.entries {
-        match entry.kind {
-            forge_core::object::tree::EntryKind::Directory => {
-                collect_tree_objects(ws, &entry.hash, objects, seen)?;
-            }
-            _ => {
-                if seen.insert(entry.hash) {
-                    objects.push(entry.hash);
-                    if let Ok(chunked) = ws.object_store.get_chunked_blob(&entry.hash) {
-                        for chunk_ref in &chunked.chunks {
-                            if seen.insert(chunk_ref.hash) {
-                                objects.push(chunk_ref.hash);
+        // Flatten into directory children (next frontier) + file
+        // entries (candidates for ChunkedBlob probe). We can't push
+        // into `seen` from inside par_iter without a mutex, so we
+        // do it here on the already-collected child list.
+        let mut next_dirs: Vec<ForgeHash> = Vec::new();
+        let mut file_candidates: Vec<(ForgeHash, u64, String)> = Vec::new();
+        for entries in level_results {
+            for entry in entries? {
+                match entry.kind {
+                    forge_core::object::tree::EntryKind::Directory => {
+                        if seen.insert(entry.hash) {
+                            next_dirs.push(entry.hash);
+                        }
+                    }
+                    _ => {
+                        if seen.insert(entry.hash) {
+                            objects.push(entry.hash);
+                            if could_be_chunked_manifest(entry.size, &entry.name) {
+                                file_candidates.push((entry.hash, entry.size, entry.name));
                             }
                         }
                     }
                 }
             }
         }
+
+        // Parallel-probe ChunkedBlob manifests for the files that
+        // might actually be manifests. Collect their chunk hashes;
+        // dedupe into `seen` back on the main thread.
+        let chunk_hashes: Vec<Vec<ForgeHash>> = file_candidates
+            .par_iter()
+            .map(|(h, _, _)| {
+                ws.object_store
+                    .get_chunked_blob(h)
+                    .map(|cb| cb.chunks.into_iter().map(|c| c.hash).collect())
+                    .unwrap_or_default()
+            })
+            .collect();
+        for chunks in chunk_hashes {
+            for h in chunks {
+                if seen.insert(h) {
+                    objects.push(h);
+                }
+            }
+        }
+
+        frontier = next_dirs;
     }
 
     Ok(())
+}
+
+/// Return true if a tree-entry file could have been written as a
+/// `ChunkedBlob` manifest by forge-core. Mirrors the logic in
+/// `forge_core::chunk::chunk_file_with_hint`: small files below the
+/// 1 MiB threshold that aren't UE-semantic-chunk candidates are
+/// always raw blobs with no manifest, so there's nothing to probe.
+fn could_be_chunked_manifest(size: u64, name: &str) -> bool {
+    if size >= forge_core::chunk::SMALL_FILE_THRESHOLD {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".uasset")
+        || lower.ends_with(".umap")
+        || lower.ends_with(".uexp")
+        || lower.ends_with(".ubulk")
 }

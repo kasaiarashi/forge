@@ -467,6 +467,27 @@ impl MetadataBackend for PgMetadataBackend {
         Ok(())
     }
 
+    fn record_session_objects(&self, sid: &str, rows: &[(Vec<u8>, i64)]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let mut tx = conn.transaction()?;
+        {
+            let stmt = tx.prepare(
+                "INSERT INTO session_objects (session_id, hash, size)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (session_id, hash) DO NOTHING",
+            )?;
+            for (hash, size) in rows {
+                let hash_slice: &[u8] = hash.as_slice();
+                tx.execute(&stmt, &[&sid, &hash_slice, size])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>> {
         let mut conn = self.conn()?;
         let row = conn.query_opt(
