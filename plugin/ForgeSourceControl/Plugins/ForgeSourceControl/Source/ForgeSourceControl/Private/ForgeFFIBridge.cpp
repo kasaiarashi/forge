@@ -170,36 +170,40 @@ void FForgeFFI::Initialize()
 		return;
 	}
 
-	#define FFI_RESOLVE(Name) \
-		G##Name = reinterpret_cast<PFN_##Name>(FPlatformProcess::GetDllExport(GDllHandle, TEXT(#Name))); \
-		if (G##Name == nullptr) \
+	// Resolve a symbol by snake_case DLL name into its PascalCase
+	// global. Two args so the global's name doesn't have to match
+	// the exported symbol byte-for-byte — the exported names are
+	// C ABI and have to stay snake_case; the globals read more
+	// naturally as FText-style Pascal in the rest of the plugin.
+	#define FFI_RESOLVE(Sym, Var) \
+		Var = reinterpret_cast<PFN_##Sym>(FPlatformProcess::GetDllExport(GDllHandle, TEXT(#Sym))); \
+		if (Var == nullptr) \
 		{ \
 			UE_LOG(LogSourceControl, Warning, \
 				TEXT("ForgeFFI: missing symbol %s in %s — falling back to CLI."), \
-				TEXT(#Name), *DllPath); \
+				TEXT(#Sym), *DllPath); \
 			Shutdown(); \
 			return; \
 		}
 
-	// Keep the names aligned with the typedef block above.
-	FFI_RESOLVE(forge_version);
-	FFI_RESOLVE(forge_abi_version);
-	FFI_RESOLVE(forge_session_open);
-	FFI_RESOLVE(forge_session_close);
-	FFI_RESOLVE(forge_error_free);
-	FFI_RESOLVE(forge_string_free);
-	FFI_RESOLVE(forge_status_json);
-	FFI_RESOLVE(forge_lock_list_json);
-	FFI_RESOLVE(forge_lock_acquire);
-	FFI_RESOLVE(forge_lock_release);
-	FFI_RESOLVE(forge_workspace_info_json);
-	FFI_RESOLVE(forge_current_branch);
-	FFI_RESOLVE(forge_add_paths);
-	FFI_RESOLVE(forge_commit);
-	FFI_RESOLVE(forge_push);
-	FFI_RESOLVE(forge_pull);
-	FFI_RESOLVE(forge_subscribe_lock_events);
-	FFI_RESOLVE(forge_poll_lock_events_json);
+	FFI_RESOLVE(forge_version,                 GForgeVersion);
+	FFI_RESOLVE(forge_abi_version,             GForgeAbiVersion);
+	FFI_RESOLVE(forge_session_open,            GForgeSessionOpen);
+	FFI_RESOLVE(forge_session_close,           GForgeSessionClose);
+	FFI_RESOLVE(forge_error_free,              GForgeErrorFree);
+	FFI_RESOLVE(forge_string_free,             GForgeStringFree);
+	FFI_RESOLVE(forge_status_json,             GForgeStatusJson);
+	FFI_RESOLVE(forge_lock_list_json,          GForgeLockListJson);
+	FFI_RESOLVE(forge_lock_acquire,            GForgeLockAcquire);
+	FFI_RESOLVE(forge_lock_release,            GForgeLockRelease);
+	FFI_RESOLVE(forge_workspace_info_json,     GForgeWorkspaceInfoJson);
+	FFI_RESOLVE(forge_current_branch,          GForgeCurrentBranch);
+	FFI_RESOLVE(forge_add_paths,               GForgeAddPaths);
+	FFI_RESOLVE(forge_commit,                  GForgeCommit);
+	FFI_RESOLVE(forge_push,                    GForgePush);
+	FFI_RESOLVE(forge_pull,                    GForgePull);
+	FFI_RESOLVE(forge_subscribe_lock_events,   GForgeSubscribeLockEvents);
+	FFI_RESOLVE(forge_poll_lock_events_json,   GForgePollLockEventsJson);
 
 	#undef FFI_RESOLVE
 

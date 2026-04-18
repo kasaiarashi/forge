@@ -276,16 +276,20 @@ bool FForgeCheckInWorker::Execute(FForgeSourceControlCommand& InCommand)
 	// gRPC round-trip per file on the session's owned runtime,
 	// instead of per-file subprocess spawn. Either path is
 	// best-effort: unlock failure doesn't block the check-in.
+	// `UnlockFFI` is named distinctly from the outer `FFI` above
+	// (the stage+commit+push path) so the shadowing warning in MSVC
+	// stays silent — they point at the same session but live in
+	// disjoint scopes.
 	{
-		const FForgeFFISession* FFI = Provider.GetFFISession();
+		const FForgeFFISession* UnlockFFI = Provider.GetFFISession();
 		for (const FString& File : InCommand.Files)
 		{
 			FString RelPath = File;
 			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
-			if (FFI != nullptr)
+			if (UnlockFFI != nullptr)
 			{
 				FText IgnoredErr;
-				FForgeFFI::LockRelease(*FFI, RelPath, IgnoredErr);
+				FForgeFFI::LockRelease(*UnlockFFI, RelPath, IgnoredErr);
 				// We deliberately drop IgnoredErr — unlock failures
 				// are non-fatal and already logged by the Rust side.
 			}
