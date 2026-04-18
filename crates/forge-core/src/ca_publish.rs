@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Publish + discover the forge-server cert bundle at a well-known
 //! filesystem location so sibling processes (forge-web, tooling, the UE

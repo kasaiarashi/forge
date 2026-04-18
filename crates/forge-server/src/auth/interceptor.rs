@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! gRPC tonic interceptor that turns an `Authorization: Bearer <token>`
 //! header into a [`Caller`] and stashes it in the request extensions.
@@ -67,10 +67,10 @@ pub fn make_interceptor(
 
 fn resolve_token(store: &dyn UserStore, plaintext: &str) -> Result<Caller, Status> {
     if plaintext.starts_with(PAT_PREFIX) {
-        match store
-            .find_pat_by_plaintext(plaintext)
-            .map_err(|e| { tracing::error!(error = %e, "token lookup"); Status::internal("internal server error") })?
-        {
+        match store.find_pat_by_plaintext(plaintext).map_err(|e| {
+            tracing::error!(error = %e, "token lookup");
+            Status::internal("internal server error")
+        })? {
             Some((pat, user)) => {
                 // Best-effort touch — don't fail the request if it errors.
                 let _ = store.touch_pat(pat.id);
@@ -85,10 +85,10 @@ fn resolve_token(store: &dyn UserStore, plaintext: &str) -> Result<Caller, Statu
             None => Err(Status::unauthenticated("invalid or revoked token")),
         }
     } else if plaintext.starts_with(SESSION_PREFIX) {
-        match store
-            .find_session_by_plaintext(plaintext)
-            .map_err(|e| { tracing::error!(error = %e, "session lookup"); Status::internal("internal server error") })?
-        {
+        match store.find_session_by_plaintext(plaintext).map_err(|e| {
+            tracing::error!(error = %e, "session lookup");
+            Status::internal("internal server error")
+        })? {
             Some((session, user)) => {
                 let _ = store.touch_session(session.id);
                 Ok(Caller::Authenticated(AuthenticatedCaller {

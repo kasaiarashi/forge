@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Workflow YAML definition structs.
 
@@ -44,10 +44,21 @@ pub struct StepDef {
     pub name: String,
     /// Shell command to run.
     pub run: Option<String>,
+    /// Explicit shell for the command. One of: `sh`, `bash`, `cmd`,
+    /// `powershell`, `pwsh`. Unset → host default (`cmd` on Windows,
+    /// `sh` elsewhere). Authors who want portable workflows should pin
+    /// this so `$VAR` vs `%VAR%` ambiguity can't bite on a Windows runner.
+    #[serde(default)]
+    pub shell: Option<String>,
     /// Upload an artifact.
     pub artifact: Option<ArtifactDef>,
     /// Create a release.
     pub release: Option<ReleaseDef>,
+    /// Per-step wall-clock cap. Unset → engine default (30m). Applied to
+    /// `run:` steps; artifact/release bookkeeping steps are cheap and
+    /// exempt.
+    #[serde(rename = "timeout-minutes", default)]
+    pub timeout_minutes: Option<u64>,
 }
 
 /// Artifact upload definition.
@@ -75,9 +86,7 @@ impl WorkflowDef {
     /// Check if this workflow should trigger on a push to the given branch.
     pub fn matches_push(&self, ref_name: &str) -> bool {
         if let Some(push) = &self.on.push {
-            let branch = ref_name
-                .strip_prefix("refs/heads/")
-                .unwrap_or(ref_name);
+            let branch = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
             if push.branches.is_empty() {
                 return true; // no filter = match all
             }

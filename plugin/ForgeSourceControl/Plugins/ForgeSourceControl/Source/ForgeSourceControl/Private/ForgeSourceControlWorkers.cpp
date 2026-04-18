@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 #include "ForgeSourceControlWorkers.h"
 #include "ForgeSourceControlCommand.h"
@@ -119,11 +119,36 @@ bool FForgeCheckOutWorker::Execute(FForgeSourceControlCommand& InCommand)
 	const FString WsRoot = Provider.GetWorkspaceRoot();
 	bool bSuccess = true;
 
+	// Phase 4c.2 — prefer FFI when the library is loaded. Each lock
+	// used to cost one CreateProcess + forge CLI startup (~15 ms
+	// cold). Through the bridge it's a direct gRPC call on the
+	// session's owned tokio runtime, so N files = N round-trips, no
+	// per-file process overhead. A missing library or failed session
+	// transparently falls back to the legacy subprocess path.
+	const FForgeFFISession* FFI = Provider.GetFFISession();
+
 	for (const FString& File : InCommand.Files)
 	{
 		FString RelPath = File;
 		FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
 
+		if (FFI != nullptr)
+		{
+			FText LockError;
+			if (FForgeFFI::LockAcquire(*FFI, RelPath, FString(), LockError))
+			{
+				LockedFiles.Add(File);
+				continue;
+			}
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Lock denied for '%s': %s"), *RelPath, *LockError.ToString()));
+			bSuccess = false;
+			break;
+		}
+
+		// CLI fallback. Kept in place for:
+		//  - dev builds where forge_ffi.dll isn't next to the editor.
+		//  - transient session-open failures logged by GetFFISession.
 		TSharedPtr<FJsonObject> JsonResult;
 		if (Provider.RunForgeCommand(FString::Printf(TEXT("lock \"%s\""), *RelPath), JsonResult))
 		{
@@ -175,41 +200,120 @@ bool FForgeCheckInWorker::Execute(FForgeSourceControlCommand& InCommand)
 	TSharedRef<FCheckIn, ESPMode::ThreadSafe> CheckInOp = StaticCastSharedRef<FCheckIn>(InCommand.Operation);
 	FString Message = CheckInOp->GetDescription().ToString();
 	if (Message.IsEmpty()) { Message = TEXT("Checked in from Unreal Editor"); }
-	Message.ReplaceInline(TEXT("\""), TEXT("\\\""));
+
+	// Phase 4c.3 — every step below is an FFI call when the library is
+	// loaded. A 500-asset check-in on the legacy subprocess path fires
+	// 500 stage + 1 commit + 500 unlock + 1 push = 1002 CreateProcess
+	// calls. Through the bridge it collapses to 1 forge_add_paths + 1
+	// forge_commit + 500 forge_lock_release (on the shared tokio
+	// runtime) + 1 forge_push — N drops from 1002 to 4 subprocess-
+	// equivalent calls, and the three that remain are in-process.
+	const FForgeFFISession* FFI = Provider.GetFFISession();
+
+	// Escape the quote for the subprocess-fallback path; the FFI
+	// path takes the raw FString.
+	FString EscapedMessage = Message;
+	EscapedMessage.ReplaceInline(TEXT("\""), TEXT("\\\""));
 
 	// Stage files.
-	for (const FString& File : InCommand.Files)
+	if (FFI != nullptr)
 	{
-		FString RelPath = File;
-		FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
-		UE_LOG(LogSourceControl, Log, TEXT("Forge CheckIn: staging '%s' (rel: '%s')"), *File, *RelPath);
-		if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("add \"%s\""), *RelPath)))
+		TArray<FString> RelPaths;
+		RelPaths.Reserve(InCommand.Files.Num());
+		for (const FString& File : InCommand.Files)
 		{
-			InCommand.ErrorMessages.Add(FString::Printf(TEXT("Failed to stage '%s'"), *RelPath));
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			RelPaths.Add(MoveTemp(RelPath));
+		}
+		FText StageError;
+		if (!FForgeFFI::AddPaths(*FFI, RelPaths, StageError))
+		{
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Failed to stage (%d file(s)): %s"),
+				RelPaths.Num(),
+				*StageError.ToString()));
 			InCommand.MarkOperationCompleted(false);
 			return false;
 		}
 	}
+	else
+	{
+		for (const FString& File : InCommand.Files)
+		{
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			UE_LOG(LogSourceControl, Log, TEXT("Forge CheckIn: staging '%s' (rel: '%s')"), *File, *RelPath);
+			if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("add \"%s\""), *RelPath)))
+			{
+				InCommand.ErrorMessages.Add(FString::Printf(TEXT("Failed to stage '%s'"), *RelPath));
+				InCommand.MarkOperationCompleted(false);
+				return false;
+			}
+		}
+	}
 
 	// Commit.
-	if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("commit -m \"%s\""), *Message)))
+	if (FFI != nullptr)
+	{
+		FText CommitError;
+		if (!FForgeFFI::Commit(*FFI, Message, CommitError))
+		{
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Failed to create commit: %s"), *CommitError.ToString()));
+			InCommand.MarkOperationCompleted(false);
+			return false;
+		}
+	}
+	else if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("commit -m \"%s\""), *EscapedMessage)))
 	{
 		InCommand.ErrorMessages.Add(TEXT("Failed to create commit"));
 		InCommand.MarkOperationCompleted(false);
 		return false;
 	}
 
-	// Unlock files (non-fatal).
-	for (const FString& File : InCommand.Files)
+	// Unlock files (non-fatal). Prefer FFI when available — one
+	// gRPC round-trip per file on the session's owned runtime,
+	// instead of per-file subprocess spawn. Either path is
+	// best-effort: unlock failure doesn't block the check-in.
+	// `UnlockFFI` is named distinctly from the outer `FFI` above
+	// (the stage+commit+push path) so the shadowing warning in MSVC
+	// stays silent — they point at the same session but live in
+	// disjoint scopes.
 	{
-		FString RelPath = File;
-		FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
-		TSharedPtr<FJsonObject> Unused;
-		Provider.RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+		const FForgeFFISession* UnlockFFI = Provider.GetFFISession();
+		for (const FString& File : InCommand.Files)
+		{
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			if (UnlockFFI != nullptr)
+			{
+				FText IgnoredErr;
+				FForgeFFI::LockRelease(*UnlockFFI, RelPath, IgnoredErr);
+				// We deliberately drop IgnoredErr — unlock failures
+				// are non-fatal and already logged by the Rust side.
+			}
+			else
+			{
+				TSharedPtr<FJsonObject> Unused;
+				Provider.RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+			}
+		}
 	}
 
-	// Push.
-	if (!Provider.RunForgeCommandRaw(TEXT("push")))
+	// Push. Same FFI/fallback pattern as stage + commit above.
+	if (FFI != nullptr)
+	{
+		FText PushError;
+		if (!FForgeFFI::Push(*FFI, /*bForce=*/false, PushError))
+		{
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Commit created but push failed: %s"), *PushError.ToString()));
+			InCommand.MarkOperationCompleted(false);
+			return false;
+		}
+	}
+	else if (!Provider.RunForgeCommandRaw(TEXT("push")))
 	{
 		InCommand.ErrorMessages.Add(TEXT("Commit created but push failed"));
 		InCommand.MarkOperationCompleted(false);
@@ -241,15 +345,39 @@ bool FForgeMarkForAddWorker::Execute(FForgeSourceControlCommand& InCommand)
 	FForgeSourceControlProvider& Provider = InCommand.Provider;
 	const FString WsRoot = Provider.GetWorkspaceRoot();
 
-	for (const FString& File : InCommand.Files)
+	// One FFI call for the whole batch when the library is loaded.
+	const FForgeFFISession* FFI = Provider.GetFFISession();
+	if (FFI != nullptr)
 	{
-		FString RelPath = File;
-		FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
-		if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("add \"%s\""), *RelPath)))
+		TArray<FString> RelPaths;
+		RelPaths.Reserve(InCommand.Files.Num());
+		for (const FString& File : InCommand.Files)
 		{
-			InCommand.ErrorMessages.Add(FString::Printf(TEXT("Failed to add '%s'"), *RelPath));
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			RelPaths.Add(MoveTemp(RelPath));
+		}
+		FText AddError;
+		if (!FForgeFFI::AddPaths(*FFI, RelPaths, AddError))
+		{
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Failed to add paths: %s"), *AddError.ToString()));
 			InCommand.MarkOperationCompleted(false);
 			return false;
+		}
+	}
+	else
+	{
+		for (const FString& File : InCommand.Files)
+		{
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("add \"%s\""), *RelPath)))
+			{
+				InCommand.ErrorMessages.Add(FString::Printf(TEXT("Failed to add '%s'"), *RelPath));
+				InCommand.MarkOperationCompleted(false);
+				return false;
+			}
 		}
 	}
 
@@ -270,6 +398,8 @@ bool FForgeRevertWorker::Execute(FForgeSourceControlCommand& InCommand)
 	FForgeSourceControlProvider& Provider = InCommand.Provider;
 	const FString WsRoot = Provider.GetWorkspaceRoot();
 
+	// See CheckIn unlock comment — FFI-first, subprocess fallback.
+	const FForgeFFISession* FFI = Provider.GetFFISession();
 	for (const FString& File : InCommand.Files)
 	{
 		FString RelPath = File;
@@ -283,8 +413,16 @@ bool FForgeRevertWorker::Execute(FForgeSourceControlCommand& InCommand)
 		}
 
 		// Unlock (non-fatal).
-		TSharedPtr<FJsonObject> Unused;
-		Provider.RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+		if (FFI != nullptr)
+		{
+			FText IgnoredErr;
+			FForgeFFI::LockRelease(*FFI, RelPath, IgnoredErr);
+		}
+		else
+		{
+			TSharedPtr<FJsonObject> Unused;
+			Provider.RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+		}
 	}
 
 	InCommand.MarkOperationCompleted(true);

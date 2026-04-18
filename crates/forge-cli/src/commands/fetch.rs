@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! `forge fetch [<branch>]` — download remote branches' objects and update
 //! their remote-tracking refs, **without** touching HEAD, the index, or the
@@ -43,9 +43,7 @@ pub fn run(branch: Option<String>) -> Result<()> {
     };
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        fetch_async(&ws, &server_url, &remote_name, &repo_name, branch).await
-    })
+    rt.block_on(async { fetch_async(&ws, &server_url, &remote_name, &repo_name, branch).await })
 }
 
 async fn fetch_async(
@@ -114,8 +112,7 @@ async fn fetch_async(
         // handles the resumable-clone case (children of already-on-disk
         // manifests get walked too) so a half-finished previous fetch
         // doesn't leave us with missing chunks.
-        let _received =
-            fetch_objects_to_tip(ws, &mut client, repo_name, tip_bytes).await?;
+        let _received = fetch_objects_to_tip(ws, &mut client, repo_name, tip_bytes).await?;
 
         // Update the remote-tracking ref to the new tip.
         ws.set_remote_ref(remote_name, branch, &new_tip)?;

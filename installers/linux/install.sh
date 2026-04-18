@@ -312,6 +312,49 @@ if [ -f /etc/profile.d/forge.sh ]; then
     rm -f /etc/profile.d/forge.sh
 fi
 
+# ── Optional: bootstrap a Docker Postgres backend ───────────────────────
+#
+# `FORGE_USE_POSTGRES=1` (or `FORGE_USE_POSTGRES=docker`) tells the
+# installer to launch a containerised Postgres alongside the server.
+# Volume lives under $DATA_DIR/postgres/data so a plain `tar cz` of
+# $DATA_DIR captures the database too — keeps the deployment
+# transferable, which is the main reason Phase 7g shipped this path.
+#
+# Skipped unless Docker is reachable. Operators who want Postgres
+# but already have an external instance set FORGE_USE_POSTGRES= and
+# edit forge-server.toml's `[database]` section by hand.
+if [ "${FORGE_USE_POSTGRES:-}" = "1" ] || [ "${FORGE_USE_POSTGRES:-}" = "docker" ]; then
+    if command -v docker >/dev/null 2>&1; then
+        echo ""
+        echo "Bootstrapping Docker Postgres for forge-server..."
+        # Ensure the forge user owns $DATA_DIR/postgres so the
+        # container's bind mount can write through it. We pre-create
+        # the dirs because Docker would otherwise own them as root.
+        install -d -o forge -g forge "$DATA_DIR/postgres" 2>/dev/null || true
+        install -d -o forge -g forge "$DATA_DIR/postgres/data" 2>/dev/null || true
+        # Run as the forge user so credentials.json + state.json
+        # land with the same ownership as the rest of $DATA_DIR.
+        if [ "$(id -u)" = "0" ]; then
+            sudo -u forge "$PREFIX/bin/forge-server" \
+                --config "$CONFIG_DIR/forge-server.toml" \
+                postgres up
+        else
+            "$PREFIX/bin/forge-server" \
+                --config "$CONFIG_DIR/forge-server.toml" \
+                postgres up
+        fi
+        if [ "$SYSTEMD_SETUP" = "1" ]; then
+            echo "Restarting forge-server to pick up the new [database] backend..."
+            systemctl restart forge-server.service
+        fi
+    else
+        echo ""
+        echo "FORGE_USE_POSTGRES set but 'docker' isn't on PATH; skipping the"
+        echo "Postgres bootstrap. Install Docker, then run:"
+        echo "  sudo -u forge forge-server postgres up"
+    fi
+fi
+
 echo ""
 echo "Forge VCS Server installed successfully!"
 echo ""
@@ -332,6 +375,10 @@ if [ "$SYSTEMD_SETUP" = "1" ]; then
     echo ""
     echo "Create your first admin user:"
     echo "  sudo forge-server user add <username> --admin"
+    echo ""
+    echo "Optional — run with a containerised Postgres (transferable, HA-ready):"
+    echo "  sudo FORGE_USE_POSTGRES=1 forge-server postgres up"
+    echo "  (data lives under $DATA_DIR/postgres/data so 'tar cz $DATA_DIR' captures it)"
     echo ""
     echo "(run via sudo so the 'forge'-owned data dir is writable; alternatively"
     echo "log out + back in after group membership changes and drop the sudo)"

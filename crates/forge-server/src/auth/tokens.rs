@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Random token generation and PAT scope parsing.
 //!
@@ -81,8 +81,7 @@ pub fn prefix_of(plaintext: &str) -> String {
 /// Minimal URL-safe base64 without padding. We don't bring in a base64 crate
 /// just for this — the alphabet is well known and the body is fixed-size.
 fn base64_url_no_pad(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() * 4 + 2) / 3);
     let mut i = 0;
     while i + 3 <= input.len() {

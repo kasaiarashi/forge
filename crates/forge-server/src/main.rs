@@ -1,19 +1,20 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 mod auth;
 #[cfg(windows)]
 mod cert_install;
 mod cli_admin;
 mod config;
+mod observability;
 #[cfg(windows)]
 mod service;
 mod services;
 mod storage;
 mod tls_autogen;
-mod update;
 #[cfg(target_os = "linux")]
 mod uninstall;
+mod update;
 
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::{info, warn};
 
 use config::ServerConfig;
+use forge_proto::forge::agent_service_server::AgentServiceServer;
 use forge_proto::forge::auth_service_server::AuthServiceServer;
 use forge_proto::forge::forge_service_server::ForgeServiceServer;
 use services::auth_service::ForgeAuthService;
@@ -57,6 +59,23 @@ struct Cli {
     #[arg(short, long, global = true)]
     storage: Option<String>,
 
+    /// Run as a read-only edge replica. Every write RPC is rejected
+    /// at the tower layer with `FailedPrecondition`; reads (pulls,
+    /// has-checks, ref/lock listings, browser endpoints) serve out
+    /// of the local DB + object store. Only meaningful for the
+    /// `serve` command. Pair with a Litestream-replicated DB and
+    /// rsync/S3-mirrored objects on each edge host.
+    #[arg(long, global = true)]
+    read_only: bool,
+
+    /// Upstream primary URL surfaced in the error message a write
+    /// RPC sees when this server is `--read-only`. A smart client
+    /// (forge-cli future release) reads the hint and transparently
+    /// retries against the primary. Defaults to a generic message
+    /// when omitted.
+    #[arg(long, global = true)]
+    upstream_write_url: Option<String>,
+
     /// Internal: hand off to the Windows Service Control Manager instead
     /// of running interactively. The installer-registered service has
     /// this flag baked into the binPath; users should never set it by
@@ -85,6 +104,113 @@ enum Commands {
     Repo {
         #[command(subcommand)]
         action: RepoAction,
+    },
+    /// Manage CI agents (add/list/remove)
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+    /// Apply pending metadata migrations and exit.
+    ///
+    /// Idempotent: on a DB already at head, it's a no-op that logs
+    /// the current schema version. Picks the backend out of the
+    /// `[database]` config block — same knob the server uses.
+    Migrate,
+    /// Point-in-time backup of the metadata DB + a manifest of repo
+    /// state. Object blobs are content-addressed and immutable —
+    /// back them up separately (rsync the FS tree, or `aws s3 sync`
+    /// the bucket prefix). See `docs/backup.md` for the runbook.
+    Backup {
+        #[command(subcommand)]
+        action: BackupAction,
+    },
+    /// Offline repack — consolidate small loose objects into pack
+    /// files to relieve NTFS file-count pressure and speed up cold
+    /// server restarts. Run this while the server is stopped; a
+    /// concurrent push is safe but may leave duplicate loose copies
+    /// that the next repack cleans up.
+    Repack {
+        /// Scan and report candidates without writing. Useful to
+        /// preview how many objects and how many bytes a live run
+        /// would move.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Loose objects whose compressed on-disk size is at or
+        /// under this threshold get packed. Default 4096 bytes
+        /// (NTFS cluster size).
+        #[arg(long, default_value_t = crate::services::repack::DEFAULT_MAX_LOOSE_BYTES)]
+        max_loose_bytes: u64,
+
+        /// Restrict to a single repo. Omit to repack every repo.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Run garbage collection and exit. Mark-and-sweep over every
+    /// repo's object store; unreachable objects older than the grace
+    /// window are deleted. Safe to invoke against a running server
+    /// (filesystem deletes race only with staging uploads, which live
+    /// under `_staging/` and are skipped).
+    Gc {
+        /// Scan and report what would be swept without deleting.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Grace window in hours. Objects modified more recently are
+        /// always kept regardless of reachability. Default 24.
+        #[arg(long, default_value_t = 24)]
+        grace_hours: i64,
+
+        /// Restrict to a single repo. Omit to sweep every repo.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Manage a Docker-bundled Postgres instance for the
+    /// `[database] backend = "postgres"` mode. Volume lives under
+    /// `<base_path>/postgres/data/` so the entire deployment stays
+    /// transferable — copy the base directory and the database
+    /// comes with it.
+    Postgres {
+        #[command(subcommand)]
+        action: PostgresAction,
+    },
+    /// Run a closed-loop load test against an existing server.
+    /// Spawns N virtual users on a tokio runtime, each running a
+    /// weighted workload mix (lock acquire/release, list locks,
+    /// ref reads), and reports per-RPC p50/p95/p99 plus aggregate
+    /// RPS. Use against a non-production server only — every run
+    /// produces real DB rows.
+    LoadTest {
+        /// Target server URL, e.g. https://localhost:50051.
+        #[arg(long)]
+        target: String,
+        /// PAT for authenticated calls. Anonymous when omitted —
+        /// only useful against a public test repo.
+        #[arg(long)]
+        token: Option<String>,
+        /// Repo to exercise, e.g. "alice/loadtest".
+        #[arg(long)]
+        repo: String,
+        /// Number of concurrent virtual users.
+        #[arg(long, default_value_t = 50)]
+        users: usize,
+        /// Wall-clock duration in seconds.
+        #[arg(long, default_value_t = 30)]
+        duration: u64,
+        /// PEM-encoded CA cert path. Falls back to `FORGE_CA_CERT`
+        /// env var, then system trust roots. Required for
+        /// self-signed targets.
+        #[arg(long)]
+        ca_cert: Option<std::path::PathBuf>,
+        /// Skip TLS verification. Currently unsupported because the
+        /// tonic ClientTlsConfig surface doesn't expose a hook —
+        /// pass `--ca-cert` instead.
+        #[arg(long)]
+        insecure: bool,
+        /// Synthetic workspace_id every virtual user shares. Only
+        /// matters if you're inspecting locks server-side.
+        #[arg(long, default_value = "loadtest-ws")]
+        workspace_id: String,
     },
     /// Check for updates and self-update the server
     Update {
@@ -181,12 +307,95 @@ enum RepoAction {
     ListMembers { repo: String },
 }
 
+#[derive(Subcommand)]
+enum BackupAction {
+    /// Snapshot the DB into `<dest>/forge.db` + `<dest>/manifest.json`.
+    /// Safe to run against a live server.
+    Create {
+        /// Destination directory. Created if missing; must not already
+        /// contain `forge.db` (we refuse to overwrite).
+        dest: std::path::PathBuf,
+    },
+    /// Verify an existing backup directory. Runs
+    /// `PRAGMA integrity_check` and confirms the manifest matches
+    /// the DB file. No writes.
+    Verify {
+        /// Backup directory produced by `backup create`.
+        path: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum PostgresAction {
+    /// Start (or restart) the bundled Postgres container, generate
+    /// credentials on first run, write the connection URL into the
+    /// loaded config so `serve` can pick it up.
+    Up {
+        /// Container runtime — `docker` (default) or `podman`.
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+        /// Container name. Override only if you run multiple
+        /// forge-server instances on one host.
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_CONTAINER_NAME.to_string())]
+        name: String,
+        /// Host port mapped to the container's 5432.
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_HOST_PORT)]
+        port: u16,
+        /// Postgres image tag. Defaults to a pinned minor release.
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_IMAGE.to_string())]
+        image: String,
+        /// Skip rewriting forge-server.toml. Useful when scripting.
+        #[arg(long)]
+        no_write_config: bool,
+    },
+    /// Stop the container; data dir survives. Pass `--rm` to also
+    /// drop the container metadata so the next `up` recreates it.
+    Down {
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_CONTAINER_NAME.to_string())]
+        name: String,
+        /// Also `docker rm` the stopped container.
+        #[arg(long)]
+        rm: bool,
+    },
+    /// Print whether the container exists / is running, and the
+    /// libpq URL if credentials are present.
+    Status {
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_CONTAINER_NAME.to_string())]
+        name: String,
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_HOST_PORT)]
+        port: u16,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Provision a new agent and print its token (show once).
+    Add {
+        name: String,
+        /// Labels the agent will advertise, e.g. `--labels os:windows ue:5.7`.
+        #[arg(long, num_args = 0..)]
+        labels: Vec<String>,
+    },
+    /// List registered agents.
+    List,
+    /// Remove an agent (breaks its token immediately).
+    Remove { name: String },
+}
+
 // main is intentionally synchronous. The serve path builds its own Tokio
 // runtime via [`run_serve`]; the Windows service path builds a separate
 // runtime inside `service::run_under_scm`. Nesting `#[tokio::main]` would
 // prevent the SCM dispatch from spinning up its own runtime cleanly.
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // tracing is initialised lazily: admin subcommands don't use it and
+    // the `serve` path calls [`observability::init`] after the config is
+    // in hand so file/audit sinks can be wired up correctly. A bare early
+    // `fmt::init` here would grab the global subscriber slot and prevent
+    // the richer init from running.
 
     // Select a rustls crypto provider up-front. Both aws-lc-rs (via tonic's
     // tls feature) and ring (via axum-server's tls-rustls feature, if it
@@ -212,12 +421,28 @@ fn main() -> Result<()> {
     // `/etc/forge/forge-server.toml` when it exists.
     #[cfg(target_os = "linux")]
     {
-        if cli.config == "forge-server.toml"
-            && !std::path::Path::new(&cli.config).exists()
-        {
+        if cli.config == "forge-server.toml" && !std::path::Path::new(&cli.config).exists() {
             let system = "/etc/forge/forge-server.toml";
             if std::path::Path::new(system).exists() {
                 cli.config = system.into();
+            }
+        }
+    }
+
+    // Resolve `--config` to an absolute path *before* we change the cwd.
+    // The chdir-to-binary-dir below would otherwise reinterpret a relative
+    // `--config forge-server.toml` as living next to the binary, silently
+    // ignoring the file the user pointed at. Canonicalize when the file
+    // exists; fall back to plain cwd-join when it doesn't (so `init` still
+    // creates the file at the path the user typed).
+    {
+        let p = std::path::Path::new(&cli.config);
+        if !p.is_absolute() {
+            let abs = std::fs::canonicalize(p)
+                .ok()
+                .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(p)));
+            if let Some(abs) = abs {
+                cli.config = abs.to_string_lossy().into_owned();
             }
         }
     }
@@ -239,7 +464,11 @@ fn main() -> Result<()> {
             );
             return Ok(());
         }
-        Some(Commands::Update { check, force, version }) => {
+        Some(Commands::Update {
+            check,
+            force,
+            version,
+        }) => {
             update::run(check, force, version)?;
             return Ok(());
         }
@@ -307,6 +536,86 @@ fn main() -> Result<()> {
             handle_service_command(action)?;
             return Ok(());
         }
+        Some(Commands::Agent { ref action }) => {
+            let config = load_config_for_admin(&cli)?;
+            match action {
+                AgentAction::Add { name, labels } => cli_admin::agent_add(&config, name, labels)?,
+                AgentAction::List => cli_admin::agent_list(&config)?,
+                AgentAction::Remove { name } => cli_admin::agent_remove(&config, name)?,
+            }
+            return Ok(());
+        }
+        Some(Commands::Migrate) => {
+            let config = load_config_for_admin(&cli)?;
+            cli_admin::migrate(&config)?;
+            return Ok(());
+        }
+        Some(Commands::Postgres { ref action }) => {
+            let config = load_config_for_admin(&cli)?;
+            handle_postgres_command(&config, &cli, action)?;
+            return Ok(());
+        }
+        Some(Commands::Backup { ref action }) => {
+            match action {
+                BackupAction::Create { dest } => {
+                    let config = load_config_for_admin(&cli)?;
+                    cli_admin::backup_create(&config, dest)?;
+                }
+                BackupAction::Verify { path } => {
+                    cli_admin::backup_verify(path)?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Gc {
+            dry_run,
+            grace_hours,
+            ref repo,
+        }) => {
+            let config = load_config_for_admin(&cli)?;
+            cli_admin::gc(&config, dry_run, grace_hours, repo.as_deref())?;
+            return Ok(());
+        }
+        Some(Commands::Repack {
+            dry_run,
+            max_loose_bytes,
+            ref repo,
+        }) => {
+            let config = load_config_for_admin(&cli)?;
+            cli_admin::repack(&config, dry_run, max_loose_bytes, repo.as_deref())?;
+            return Ok(());
+        }
+        Some(Commands::LoadTest {
+            ref target,
+            ref token,
+            ref repo,
+            users,
+            duration,
+            ref ca_cert,
+            insecure,
+            ref workspace_id,
+        }) => {
+            // No config or DB needed — the harness is purely a gRPC
+            // client. Build a multi-thread tokio runtime here so the
+            // user's `--users N` choice can saturate cores.
+            let cfg = services::load_test::LoadTestConfig {
+                target: target.clone(),
+                token: token.clone(),
+                repo: repo.clone(),
+                users,
+                duration: std::time::Duration::from_secs(duration),
+                ca_cert: ca_cert.clone(),
+                insecure,
+                workspace_id: workspace_id.clone(),
+            };
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for load-test")?;
+            let report = rt.block_on(services::load_test::run(cfg))?;
+            services::load_test::print_report(&report);
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -329,7 +638,11 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("build tokio runtime")?;
-    rt.block_on(serve_inner(config, async {
+    let edge = EdgeOpts {
+        read_only: cli.read_only,
+        upstream_write_url: cli.upstream_write_url.clone(),
+    };
+    rt.block_on(serve_inner_with_edge(config, edge, async {
         let _ = tokio::signal::ctrl_c().await;
         info!("Ctrl-C received, shutting down");
     }))
@@ -380,6 +693,16 @@ fn resolve_base_path_relative_to_config(config: &mut ServerConfig, config_path: 
     config.storage.base_path = config_dir.join(&config.storage.base_path);
 }
 
+/// Read-only edge replica knobs. Plumbed through `serve_inner` so a
+/// `forge-server serve --read-only --upstream-write-url …` invocation
+/// can install the [`crate::services::edge::ReadOnlyLayer`] without
+/// touching the (already crowded) `ServerConfig` schema.
+#[derive(Debug, Clone, Default)]
+pub struct EdgeOpts {
+    pub read_only: bool,
+    pub upstream_write_url: Option<String>,
+}
+
 /// Run the gRPC server until `shutdown` resolves. Extracted from the
 /// inline body of `main` so the Windows service path
 /// (`service::run_under_scm` -> `service::run_service`) can call it with
@@ -389,19 +712,75 @@ pub(crate) async fn serve_inner(
     mut config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    serve_inner_with_edge(config, EdgeOpts::default(), shutdown).await
+}
+
+#[allow(unused_assignments)]
+pub(crate) async fn serve_inner_with_edge(
+    mut config: ServerConfig,
+    edge: EdgeOpts,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     // Take ownership of base_path early so we can rebind it after moving
     // sections of `config` into the gRPC service.
     let base = config.storage.base_path.clone();
     std::fs::create_dir_all(base.join("repos"))?;
 
-    let db_path = config.resolved_db_path();
-    let db = Arc::new(MetadataDb::open(&db_path)?);
+    // Wire up logging + audit sinks now that we have a config and a base
+    // path to resolve the log dir against. Guards are held until the end
+    // of `serve_inner`; dropping them at the wrong moment loses the
+    // final flush from the non-blocking appender.
+    let _log_guards = observability::init(&config.logging, config.resolved_log_dir().as_deref());
 
-    // Bootstrap token: generated on first start (no users yet), written to
-    // `<base_path>/.bootstrap_token`, and required on the BootstrapAdmin RPC.
-    // Once the first admin is created we delete the file and stop enforcing.
+    // Metadata backend selection. Phase 7g — a Postgres backend
+    // serves the trait-covered surface (repos/refs/locks/upload
+    // sessions/repo ops + auth) end-to-end. SQLite-only surfaces
+    // (issues/PRs/workflows/actions/agents/secrets) still write to
+    // the local SQLite file because they aren't replicated; on
+    // Postgres mode the operator should treat them as node-local
+    // until those modules grow Postgres impls.
+    let db_path = config.resolved_db_path();
+    let db = match config.database.backend.as_str() {
+        "sqlite" => Arc::new(MetadataDb::open(&db_path)?),
+        "postgres" => {
+            #[cfg(feature = "postgres")]
+            {
+                if config.database.url.is_empty() {
+                    anyhow::bail!(
+                        "[database] url is required when backend = \"postgres\". \
+                         Run `forge-server postgres up` to bootstrap a local \
+                         Docker instance."
+                    );
+                }
+                let pg_cfg = crate::storage::postgres::PgPoolConfig {
+                    url: config.database.url.clone(),
+                    max_size: config.database.max_connections,
+                    statement_timeout_ms: config.database.busy_timeout_ms,
+                    ..Default::default()
+                };
+                warn!(
+                    "starting with Postgres backend — SQLite-only handlers \
+                     (issues/PRs/workflows/actions/agents/secrets) remain \
+                     node-local until their Postgres impls land. See \
+                     docs/postgres-mode.md."
+                );
+                Arc::new(MetadataDb::open_with_postgres(&db_path, pg_cfg)?)
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                anyhow::bail!(
+                    "[database] backend = \"postgres\" requires the \
+                     `postgres` Cargo feature. Rebuild forge-server with \
+                     `--features postgres`, or set backend = \"sqlite\"."
+                );
+            }
+        }
+        other => {
+            anyhow::bail!("unknown [database] backend '{other}' (expected 'sqlite' or 'postgres')")
+        }
+    };
+
     let bootstrap_token_path = base.join(".bootstrap_token");
-    let bootstrap_token = ensure_bootstrap_token(Arc::clone(&db), &bootstrap_token_path)?;
 
     let repo_overrides: std::collections::HashMap<String, std::path::PathBuf> = config
         .repos
@@ -410,31 +789,185 @@ pub(crate) async fn serve_inner(
         .collect();
     let fs = Arc::new(FsStorage::new(base.join("repos"), repo_overrides));
 
+    // Phase 3b.4 — construct the RepoStorageBackend per `[objects]`.
+    // FS is the default + zero-dep path. S3 is opt-in at build-time
+    // (`s3-objects` Cargo feature) *and* at config-time — asking for
+    // `backend = "s3"` in a build without the feature hard-errors at
+    // startup so operators never think they have S3 when they don't.
+    let storage: Arc<dyn storage::repo_backend::RepoStorageBackend> =
+        match config.objects.backend.as_str() {
+            "fs" => Arc::clone(&fs) as Arc<dyn storage::repo_backend::RepoStorageBackend>,
+            "s3" => {
+                #[cfg(feature = "s3-objects")]
+                {
+                    // Pass the DB so S3RepoStorage's rename/delete
+                    // paths enqueue durable drain ops, and so we can
+                    // hand the same handle to the drain task below.
+                    build_s3_repo_storage(
+                        &config.objects.s3,
+                        Arc::clone(&fs),
+                        Arc::clone(&db) as Arc<dyn storage::backend::MetadataBackend>,
+                    )
+                    .await?
+                }
+                #[cfg(not(feature = "s3-objects"))]
+                {
+                    anyhow::bail!(
+                        "[objects] backend = \"s3\" requires the `s3-objects` \
+                         Cargo feature. Rebuild forge-server with \
+                         `--features s3-objects` or set backend = \"fs\"."
+                    );
+                }
+            }
+            other => anyhow::bail!("[objects] backend = \"{other}\" — expected \"fs\" or \"s3\""),
+        };
+
+    // UserStore picks PgUserStore on postgres mode so logins / PATs /
+    // repo grants land in the replicated database. SQLite mode keeps
+    // SqliteUserStore; existing call sites all hold Arc<dyn UserStore>
+    // already so nothing downstream cares which is in play.
+    let user_store: Arc<dyn auth::UserStore> = {
+        #[cfg(feature = "postgres")]
+        {
+            if let Some(pg) = db.pg() {
+                Arc::new(auth::store_postgres::PgUserStore::new(Arc::clone(pg)))
+                    as Arc<dyn auth::UserStore>
+            } else {
+                Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)))
+                    as Arc<dyn auth::UserStore>
+            }
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            Arc::new(auth::SqliteUserStore::new(Arc::clone(&db))) as Arc<dyn auth::UserStore>
+        }
+    };
+
+    // Bootstrap token: generated on first start (no users yet), written to
+    // `<base_path>/.bootstrap_token`, and required on the BootstrapAdmin RPC.
+    // Once the first admin is created we delete the file and stop enforcing.
+    // Routed through the trait so the count_users()/admin-creation check
+    // hits whichever backend the operator selected.
+    let bootstrap_token = ensure_bootstrap_token(user_store.as_ref(), &bootstrap_token_path)?;
+
+    // Secrets: load/create master key under <base>/secrets/master.key, then
+    // wrap the DB in the AES-GCM SQLite backend. Swap to a KMS-backed
+    // SecretBackend here later without touching call sites.
+    let master_key = services::secrets::master_key::load_or_create(&base)
+        .context("load or create secrets master key")?;
+    let secrets: Arc<dyn services::secrets::SecretBackend> = Arc::new(
+        services::secrets::sqlite::SqliteSecretBackend::new(Arc::clone(&db), &master_key),
+    );
+
+    // Artifact store: FS (default) or S3 (feature-gated). Matches
+    // `[artifacts] backend = ...` in the config. Selecting `"s3"` without
+    // the `s3` cargo feature is a hard error at startup rather than a
+    // silent downgrade to FS.
+    let artifacts_root = config.resolved_artifacts_path();
+    let artifacts: Arc<dyn services::artifacts::ArtifactStore> =
+        match config.artifacts.backend.as_str() {
+            "fs" => Arc::new(services::artifacts::fs::FsArtifactStore::new(
+                artifacts_root.clone(),
+            )),
+            "s3" => {
+                #[cfg(not(feature = "s3-objects"))]
+                warn!(
+                    "artifacts backend = \"s3\" requires the `s3-objects` \
+                     cargo feature. This build is a stub: uploads will fail. \
+                     Rebuild with `--features s3-objects` or set backend = \
+                     \"fs\" for production."
+                );
+                Arc::new(services::artifacts::s3::S3ArtifactStore::new(
+                    config.artifacts.s3.clone(),
+                )?)
+            }
+            other => anyhow::bail!("unknown artifact backend: {}", other),
+        };
+    // Retention sweeper. No-op when the actions engine is off and no runs
+    // are ever produced, but safe to start unconditionally.
+    services::artifacts::retention::spawn(
+        Arc::clone(&db),
+        Arc::clone(&artifacts),
+        config.artifacts.retention.clone(),
+    );
+
+    // Agent heartbeat sweeper. Requeues runs whose owning agent has gone
+    // silent so a crashed worker can't hold a claim forever.
+    services::agent_sweeper::spawn(Arc::clone(&db));
+    services::session_sweeper::spawn(Arc::clone(&db), Arc::clone(&fs));
+    services::gc::spawn(Arc::clone(&db), Arc::clone(&fs));
+
+    // Phase 7 — /metrics + /healthz + /readyz. Off-by-port so a scraper
+    // can hit plain HTTP without threading the gRPC TLS trust chain.
+    if config.metrics.enabled {
+        services::metrics::spawn(
+            services::metrics::MetricsState {
+                db: Arc::clone(&db),
+                start: std::time::Instant::now(),
+                version: env!("CARGO_PKG_VERSION"),
+            },
+            config.metrics.listen.clone(),
+        );
+    }
+
+    // Live step-log broadcast hub. Engine + (future) agents publish;
+    // StreamStepLogs readers subscribe.
+    let log_hub = Arc::new(services::logs::LogHub::new());
+
+    // Phase 4d — live lock-event broadcast hub. Acquire/release
+    // handlers publish; StreamLockEvents subscribers (UE plugin)
+    // tail them instead of polling ListLocks on a timer.
+    let lock_events_hub = Arc::new(services::lock_events::LockEventHub::new());
+
+    // Composite actions registry: copy the bundled `actions/` tree (shipped
+    // next to the server binary or resolved via the repo's actions dir)
+    // into `<base>/actions/` on every start. Operator overrides dropped
+    // directly in `<base>/actions/` survive — we only refresh files that
+    // differ from the bundled copy, never delete strays.
+    let actions_root = base.join("actions");
+    if let Err(e) = sync_bundled_actions(&actions_root) {
+        warn!(error = %e, "failed to sync bundled actions (server will still start)");
+    }
+
     // Workflow engine is opt-in. See [actions] in forge-server.toml; the
     // post-audit default is OFF because steps run shell commands as the
-    // forge-server process user.
-    let workflow_engine = if config.actions.enabled {
+    // forge-server process user. When `[actions] use_agents = true`, skip
+    // the in-process runner entirely so only external agents pick up runs.
+    let workflow_engine = if config.actions.enabled && !config.actions.use_agents {
         warn!(
             "*** Actions engine ENABLED — workflow steps will execute as shell \
              commands on this host. Ensure forge-server runs under an isolated \
              account. See docs/actions-security.md for the full threat model."
         );
-        let tx = services::actions::engine::start(&config, Arc::clone(&db), Arc::clone(&fs));
-        info!("Actions engine started (executor: {})", config.actions.executor);
+        let tx = services::actions::engine::start(
+            &config,
+            Arc::clone(&db),
+            Arc::clone(&fs),
+            Arc::clone(&secrets),
+            Arc::clone(&log_hub),
+        );
+        info!(
+            "Actions engine started (executor: {})",
+            config.actions.executor
+        );
         Some(tx)
     } else {
         None
     };
 
-    let user_store: Arc<dyn auth::UserStore> =
-        Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
-
     let grpc_service = ForgeGrpcService {
         fs: Arc::clone(&fs),
+        storage: Arc::clone(&storage),
         db: Arc::clone(&db),
         start_time: std::time::Instant::now(),
         workflow_engine,
         user_store: Arc::clone(&user_store),
+        secrets: Arc::clone(&secrets),
+        artifacts: Arc::clone(&artifacts),
+        artifact_signer_key: master_key,
+        log_hub: Arc::clone(&log_hub),
+        lock_events: Arc::clone(&lock_events_hub),
+        limits: config.limits.clone(),
     };
 
     let addr: std::net::SocketAddr = config.server.listen.parse()?;
@@ -463,6 +996,14 @@ pub(crate) async fn serve_inner(
         bootstrap_token: bootstrap_token.clone(),
         bootstrap_token_path: bootstrap_token_path.clone(),
     });
+    let agent_svc = AgentServiceServer::new(services::agents::ForgeAgentService {
+        db: Arc::clone(&db),
+        secrets: Arc::clone(&secrets),
+        log_hub: Arc::clone(&log_hub),
+        actions_root: actions_root.clone(),
+    })
+    .max_decoding_message_size(max_msg)
+    .max_encoding_message_size(max_msg);
 
     // Raise HTTP/2 flow-control windows from the 65 KB default so a single
     // stream can saturate a fast LAN link without stalling on window updates.
@@ -490,8 +1031,7 @@ pub(crate) async fn serve_inner(
                     sans.push(host);
                 }
             }
-            tls_autogen::ensure(&paths, &sans)
-                .context("auto-generating TLS certificates")?;
+            tls_autogen::ensure(&paths, &sans).context("auto-generating TLS certificates")?;
         }
 
         // On Windows, push the CA into the system trust store so clients
@@ -543,20 +1083,108 @@ pub(crate) async fn serve_inner(
         }
     }
 
-    builder
-        .add_service(tonic::service::interceptor::InterceptedService::new(
-            forge_svc,
-            interceptor.clone(),
-        ))
-        .add_service(tonic::service::interceptor::InterceptedService::new(
-            auth_svc,
-            interceptor,
-        ))
-        .serve_with_shutdown(addr, shutdown)
-        .await?;
+    // Phase 7e — read-only edge replica. The layer rejects every
+    // write RPC at the tower level before the typed handler runs,
+    // so even a malicious client can't sneak past the check by
+    // crafting a partial request body. Skipping the layer entirely
+    // on the primary keeps the single-server hot path zero-cost.
+    if edge.read_only {
+        let hint = edge
+            .upstream_write_url
+            .as_deref()
+            .unwrap_or("the primary forge-server (consult your operator)")
+            .to_string();
+        warn!(upstream = %hint, "starting in --read-only edge mode; writes will be rejected");
+        let layer = services::edge::ReadOnlyLayer::new(hint);
+        builder
+            .layer(layer)
+            .add_service(tonic::service::interceptor::InterceptedService::new(
+                forge_svc,
+                interceptor.clone(),
+            ))
+            .add_service(tonic::service::interceptor::InterceptedService::new(
+                auth_svc,
+                interceptor,
+            ))
+            .add_service(agent_svc)
+            .serve_with_shutdown(addr, shutdown)
+            .await?;
+    } else {
+        builder
+            .add_service(tonic::service::interceptor::InterceptedService::new(
+                forge_svc,
+                interceptor.clone(),
+            ))
+            .add_service(tonic::service::interceptor::InterceptedService::new(
+                auth_svc,
+                interceptor,
+            ))
+            // AgentService carries its own per-message (agent_id, token)
+            // credentials verified against Argon2-hashed agent tokens in DB;
+            // it deliberately bypasses the user PAT interceptor so agents
+            // don't need a user account.
+            .add_service(agent_svc)
+            .serve_with_shutdown(addr, shutdown)
+            .await?;
+    }
 
     info!("Forge server stopped cleanly");
     Ok(())
+}
+
+/// Build an `S3RepoStorage` from the `[objects.s3]` config block.
+/// Called from `serve_inner` when the operator picks the S3 backend.
+/// `fs` is handed in so staging — which stays on local disk because
+/// S3 has no native append — reuses the already-built instance.
+///
+/// Lives in a helper so the `#[cfg]` gate in `serve_inner` stays a
+/// one-liner.
+#[cfg(feature = "s3-objects")]
+async fn build_s3_repo_storage(
+    cfg: &config::ObjectsS3,
+    fs: Arc<FsStorage>,
+    queue: Arc<dyn storage::backend::MetadataBackend>,
+) -> Result<Arc<dyn storage::repo_backend::RepoStorageBackend>> {
+    use storage::s3_objects::{S3ObjectBackend, S3ObjectBackendConfig};
+    use storage::s3_repo::S3RepoStorage;
+
+    if cfg.bucket.is_empty() {
+        anyhow::bail!("[objects.s3] bucket is required when backend = \"s3\"");
+    }
+
+    // The S3 SDK client resolves credentials + endpoint lazily on
+    // first request, but we construct here so a bad config fails at
+    // startup rather than on the first push. `S3ObjectBackend::new`
+    // is async because aws-config's loader is; `serve_inner` runs
+    // on the tokio runtime already, so we can just `.await`.
+    let s3_cfg = S3ObjectBackendConfig {
+        bucket: cfg.bucket.clone(),
+        prefix: cfg.prefix.clone(),
+        region: cfg.region.clone(),
+        endpoint_url: cfg.endpoint_url.clone(),
+        access_key_id: cfg.access_key_id.clone(),
+        secret_access_key: cfg.secret_access_key.clone(),
+        path_style: cfg.path_style,
+    };
+    let base = Arc::new(
+        S3ObjectBackend::new(s3_cfg)
+            .await
+            .context("construct S3 live object backend")?,
+    );
+    info!(
+        bucket = %cfg.bucket,
+        region = %cfg.region,
+        endpoint = %cfg.endpoint_url,
+        prefix = %cfg.prefix,
+        "objects backend: S3 (live in bucket, staging on local disk)"
+    );
+
+    // Spawn the Phase 3b.5 drain. Consumes rename/delete ops queued
+    // by S3RepoStorage. Safe to spawn unconditionally — a drain with
+    // an empty queue just polls the DB every 30s doing nothing.
+    services::repo_ops_drain::spawn(Arc::clone(&queue), Arc::clone(&base));
+
+    Ok(Arc::new(S3RepoStorage::with_queue(base, fs, queue)))
 }
 
 /// `forge-server service install/uninstall/start/stop` dispatcher.
@@ -596,6 +1224,177 @@ fn handle_service_command(action: &ServiceAction) -> Result<()> {
     }
 }
 
+/// `forge-server postgres` dispatcher. Lives outside `serve_inner`
+/// because the subcommand never touches the gRPC stack — it's a
+/// thin wrapper around the `docker` CLI plus a config-rewrite step.
+fn handle_postgres_command(
+    config: &ServerConfig,
+    cli: &Cli,
+    action: &PostgresAction,
+) -> Result<()> {
+    let base = config.storage.base_path.clone();
+    std::fs::create_dir_all(&base).ok();
+    match action {
+        PostgresAction::Up {
+            runtime,
+            name,
+            port,
+            image,
+            no_write_config,
+        } => {
+            let cfg = services::postgres_docker::PostgresDockerConfig {
+                runtime: runtime.clone(),
+                container_name: name.clone(),
+                host_port: *port,
+                image: image.clone(),
+                base_path: base.clone(),
+            };
+            let report = services::postgres_docker::up(&cfg)?;
+            if report.already_running {
+                println!("forge-postgres already running.");
+            } else {
+                println!("forge-postgres started.");
+            }
+            println!("  container : {}", report.container_name);
+            println!("  port      : {}", report.host_port);
+            println!("  data dir  : {}", base.join("postgres").join("data").display());
+            println!("  url       : {}", report.url);
+            println!(
+                "  credentials saved to {}",
+                base.join("postgres").join("credentials.json").display()
+            );
+            if !no_write_config {
+                let written = update_config_for_postgres(&cli.config, &report.url)?;
+                if written {
+                    println!(
+                        "Updated {} → [database] backend = \"postgres\", url = \"...\".",
+                        cli.config
+                    );
+                } else {
+                    println!(
+                        "Config {} not updated (file missing). Set [database] manually.",
+                        cli.config
+                    );
+                }
+            }
+            Ok(())
+        }
+        PostgresAction::Down {
+            runtime,
+            name,
+            rm,
+        } => {
+            let cfg = services::postgres_docker::PostgresDockerConfig {
+                runtime: runtime.clone(),
+                container_name: name.clone(),
+                host_port: 0,
+                image: services::postgres_docker::DEFAULT_IMAGE.into(),
+                base_path: base,
+            };
+            services::postgres_docker::down(&cfg, *rm)?;
+            println!("forge-postgres stopped{}.", if *rm { " and removed" } else { "" });
+            Ok(())
+        }
+        PostgresAction::Status {
+            runtime,
+            name,
+            port,
+        } => {
+            let cfg = services::postgres_docker::PostgresDockerConfig {
+                runtime: runtime.clone(),
+                container_name: name.clone(),
+                host_port: *port,
+                image: services::postgres_docker::DEFAULT_IMAGE.into(),
+                base_path: base,
+            };
+            let report = services::postgres_docker::status(&cfg);
+            println!("runtime present : {}", report.runtime_present);
+            println!("container       : {}", report.container_name);
+            println!("exists          : {}", report.exists);
+            println!("running         : {}", report.running);
+            println!("port            : {}", report.host_port);
+            if let Some(url) = report.url {
+                println!("url             : {}", url);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Rewrite the `[database]` section in `forge-server.toml` to point
+/// at the freshly-bootstrapped Postgres URL. We surgically replace
+/// just `backend` and `url` so operator-set knobs (max_connections
+/// etc) stay intact. Returns `Ok(false)` when the config file
+/// doesn't exist — operators wiring this from a Dockerfile may
+/// run `postgres up` before `init`.
+fn update_config_for_postgres(config_path: &str, url: &str) -> Result<bool> {
+    let path = std::path::Path::new(config_path);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut text = std::fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    text = rewrite_db_field(&text, "backend", "\"postgres\"");
+    text = rewrite_db_field(&text, "url", &format!("\"{url}\""));
+    // Make sure [objects] backend is non-empty too — the default in
+    // ObjectsSection's Default impl is "" which the runtime rejects
+    // at startup. Operators relying on `forge-server postgres up`
+    // for first-time setup wouldn't have hand-written this section.
+    if !text.contains("[objects]") {
+        text.push_str("\n[objects]\nbackend = \"fs\"\n");
+    }
+    std::fs::write(path, text)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
+/// Replace the value of `<key> = …` inside the `[database]` block,
+/// inserting the line if missing. Tiny TOML editor — pulling in
+/// toml_edit's full DOM for two field rewrites would be overkill,
+/// and this stays line-based + deterministic.
+fn rewrite_db_field(text: &str, key: &str, value_literal: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    let mut in_db_section = false;
+    let mut wrote = false;
+    for line in &lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            // Leaving the previous section. If we were in [database]
+            // and never overwrote/inserted the key, append it now.
+            if in_db_section && !wrote {
+                out.push(format!("{key} = {value_literal}"));
+                wrote = true;
+            }
+            in_db_section = trimmed == "[database]";
+        }
+        if in_db_section
+            && !wrote
+            && trimmed.split('=').next().map(|s| s.trim()) == Some(key)
+        {
+            out.push(format!("{key} = {value_literal}"));
+            wrote = true;
+            continue;
+        }
+        out.push((*line).to_string());
+    }
+    if in_db_section && !wrote {
+        out.push(format!("{key} = {value_literal}"));
+        wrote = true;
+    }
+    if !wrote {
+        // No [database] section at all — append one.
+        out.push(String::new());
+        out.push("[database]".into());
+        out.push(format!("{key} = {value_literal}"));
+    }
+    let mut joined = out.join("\n");
+    if !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// Ensure a bootstrap token exists for a fresh install. When the users table
 /// is empty and no token file has been created yet, generate a random token,
 /// write it to `<base>/.bootstrap_token`, and log it loudly so the operator
@@ -605,11 +1404,9 @@ fn handle_service_command(action: &ServiceAction) -> Result<()> {
 /// returned `Option<String>` is stashed on `ForgeAuthService` and compared
 /// against `BootstrapAdminRequest.bootstrap_token`.
 fn ensure_bootstrap_token(
-    db: Arc<MetadataDb>,
+    store: &dyn auth::UserStore,
     path: &std::path::Path,
 ) -> Result<Option<String>> {
-    use auth::store::UserStore as _;
-    let store = auth::SqliteUserStore::new(db);
     let user_count = store.count_users().context("counting users")?;
     if user_count > 0 {
         // Already initialized — make sure any leftover token file is gone.
@@ -641,8 +1438,7 @@ fn ensure_bootstrap_token(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(path, &token)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(path, &token).with_context(|| format!("failed to write {}", path.display()))?;
 
     warn!(
         "\n*** FIRST-RUN BOOTSTRAP TOKEN ***\n\
@@ -675,11 +1471,7 @@ fn local_non_loopback_ips() -> Vec<std::net::IpAddr> {
                 // what the operator means to expose.
                 match ip {
                     std::net::IpAddr::V4(v4) if v4.is_link_local() => None,
-                    std::net::IpAddr::V6(v6)
-                        if (v6.segments()[0] & 0xffc0) == 0xfe80 =>
-                    {
-                        None
-                    }
+                    std::net::IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => None,
                     _ => Some(ip),
                 }
             })
@@ -694,10 +1486,7 @@ fn local_non_loopback_ips() -> Vec<std::net::IpAddr> {
 /// Resolve the cert/key paths from `[server.tls]`, falling back to the
 /// default layout under `<base_path>/certs/` when the operator left them
 /// unset (the auto-generate happy path).
-fn resolve_tls_paths(
-    tls: &config::TlsConfig,
-    base: &std::path::Path,
-) -> tls_autogen::TlsPaths {
+fn resolve_tls_paths(tls: &config::TlsConfig, base: &std::path::Path) -> tls_autogen::TlsPaths {
     let defaults = tls_autogen::TlsPaths::under(base);
     tls_autogen::TlsPaths {
         ca_cert: defaults.ca_cert.clone(),
@@ -726,4 +1515,56 @@ fn load_config_for_admin(cli: &Cli) -> Result<ServerConfig> {
         config.storage.base_path = storage.into();
     }
     Ok(config)
+}
+
+/// Copy the bundled `actions/` tree into `<base>/actions/`. Only overwrites
+/// files whose contents actually changed so operator overrides dropped
+/// directly under `<base>/actions/` survive restarts.
+fn sync_bundled_actions(dest_root: &std::path::Path) -> anyhow::Result<()> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let candidates: Vec<std::path::PathBuf> = exe_dir
+        .iter()
+        .map(|d| d.join("actions"))
+        .chain(
+            std::env::current_dir()
+                .ok()
+                .into_iter()
+                .map(|c| c.join("actions")),
+        )
+        .chain(Some(std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../actions"
+        ))))
+        .collect();
+    let source = match candidates.into_iter().find(|p| p.exists()) {
+        Some(p) => p,
+        None => {
+            std::fs::create_dir_all(dest_root).ok();
+            return Ok(());
+        }
+    };
+
+    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let path = entry.path();
+            let to = dst.join(entry.file_name());
+            if path.is_dir() {
+                copy_dir(&path, &to)?;
+            } else {
+                let changed = match std::fs::read(&to) {
+                    Ok(existing) => existing != std::fs::read(&path)?,
+                    Err(_) => true,
+                };
+                if changed {
+                    std::fs::copy(&path, &to)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    copy_dir(&source, dest_root)
 }

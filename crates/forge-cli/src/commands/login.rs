@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! `forge login` — authenticate against a forge server and store a credential.
 //!
@@ -240,9 +240,15 @@ async fn login_interactive(
     let pat_resp = auth
         .create_personal_access_token(CreatePatRequest {
             name: pat_name.clone(),
+            // `repo:admin` is required for CI admin commands: workflow
+            // create/update/delete, secret create/update/delete, repo ACL
+            // changes. Server-side role checks still gate access per-repo,
+            // so a non-admin user getting this scope can't actually do
+            // anything with it.
             scopes: vec![
                 "repo:read".to_string(),
                 "repo:write".to_string(),
+                "repo:admin".to_string(),
             ],
             expires_at: 0, // never
         })

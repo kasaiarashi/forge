@@ -38,3 +38,7 @@ pub mod update;
 pub mod version;
 pub mod whoami;
 pub mod cat_object;
+pub mod secrets;
+pub mod workflow;
+pub mod runs;
+pub mod artifacts;

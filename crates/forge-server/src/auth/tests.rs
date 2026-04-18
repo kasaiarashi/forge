@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Integration tests for [`SqliteUserStore`] against a real on-disk SQLite
 //! file (the same `MetadataDb::open` path the server uses).
@@ -217,8 +217,12 @@ fn revoke_session_removes_it() {
 fn list_sessions_for_user() {
     let (_tmp, store) = fresh_store();
     let alice = make_user(&store, "alice", false);
-    store.create_session(alice.id, 3600, Some("a"), None).unwrap();
-    store.create_session(alice.id, 3600, Some("b"), None).unwrap();
+    store
+        .create_session(alice.id, 3600, Some("a"), None)
+        .unwrap();
+    store
+        .create_session(alice.id, 3600, Some("b"), None)
+        .unwrap();
     let sessions = store.list_sessions_for_user(alice.id).unwrap();
     assert_eq!(sessions.len(), 2);
 }
@@ -376,10 +380,8 @@ fn list_repo_members_returns_user_and_role() {
         .set_repo_role("game-data", carol.id, RepoRole::Admin, Some(alice.id))
         .unwrap();
     let members = store.list_repo_members("game-data").unwrap();
-    let by_user: std::collections::HashMap<_, _> = members
-        .into_iter()
-        .map(|(u, r)| (u.username, r))
-        .collect();
+    let by_user: std::collections::HashMap<_, _> =
+        members.into_iter().map(|(u, r)| (u.username, r)).collect();
     assert_eq!(by_user.get("bob"), Some(&RepoRole::Write));
     assert_eq!(by_user.get("carol"), Some(&RepoRole::Admin));
 }
@@ -418,10 +420,7 @@ fn deleting_user_cascades_to_sessions_pats_and_acls() {
     assert!(store.delete_user(bob.id).unwrap());
     assert!(store.list_sessions_for_user(bob.id).unwrap().is_empty());
     assert!(store.list_pats_for_user(bob.id).unwrap().is_empty());
-    assert!(store
-        .get_repo_role("game-data", bob.id)
-        .unwrap()
-        .is_none());
+    assert!(store.get_repo_role("game-data", bob.id).unwrap().is_none());
 }
 
 // (Test-only helpers live as `#[cfg(test)] pub(crate)` methods on

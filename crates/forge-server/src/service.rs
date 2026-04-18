@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Windows service integration for forge-server.
 //!
@@ -33,8 +33,8 @@ use std::time::Duration;
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl,
-        ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
     },
     service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle},
     service_dispatcher,
@@ -255,9 +255,7 @@ pub fn uninstall() -> Result<()> {
         ServiceAccess::DELETE | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
     ) {
         Ok(s) => s,
-        Err(windows_service::Error::Winapi(io_err))
-            if io_err.raw_os_error() == Some(1060) =>
-        {
+        Err(windows_service::Error::Winapi(io_err)) if io_err.raw_os_error() == Some(1060) => {
             // ERROR_SERVICE_DOES_NOT_EXIST — already uninstalled.
             return Ok(());
         }
@@ -289,7 +287,10 @@ pub fn stop() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("connect to service manager")?;
     let service = manager
-        .open_service(SERVICE_NAME, ServiceAccess::STOP | ServiceAccess::QUERY_STATUS)
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+        )
         .context("open service")?;
     let _ = service.stop();
     Ok(())

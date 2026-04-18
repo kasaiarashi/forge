@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::{bail, Result};
-use forge_core::workspace::{Workspace, WorkflowMode};
+use forge_core::workspace::{WorkflowMode, Workspace};
 
 pub fn run(key: Option<String>, value: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -14,7 +14,14 @@ pub fn run(key: Option<String>, value: Option<String>) -> Result<()> {
             // Show all config.
             println!("user.name     = {}", config.user.name);
             println!("user.email    = {}", config.user.email);
-            println!("repo          = {}", if config.repo.is_empty() { "default" } else { &config.repo });
+            println!(
+                "repo          = {}",
+                if config.repo.is_empty() {
+                    "default"
+                } else {
+                    &config.repo
+                }
+            );
             println!("workflow      = {}", config.workflow);
             println!("workspace_id  = {}", config.workspace_id);
             if !config.remotes.is_empty() {
@@ -61,18 +68,29 @@ pub fn run(key: Option<String>, value: Option<String>) -> Result<()> {
             ws.save_config(&config)?;
             println!("repo = {}", val);
         }
-        (Some(key), None) => {
-            match key {
-                "workflow" => println!("{}", config.workflow),
-                "user.name" => println!("{}", config.user.name),
-                "user.email" => println!("{}", config.user.email),
-                "repo" => println!("{}", if config.repo.is_empty() { "default" } else { &config.repo }),
-                "workspace_id" => println!("{}", config.workspace_id),
-                _ => bail!("Unknown config key '{}'. Known: workflow, user.name, user.email, repo", key),
-            }
-        }
+        (Some(key), None) => match key {
+            "workflow" => println!("{}", config.workflow),
+            "user.name" => println!("{}", config.user.name),
+            "user.email" => println!("{}", config.user.email),
+            "repo" => println!(
+                "{}",
+                if config.repo.is_empty() {
+                    "default"
+                } else {
+                    &config.repo
+                }
+            ),
+            "workspace_id" => println!("{}", config.workspace_id),
+            _ => bail!(
+                "Unknown config key '{}'. Known: workflow, user.name, user.email, repo",
+                key
+            ),
+        },
         (Some(key), Some(_)) => {
-            bail!("Cannot set '{}'. Known writable keys: workflow, user.name, user.email, repo", key);
+            bail!(
+                "Cannot set '{}'. Known writable keys: workflow, user.name, user.email, repo",
+                key
+            );
         }
     }
 

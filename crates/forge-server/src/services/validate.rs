@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use tonic::Status;
 
@@ -38,13 +38,15 @@ fn repo_segment(seg: &str, label: &str) -> Result<(), Status> {
 /// by the time this function runs the input always has the slash.
 pub fn repo_name(name: &str) -> Result<(), Status> {
     if name.is_empty() || name.len() > 128 {
-        return Err(Status::invalid_argument("repo path must be 1-128 characters"));
+        return Err(Status::invalid_argument(
+            "repo path must be 1-128 characters",
+        ));
     }
     let mut parts = name.splitn(2, '/');
     let owner = parts.next().unwrap_or("");
-    let repo = parts.next().ok_or_else(|| {
-        Status::invalid_argument("repo path must be in '<owner>/<name>' form")
-    })?;
+    let repo = parts
+        .next()
+        .ok_or_else(|| Status::invalid_argument("repo path must be in '<owner>/<name>' form"))?;
     if repo.contains('/') {
         return Err(Status::invalid_argument(
             "repo path must contain exactly one '/' separator",
@@ -58,7 +60,9 @@ pub fn repo_name(name: &str) -> Result<(), Status> {
 /// Validate a ref name (branch or tag).
 pub fn ref_name(name: &str) -> Result<(), Status> {
     if name.is_empty() || name.len() > 256 {
-        return Err(Status::invalid_argument("ref name must be 1-256 characters"));
+        return Err(Status::invalid_argument(
+            "ref name must be 1-256 characters",
+        ));
     }
     if name.contains("..") {
         return Err(Status::invalid_argument("ref name cannot contain '..'"));

@@ -1,0 +1,29 @@
+# UE Cook — cook content for target platform using UAT.
+name: UE Cook
+inputs:
+  project:
+    required: true
+  platform:
+    default: Win64
+  engine_version:
+    default: "5.7"
+  upload_cooked:
+    default: "false"
+outputs:
+  uat_exit_code: ${{ steps.uat.outputs.exit_code }}
+steps:
+  - name: Discover UE
+    id: ue
+    uses: "@builtin/ue-discover"
+    with:
+      version: "${{ inputs.engine_version }}"
+  - name: Run UAT BuildCookRun (cook)
+    id: uat
+    uses: "@builtin/run-uat"
+    with:
+      uat: "${{ steps.ue.outputs.uat_path }}"
+      args: >
+        BuildCookRun
+        -project=${{ inputs.project }}
+        -cook -skipbuild -skipstage
+        -targetplatform=${{ inputs.platform }}

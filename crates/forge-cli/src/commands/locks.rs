@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::Result;
 use forge_core::workspace::Workspace;
@@ -22,7 +22,11 @@ pub fn run(json: bool) -> Result<()> {
 
         let resp = client
             .list_locks(ListLocksRequest {
-                repo: if config.repo.is_empty() { "default".into() } else { config.repo.clone() },
+                repo: if config.repo.is_empty() {
+                    "default".into()
+                } else {
+                    config.repo.clone()
+                },
                 path_prefix: String::new(),
                 owner: String::new(),
             })
@@ -30,13 +34,17 @@ pub fn run(json: bool) -> Result<()> {
             .into_inner();
 
         if json {
-            let arr: Vec<_> = resp.locks.iter().map(|lock| {
-                json!({
-                    "path": lock.path,
-                    "owner": lock.owner,
-                    "created_at": lock.created_at,
+            let arr: Vec<_> = resp
+                .locks
+                .iter()
+                .map(|lock| {
+                    json!({
+                        "path": lock.path,
+                        "owner": lock.owner,
+                        "created_at": lock.created_at,
+                    })
                 })
-            }).collect();
+                .collect();
             println!("{}", serde_json::to_string_pretty(&arr)?);
         } else if resp.locks.is_empty() {
             println!("No active locks.");

@@ -10,6 +10,112 @@ package forge;
 // All authz checks live on the server side and are enforced by the gRPC
 // auth interceptor + per-handler require_* helpers in forge-server.
 
+service AgentService {
+    // Issued agent tokens authenticate the whole stream. RegisterAgent is
+    // idempotent — an agent restart re-calls it to refresh its label set
+    // and mark itself online.
+    rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    // Long-poll: server holds the call up to a configurable deadline, returning
+    // a job description when one becomes claimable for this agent's labels.
+    rpc ClaimJob(ClaimJobRequest) returns (ClaimJobResponse);
+    // Terminal report for a single step: exit code, final log. Live log
+    // chunks stream via StreamAgentLogs (client-streaming) for low-latency
+    // tailing.
+    rpc ReportStep(ReportStepRequest) returns (ReportStepResponse);
+    rpc StreamAgentLogs(stream AgentLogChunk) returns (StreamAgentLogsResponse);
+    rpc ReportRunFinished(ReportRunFinishedRequest) returns (ReportRunFinishedResponse);
+    // Fetch a secret scoped to a specific run the agent has claimed. Server
+    // validates: caller owns this run, workflow references this secret.
+    rpc GetRunSecret(GetRunSecretRequest) returns (GetRunSecretResponse);
+    // Fetch the YAML body of a composite action from the server's action
+    // registry. Cached client-side by content hash.
+    rpc GetAction(GetActionRequest) returns (GetActionResponse);
+}
+
+message RegisterAgentRequest {
+    string name = 1;
+    string token = 2;          // plaintext; server compares to stored hash
+    repeated string labels = 3;
+    string version = 4;        // forge-agent version string
+    string os = 5;             // "windows", "linux", ...
+}
+message RegisterAgentResponse {
+    int64 agent_id = 1;
+    // Server tells the agent how often to send Heartbeat and how long
+    // a ClaimJob long-poll should hold before returning empty.
+    int32 heartbeat_seconds = 2;
+    int32 claim_poll_seconds = 3;
+}
+
+message HeartbeatRequest { int64 agent_id = 1; string token = 2; }
+message HeartbeatResponse { bool ok = 1; }
+
+message ClaimJobRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    // Max seconds the server should hold this call waiting for work.
+    int32 wait_seconds = 3;
+}
+// `run_id == 0` means "no work available within the wait window".
+message ClaimJobResponse {
+    int64 run_id = 1;
+    string repo = 2;
+    string workflow_yaml = 3;
+    string commit_hash = 4;
+    string trigger_ref = 5;
+    // Resolved env after secret substitution. Plaintext values; TLS on
+    // the agent channel is how they stay confidential.
+    map<string, string> env = 6;
+}
+
+message ReportStepRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    int64 run_id = 3;
+    string job_name = 4;
+    int32 step_index = 5;
+    string name = 6;
+    string status = 7;        // "success" | "failure" | "cancelled"
+    int32 exit_code = 8;
+    string log_tail = 9;      // final tail for DB persistence
+}
+message ReportStepResponse { bool ok = 1; }
+
+message AgentLogChunk {
+    int64 agent_id = 1;
+    string token = 2;
+    int64 run_id = 3;
+    int64 step_id = 4;
+    bytes data = 5;
+    bool is_final = 6;
+}
+message StreamAgentLogsResponse { bool ok = 1; }
+
+message ReportRunFinishedRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    int64 run_id = 3;
+    string status = 4;        // "success" | "failure" | "cancelled"
+}
+message ReportRunFinishedResponse { bool ok = 1; }
+
+message GetRunSecretRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    int64 run_id = 3;
+    string key = 4;
+}
+message GetRunSecretResponse { string value = 1; }
+
+message GetActionRequest {
+    int64 agent_id = 1;
+    string token = 2;
+    string name = 3;          // e.g. "forge/ue-build"
+    string version = 4;       // e.g. "v1"
+}
+message GetActionResponse { string yaml = 1; }
+
 service AuthService {
     // Identity
     rpc Login(LoginRequest) returns (LoginResponse);
@@ -182,6 +288,20 @@ service ForgeService {
     rpc PushObjects(stream ObjectChunk) returns (PushResponse);
     rpc PullObjects(PullRequest) returns (stream ObjectChunk);
     rpc HasObjects(HasObjectsRequest) returns (HasObjectsResponse);
+    // Atomic two-phase push finalisation. After PushObjects streams all
+    // objects into the server's staging area, CommitPush promotes them into
+    // the live tree and applies the enclosed ref updates inside a single
+    // transaction. Fails closed: any lock violation, CAS conflict, or I/O
+    // error rolls back the whole push — no orphan objects, no torn refs.
+    // Idempotent on retry: calling again with the same `upload_session_id`
+    // returns the prior result.
+    rpc CommitPush(CommitPushRequest) returns (CommitPushResponse);
+
+    // Resume support: query which bytes of which objects the server
+    // already has for a given session. Client uses this before resuming
+    // an interrupted push so it can skip fully-received objects and
+    // resume partial ones from the right offset. Idempotent read-only.
+    rpc QueryUploadSession(QueryUploadSessionRequest) returns (QueryUploadSessionResponse);
 
     // References (scoped to repo)
     rpc GetRefs(GetRefsRequest) returns (GetRefsResponse);
@@ -192,6 +312,13 @@ service ForgeService {
     rpc ReleaseLock(UnlockRequest) returns (UnlockResponse);
     rpc ListLocks(ListLocksRequest) returns (ListLocksResponse);
     rpc VerifyLocks(VerifyLocksRequest) returns (VerifyLocksResponse);
+    // Phase 4d — subscribe to lock acquire/release events in real time.
+    // Kills the Unreal Engine plugin's polling loop over ListLocks.
+    // Server emits one LockEvent per acquire/release on the matching
+    // repo, plus a snapshot of the current state on subscription so
+    // clients don't need a separate ListLocks round-trip to prime
+    // their view.
+    rpc StreamLockEvents(StreamLockEventsRequest) returns (stream LockEvent);
 
     // Repository management
     rpc ListRepos(ListReposRequest) returns (ListReposResponse);
@@ -222,6 +349,14 @@ service ForgeService {
     rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
     rpc ListReleases(ListReleasesRequest) returns (ListReleasesResponse);
     rpc GetRelease(GetReleaseRequest) returns (GetReleaseResponse);
+    // Streaming artifact transfer. Upload chunks include the run_id and
+    // artifact name in the first frame; subsequent frames carry data only.
+    rpc UploadArtifact(stream UploadArtifactChunk) returns (UploadArtifactResponse);
+    rpc DownloadArtifact(DownloadArtifactRequest) returns (stream ArtifactChunk);
+    rpc GetArtifactSignedUrl(GetArtifactSignedUrlRequest) returns (GetArtifactSignedUrlResponse);
+    // Live step-log tail. Emits the persisted log first (catch-up) then
+    // switches to live chunks via the in-memory broadcast hub.
+    rpc StreamStepLogs(StreamStepLogsRequest) returns (stream StepLogChunk);
 
     // Issues
     rpc ListIssues(ListIssuesRequest) returns (ListIssuesResponse);
@@ -243,7 +378,82 @@ service ForgeService {
     rpc CreateComment(CreateCommentRequest) returns (CreateCommentResponse);
     rpc UpdateComment(UpdateCommentRequest) returns (UpdateCommentResponse);
     rpc DeleteComment(DeleteCommentRequest) returns (DeleteCommentResponse);
+
+    // Secrets — create/update/delete/list keys only. Values flow to runs,
+    // never back to clients. Repo-admin gated.
+    rpc CreateSecret(CreateSecretRequest) returns (CreateSecretResponse);
+    rpc UpdateSecret(UpdateSecretRequest) returns (UpdateSecretResponse);
+    rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
+    rpc ListSecretKeys(ListSecretKeysRequest) returns (ListSecretKeysResponse);
 }
+
+// Streaming artifact upload. The first chunk must carry `run_id` and
+// `name`; later chunks leave those empty and only populate `data`. The
+// server returns the final artifact id + size on completion.
+message UploadArtifactChunk {
+    int64 run_id = 1;
+    string name = 2;
+    bytes data = 3;
+}
+message UploadArtifactResponse {
+    int64 artifact_id = 1;
+    int64 size_bytes = 2;
+}
+
+message DownloadArtifactRequest { int64 artifact_id = 1; }
+message ArtifactChunk { bytes data = 1; }
+
+message StreamStepLogsRequest {
+    int64 run_id = 1;
+    // Optional: filter to a single step. 0 = all steps in the run.
+    int64 step_id = 2;
+    // When true, don't follow — replay persisted log then end stream.
+    bool no_follow = 3;
+}
+message StepLogChunk {
+    int64 step_id = 1;
+    bytes data = 2;
+    bool is_final = 3;
+}
+
+message GetArtifactSignedUrlRequest {
+    int64 artifact_id = 1;
+    // TTL in seconds; server clamps to [60, 3600].
+    int64 ttl_seconds = 2;
+}
+message GetArtifactSignedUrlResponse {
+    // Opaque token; plug into the web download endpoint as
+    // `/api/artifacts/<id>?token=<token>`.
+    string token = 1;
+    int64 expires_at = 2;
+}
+
+message SecretMeta {
+    string repo = 1;
+    string key = 2;
+    int64 created_at = 3;
+    int64 updated_at = 4;
+}
+
+message CreateSecretRequest {
+    string repo = 1;
+    string key = 2;
+    string value = 3;
+}
+message CreateSecretResponse { bool success = 1; string error = 2; }
+
+message UpdateSecretRequest {
+    string repo = 1;
+    string key = 2;
+    string value = 3;
+}
+message UpdateSecretResponse { bool success = 1; string error = 2; }
+
+message DeleteSecretRequest { string repo = 1; string key = 2; }
+message DeleteSecretResponse { bool success = 1; string error = 2; }
+
+message ListSecretKeysRequest { string repo = 1; }
+message ListSecretKeysResponse { repeated SecretMeta secrets = 1; }
 
 // ============================================================
 // Object transfer
@@ -257,25 +467,171 @@ message ObjectChunk {
     bytes data = 5;
     bool is_last = 6;
     string repo = 7;
+    // Upload session this chunk belongs to. Client generates a UUIDv7 and
+    // sets it on every chunk of a push. Server stages objects under a
+    // per-session directory; CommitPush references the same id to promote
+    // them atomically. Required on the first chunk of a push; subsequent
+    // chunks must carry the same value. Empty ids are treated as legacy
+    // non-staged pushes during the v0.4 → v1.0 transition.
+    string upload_session_id = 8;
+
+    reserved 9 to 15;
 }
 
 message PushResponse {
     repeated bytes received_hashes = 1;
     string error = 2;
+    // Server echoes the session id it recorded for this stream. Lets the
+    // client confirm which session to pass to CommitPush and recover if
+    // the client crashed between receiving this response and calling
+    // CommitPush — the id is also persisted client-side before the stream
+    // starts, so this is a confirmation rather than the sole source.
+    string upload_session_id = 3;
+
+    reserved 4 to 15;
+}
+
+// A single object the client wants in a PullObjects stream, plus the
+// byte offset the server should start streaming from. Introduced in
+// Phase 3e.3 so a client that crashed mid-pull can re-attach to the
+// already-received prefix of a big object instead of restarting from
+// zero.
+//
+// start_offset is expressed in the same coordinate space as
+// ObjectChunk.offset (i.e. bytes into the compressed payload). Zero
+// = start from the beginning, identical to the legacy `want_hashes`
+// path.
+message WantObject {
+    bytes hash = 1;
+    uint64 start_offset = 2;
+
+    reserved 3 to 15;
 }
 
 message PullRequest {
+    // Legacy hash list. Backward-compatible with pre-3e.3 clients —
+    // the server derives an implicit start_offset of 0 for each hash.
     repeated bytes want_hashes = 1;
     string repo = 2;
+    // Resume-aware pull. When non-empty, supersedes `want_hashes`
+    // entirely — servers that see both pick this list and log a
+    // warning. Clients that don't need resume should keep using
+    // `want_hashes`; the wire overhead of the empty field is trivial.
+    repeated WantObject want_objects = 3;
+
+    reserved 4 to 15;
 }
 
 message HasObjectsRequest {
     repeated bytes hashes = 1;
     string repo = 2;
+
+    reserved 3 to 15;
 }
 
 message HasObjectsResponse {
     repeated bool has = 1;
+
+    reserved 2 to 15;
+}
+
+// Single ref update inside a CommitPush batch. Same semantics as
+// UpdateRefRequest but without the repo field (the batch carries it).
+message RefUpdate {
+    string ref_name = 1;
+    bytes old_hash = 2;
+    bytes new_hash = 3;
+    // Unconditional overwrite. Server still checks caller has repo:write
+    // and (future) protected-branch policy; force only bypasses the
+    // fast-forward/CAS guard.
+    bool force = 4;
+
+    reserved 5 to 15;
+}
+
+message RefUpdateResult {
+    string ref_name = 1;
+    bool success = 2;
+    string error = 3;
+
+    reserved 4 to 15;
+}
+
+message CommitPushRequest {
+    string repo = 1;
+    // Session id the paired PushObjects stream used. Server looks up the
+    // staged objects keyed by this id and promotes them atomically.
+    string upload_session_id = 2;
+    // Ref updates to apply. Empty list is legal — the push simply publishes
+    // objects without updating any ref (rare; mostly useful for seeding).
+    repeated RefUpdate ref_updates = 3;
+    // Optional hint: paths the client believes it is modifying. When set,
+    // the server verifies this matches the tree-diff it computes between
+    // each ref's old_hash and new_hash; mismatch fails the commit. Empty
+    // means the server computes touched paths itself.
+    repeated string touched_paths = 4;
+
+    reserved 5 to 15;
+}
+
+message CommitPushResponse {
+    bool success = 1;
+    string error = 2;
+    // Populated when a lock held by another owner blocks the push. The
+    // CLI surfaces these so the user knows which files to coordinate on.
+    repeated LockInfo blocking_locks = 3;
+    // Per-ref-update outcome, in the same order as the request.
+    repeated RefUpdateResult ref_results = 4;
+
+    reserved 5 to 15;
+}
+
+// Resume query: ask the server which bytes of which objects it
+// already has for a session. The server answers with its view of the
+// per-session staging directory — a client that crashed mid-push can
+// re-open the session, diff this response against what it intended to
+// upload, and resend only the missing tails.
+message QueryUploadSessionRequest {
+    string repo = 1;
+    string upload_session_id = 2;
+
+    reserved 3 to 15;
+}
+
+// Per-object state inside an upload session. `declared_size` is the
+// total size the client announced (via `record_session_object` when
+// the first chunk landed); `received_bytes` is what's currently on
+// disk in staging. When they match, the object is complete.
+//
+// `declared_size = 0` when the server doesn't yet know the object's
+// final size (e.g. a chunk stream started but its `total_size` field
+// was missing). In that case the client treats the object as fully
+// unknown and re-uploads it from offset 0.
+message UploadObjectProgress {
+    bytes hash = 1;
+    uint64 received_bytes = 2;
+    uint64 declared_size = 3;
+
+    reserved 4 to 15;
+}
+
+message QueryUploadSessionResponse {
+    // Current session state. Mirrors the server-side DB column:
+    // one of "uploading", "committed", "failed", "abandoned". An
+    // unknown session id returns an empty string so callers can
+    // cheaply detect a TTL-expired session and create a fresh one.
+    string state = 1;
+    // When `state` is terminal, the server's cached CommitPush result
+    // JSON is replayed here so the client can surface the prior
+    // outcome without re-running the push.
+    string result_json = 2;
+    // Per-object progress, one entry per object the server knows
+    // about in this session. Objects the server has never heard of
+    // are simply absent from this list — the client must still
+    // upload them.
+    repeated UploadObjectProgress objects = 3;
+
+    reserved 4 to 15;
 }
 
 // ============================================================
@@ -300,11 +656,15 @@ message UpdateRefRequest {
     // to publish a rewritten history. Still gated on `repo:write` —
     // protected-branch enforcement is a future addition.
     bool force = 5;
+
+    reserved 6 to 15;
 }
 
 message UpdateRefResponse {
     bool success = 1;
     string error = 2;
+
+    reserved 3 to 15;
 }
 
 // ============================================================
@@ -344,6 +704,36 @@ message ListLocksRequest {
 
 message ListLocksResponse {
     repeated LockInfo locks = 1;
+}
+
+// Phase 4d — subscribe to a live feed of lock acquire / release
+// events on `repo`. Subscription begins with a SNAPSHOT event per
+// currently-held lock so the client has a complete picture without a
+// separate ListLocks; every subsequent event is ACQUIRE or RELEASE.
+message StreamLockEventsRequest {
+    string repo = 1;
+    reserved 2 to 15;
+}
+
+message LockEvent {
+    enum Kind {
+        // Part of the initial state dump emitted on subscribe. Field
+        // `info` carries the current owner + timestamp.
+        SNAPSHOT = 0;
+        // A fresh lock was acquired after subscription.
+        ACQUIRE = 1;
+        // A lock was released after subscription. `info` describes
+        // the lock that went away (path is the load-bearing field).
+        RELEASE = 2;
+    }
+    Kind kind = 1;
+    LockInfo info = 2;
+    // Monotonic sequence number within this stream. Clients use it to
+    // detect dropped events on a slow-subscriber overflow (broadcast
+    // channel capacity exceeded) and request a re-subscribe.
+    uint64 seq = 3;
+
+    reserved 4 to 15;
 }
 
 message VerifyLocksRequest {

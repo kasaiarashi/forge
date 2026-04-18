@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Argon2id wrapper used for both passwords and bearer tokens.
 //!
@@ -12,7 +12,9 @@
 //! generate plaintext in this module.
 
 use anyhow::{anyhow, Result};
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{
+    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+};
 use argon2::Argon2;
 
 /// Hash a plaintext value (password or token) with argon2id, producing a

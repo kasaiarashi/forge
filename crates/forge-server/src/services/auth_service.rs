@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! gRPC `AuthService` server implementation.
 //!
@@ -18,6 +18,7 @@ use tonic::{Request, Response, Status};
 use forge_proto::forge::auth_service_server::AuthService;
 use forge_proto::forge::*;
 
+use crate::audit;
 use crate::auth::authorize;
 use crate::auth::interceptor::caller_of;
 use crate::auth::store::{NewUser, RepoRole, UserStore};
@@ -96,11 +97,27 @@ impl AuthService for ForgeAuthService {
         if req.username.is_empty() || req.password.is_empty() {
             return Err(Status::invalid_argument("username and password required"));
         }
-        let user = self
+        let user_opt = self
             .store
             .verify_password(&req.username, &req.password)
-            .map_err(|e| internal_err("auth", e))?
-            .ok_or_else(|| Status::unauthenticated("invalid username or password"))?;
+            .map_err(|e| internal_err("auth", e))?;
+        let user = match user_opt {
+            Some(u) => u,
+            None => {
+                // Failed logins are the single most valuable security
+                // signal we have; emit one audit line per attempt with
+                // enough context (username, IP, UA) to drive alerting.
+                audit!(
+                    action = "login",
+                    outcome = "denied",
+                    username = %req.username,
+                    ip = %req.ip,
+                    user_agent = %req.user_agent,
+                    reason = "invalid credentials"
+                );
+                return Err(Status::unauthenticated("invalid username or password"));
+            }
+        };
 
         let token = self
             .store
@@ -111,6 +128,16 @@ impl AuthService for ForgeAuthService {
                 non_empty(&req.ip),
             )
             .map_err(|e| internal_err("create session", e))?;
+
+        audit!(
+            action = "login",
+            outcome = "success",
+            user_id = user.id,
+            username = %user.username,
+            ip = %req.ip,
+            user_agent = %req.user_agent,
+            session_id = token.session.id
+        );
 
         Ok(Response::new(LoginResponse {
             session_token: token.plaintext,
@@ -136,7 +163,7 @@ impl AuthService for ForgeAuthService {
 
         if let Some(token) = raw {
             if token.starts_with(crate::auth::tokens::SESSION_PREFIX) {
-                if let Some((session, _user)) = self
+                if let Some((session, user)) = self
                     .store
                     .find_session_by_plaintext(&token)
                     .map_err(|e| internal_err("session lookup", e))?
@@ -144,6 +171,13 @@ impl AuthService for ForgeAuthService {
                     self.store
                         .revoke_session(session.id)
                         .map_err(|e| internal_err("revoke session", e))?;
+                    audit!(
+                        action = "logout",
+                        outcome = "success",
+                        user_id = user.id,
+                        username = %user.username,
+                        session_id = session.id
+                    );
                 }
             }
         }
@@ -209,6 +243,14 @@ impl AuthService for ForgeAuthService {
             .store
             .create_pat(auth.user_id, &req.name, &scopes, expires)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        audit!(
+            action = "pat.create",
+            outcome = "success",
+            actor_id = auth.user_id,
+            pat_id = pat.id,
+            pat_name = %pat.name,
+            scopes = ?req.scopes
+        );
         Ok(Response::new(CreatePatResponse {
             plaintext_token: plaintext.plaintext,
             pat: Some(pat_to_proto(&pat)),
@@ -250,6 +292,12 @@ impl AuthService for ForgeAuthService {
             .store
             .revoke_pat(req.id)
             .map_err(|e| internal_err("grpc", e))?;
+        audit!(
+            action = "pat.revoke",
+            outcome = if removed { "success" } else { "noop" },
+            actor_id = auth.user_id,
+            pat_id = req.id
+        );
         Ok(Response::new(RevokePatResponse { success: removed }))
     }
 
@@ -292,6 +340,12 @@ impl AuthService for ForgeAuthService {
             .store
             .revoke_session(req.id)
             .map_err(|e| internal_err("grpc", e))?;
+        audit!(
+            action = "session.revoke",
+            outcome = if removed { "success" } else { "noop" },
+            actor_id = auth.user_id,
+            session_id = req.id
+        );
         Ok(Response::new(RevokeSessionResponse { success: removed }))
     }
 
@@ -303,6 +357,7 @@ impl AuthService for ForgeAuthService {
     ) -> Result<Response<CreateUserResponse>, Status> {
         let caller = caller_of(&request);
         authorize::require_server_admin(&caller)?;
+        let actor = caller.user_id();
         let req = request.into_inner();
         let user = self
             .store
@@ -314,6 +369,14 @@ impl AuthService for ForgeAuthService {
                 is_server_admin: req.is_server_admin,
             })
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        audit!(
+            action = "user.create",
+            outcome = "success",
+            actor_id = actor,
+            user_id = user.id,
+            username = %user.username,
+            is_server_admin = user.is_server_admin
+        );
         Ok(Response::new(CreateUserResponse {
             user: Some(user_to_proto(&user)),
         }))
@@ -340,11 +403,18 @@ impl AuthService for ForgeAuthService {
     ) -> Result<Response<DeleteUserResponse>, Status> {
         let caller = caller_of(&request);
         authorize::require_server_admin(&caller)?;
+        let actor = caller.user_id();
         let req = request.into_inner();
         let removed = self
             .store
             .delete_user(req.id)
             .map_err(|e| internal_err("grpc", e))?;
+        audit!(
+            action = "user.delete",
+            outcome = if removed { "success" } else { "noop" },
+            actor_id = actor,
+            user_id = req.id
+        );
         Ok(Response::new(DeleteUserResponse { success: removed }))
     }
 
@@ -390,6 +460,14 @@ impl AuthService for ForgeAuthService {
         self.store
             .set_repo_role(&req.repo, req.user_id, role, granted_by)
             .map_err(|e| internal_err("grpc", e))?;
+        audit!(
+            action = "repo.acl.grant",
+            outcome = "success",
+            actor_id = granted_by,
+            repo = %req.repo,
+            user_id = req.user_id,
+            role = %req.role
+        );
         Ok(Response::new(GrantRepoRoleResponse { success: true }))
     }
 
@@ -398,12 +476,20 @@ impl AuthService for ForgeAuthService {
         request: Request<RevokeRepoRoleRequest>,
     ) -> Result<Response<RevokeRepoRoleResponse>, Status> {
         let caller = caller_of(&request);
+        let actor = caller.user_id();
         let req = request.into_inner();
         authorize::require_repo_admin(&caller, &self.store, &req.repo)?;
         let removed = self
             .store
             .revoke_repo_role(&req.repo, req.user_id)
             .map_err(|e| internal_err("grpc", e))?;
+        audit!(
+            action = "repo.acl.revoke",
+            outcome = if removed { "success" } else { "noop" },
+            actor_id = actor,
+            repo = %req.repo,
+            user_id = req.user_id
+        );
         Ok(Response::new(RevokeRepoRoleResponse { success: removed }))
     }
 
@@ -470,7 +556,11 @@ impl AuthService for ForgeAuthService {
         match self.bootstrap_token.as_deref() {
             Some(expected) => {
                 if !constant_time_eq(expected.as_bytes(), req.bootstrap_token.as_bytes()) {
-                    tracing::warn!("bootstrap_admin denied: missing or invalid bootstrap token");
+                    audit!(
+                        action = "bootstrap_admin",
+                        outcome = "denied",
+                        reason = "missing or invalid bootstrap token"
+                    );
                     return Err(Status::permission_denied(
                         "missing or invalid bootstrap token — see forge-server logs \
                          or the file <base_path>/.bootstrap_token",
@@ -509,6 +599,13 @@ impl AuthService for ForgeAuthService {
                 );
             }
         }
+
+        audit!(
+            action = "bootstrap_admin",
+            outcome = "success",
+            user_id = user.id,
+            username = %user.username
+        );
 
         Ok(Response::new(BootstrapAdminResponse {
             user: Some(user_to_proto(&user)),

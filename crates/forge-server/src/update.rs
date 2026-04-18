@@ -186,13 +186,6 @@ fn download_and_replace_file(
             .with_context(|| format!("chmod {}", tmp_path.display()))?;
     }
 
-    // Unlink the target before copying. A running forge-web holds the
-    // file busy; std::fs::copy opens with O_TRUNC and fails with ETXTBSY
-    // ("Text file busy"). On Linux, unlinking a busy binary is legal —
-    // the kernel keeps the old inode alive for the running process and
-    // the new copy lands on a fresh inode.
-    let _ = std::fs::remove_file(target_path);
-
     std::fs::copy(&tmp_path, target_path)
         .with_context(|| format!("Failed to replace {}", target_path.display()))?;
 
@@ -268,11 +261,6 @@ fn http_get_string(url: &str) -> Result<String> {
 
 /// Download a URL to a file using platform tools.
 fn http_download_file(url: &str, dest: &std::path::Path) -> Result<()> {
-    // Remove any stale tmp from a prior run. A previous `sudo forge-server
-    // update` leaves /tmp/forge-update-* owned by root with 0644; the next
-    // run (possibly under a different uid) can't truncate it and curl bails
-    // with exit 23 "Failure writing output to destination".
-    let _ = std::fs::remove_file(dest);
     let dest_str = dest.to_string_lossy();
 
     #[cfg(target_os = "windows")]

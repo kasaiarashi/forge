@@ -1,11 +1,12 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 mod api;
 mod api_actions;
 mod auth;
 mod config;
 mod grpc_client;
+mod observability;
 #[cfg(windows)]
 mod service;
 mod tls_autogen;
@@ -24,6 +25,7 @@ use tower_governor::GovernorLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 
 use crate::config::Config;
 use crate::grpc_client::ForgeGrpcClient;
@@ -243,7 +245,10 @@ impl AppState {
 // the SCM dispatch path inside `service::run_under_scm` builds its own
 // Tokio runtime, and a `#[tokio::main]` outer would prevent nesting one.
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Tracing is initialised lazily in [`serve_inner`] once we have a
+    // config in hand. Subcommands like `init` return before any log
+    // output matters, so the global subscriber slot stays free for the
+    // full file+audit init.
 
     // Install a rustls crypto provider up-front. See twin comment in
     // forge-server/src/main.rs — rustls refuses to auto-select when more
@@ -336,6 +341,15 @@ pub(crate) async fn serve_inner(
     cfg: Config,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+
+    // Logs: resolve dir relative to cwd (forge-web has no `base_path`
+    // equivalent). Empty dir -> stdout only, matching forge-server.
+    let log_dir = if cfg.logging.dir.as_os_str().is_empty() {
+        None
+    } else {
+        Some(cfg.logging.dir.clone())
+    };
+    let _log_guards = observability::init(&cfg.logging, log_dir.as_deref());
 
     let listen_host = cfg.web.listen.clone();
     let http_port = cfg.web.http_port;
@@ -432,6 +446,7 @@ pub(crate) async fn serve_inner(
         .route("/repos/:repo/workflows", get(api_actions::list_workflows))
         .route("/repos/:repo/runs", get(api_actions::list_runs))
         .route("/repos/:repo/runs/:run_id", get(api_actions::get_run))
+        .route("/repos/:repo/runs/:run_id/logs", get(api_actions::stream_run_logs))
         .route("/repos/:repo/runs/:run_id/artifacts", get(api_actions::list_artifacts))
         .route("/repos/:repo/releases", get(api_actions::list_releases))
         .route("/repos/:repo/releases/:release_id", get(api_actions::get_release));
@@ -593,6 +608,15 @@ pub(crate) async fn serve_inner(
         // token. The session layer wraps with_state so handlers see the
         // task-local already populated.
         .layer(middleware::from_fn(auth::session_token_layer))
+        // Per-request tracing. `on_response` logs the method, URI, status,
+        // and latency at INFO. With file logging enabled this gives an
+        // Apache-style access trail in `forge-web.log`; on stdout-only
+        // installs it mirrors to the console.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().include_headers(false))
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+        )
         .layer(sec_headers);
 
     if let Some(layer) = hsts_layer {

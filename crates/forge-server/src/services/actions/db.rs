@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! SQLite queries for workflows, runs, steps, artifacts, and releases.
 
-use anyhow::Result;
 use crate::storage::db::MetadataDb;
+use anyhow::Result;
 
 // ── Record types ──
 
@@ -141,6 +141,7 @@ impl MetadataDb {
     // ── Workflows ──
 
     pub fn create_workflow(&self, repo: &str, name: &str, yaml: &str) -> Result<i64> {
+        crate::dispatch_pg_inherent!(self, create_workflow, repo, name, yaml);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -151,6 +152,7 @@ impl MetadataDb {
     }
 
     pub fn update_workflow(&self, id: i64, name: &str, yaml: &str, enabled: bool) -> Result<bool> {
+        crate::dispatch_pg_inherent!(self, update_workflow, id, name, yaml, enabled);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let affected = conn.execute(
@@ -161,12 +163,14 @@ impl MetadataDb {
     }
 
     pub fn delete_workflow(&self, id: i64) -> Result<bool> {
+        crate::dispatch_pg_inherent!(self, delete_workflow, id);
         let conn = self.conn()?;
         let affected = conn.execute("DELETE FROM workflows WHERE id = ?1", [id])?;
         Ok(affected > 0)
     }
 
     pub fn list_workflows(&self, repo: &str) -> Result<Vec<WorkflowRecord>> {
+        crate::dispatch_pg_inherent!(self, list_workflows, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE repo = ?1 ORDER BY name",
@@ -182,10 +186,12 @@ impl MetadataDb {
                 updated_at: row.get(6)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn get_workflow(&self, id: i64) -> Result<Option<WorkflowRecord>> {
+        crate::dispatch_pg_inherent!(self, get_workflow, id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE id = ?1")?
@@ -205,6 +211,7 @@ impl MetadataDb {
     }
 
     pub fn get_enabled_workflows_for_repo(&self, repo: &str) -> Result<Vec<WorkflowRecord>> {
+        crate::dispatch_pg_inherent!(self, get_enabled_workflows_for_repo, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE repo = ?1 AND enabled = 1",
@@ -220,7 +227,8 @@ impl MetadataDb {
                 updated_at: row.get(6)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     // ── Runs ──
@@ -234,6 +242,16 @@ impl MetadataDb {
         commit_hash: &str,
         triggered_by: &str,
     ) -> Result<i64> {
+        crate::dispatch_pg_inherent!(
+            self,
+            create_run,
+            repo,
+            workflow_id,
+            trigger,
+            trigger_ref,
+            commit_hash,
+            triggered_by
+        );
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -244,6 +262,7 @@ impl MetadataDb {
     }
 
     pub fn update_run_status(&self, run_id: i64, status: &str) -> Result<()> {
+        crate::dispatch_pg_inherent!(self, update_run_status, run_id, status);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         match status {
@@ -269,14 +288,27 @@ impl MetadataDb {
         Ok(())
     }
 
-    pub fn list_runs(&self, repo: &str, workflow_id: i64, limit: i32, offset: i32) -> Result<(Vec<RunRecord>, i32)> {
+    pub fn list_runs(
+        &self,
+        repo: &str,
+        workflow_id: i64,
+        limit: i32,
+        offset: i32,
+    ) -> Result<(Vec<RunRecord>, i32)> {
+        crate::dispatch_pg_inherent!(self, list_runs, repo, workflow_id, limit, offset);
         let conn = self.conn()?;
 
         let (where_clause, total) = if workflow_id > 0 {
             let count: i32 = conn
                 .prepare("SELECT COUNT(*) FROM workflow_runs WHERE repo = ?1 AND workflow_id = ?2")?
-                .query_row(rusqlite::params![repo, workflow_id], |row: &rusqlite::Row| row.get(0))?;
-            ("WHERE r.repo = ?1 AND r.workflow_id = ?2".to_string(), count)
+                .query_row(
+                    rusqlite::params![repo, workflow_id],
+                    |row: &rusqlite::Row| row.get(0),
+                )?;
+            (
+                "WHERE r.repo = ?1 AND r.workflow_id = ?2".to_string(),
+                count,
+            )
         } else {
             let count: i32 = conn
                 .prepare("SELECT COUNT(*) FROM workflow_runs WHERE repo = ?1")?
@@ -294,7 +326,10 @@ impl MetadataDb {
         let limit = if limit <= 0 { 50 } else { limit };
         let mut stmt = conn.prepare(&sql)?;
         let rows = if workflow_id > 0 {
-            stmt.query_map(rusqlite::params![repo, workflow_id, limit, offset], Self::map_run)?
+            stmt.query_map(
+                rusqlite::params![repo, workflow_id, limit, offset],
+                Self::map_run,
+            )?
         } else {
             stmt.query_map(rusqlite::params![repo, 0, limit, offset], Self::map_run)?
         };
@@ -321,6 +356,7 @@ impl MetadataDb {
     }
 
     pub fn get_run(&self, run_id: i64) -> Result<Option<RunRecord>> {
+        crate::dispatch_pg_inherent!(self, get_run, run_id);
         let conn = self.conn()?;
         let result = conn
             .prepare(
@@ -341,6 +377,7 @@ impl MetadataDb {
         step_index: i32,
         name: &str,
     ) -> Result<i64> {
+        crate::dispatch_pg_inherent!(self, create_step, run_id, job_name, step_index, name);
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO workflow_steps (run_id, job_name, step_index, name, status) VALUES (?1, ?2, ?3, ?4, 'pending')",
@@ -349,7 +386,14 @@ impl MetadataDb {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn update_step(&self, step_id: i64, status: &str, exit_code: Option<i32>, log: &str) -> Result<()> {
+    pub fn update_step(
+        &self,
+        step_id: i64,
+        status: &str,
+        exit_code: Option<i32>,
+        log: &str,
+    ) -> Result<()> {
+        crate::dispatch_pg_inherent!(self, update_step, step_id, status, exit_code, log);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         match status {
@@ -370,6 +414,7 @@ impl MetadataDb {
     }
 
     pub fn list_steps(&self, run_id: i64) -> Result<Vec<StepRecord>> {
+        crate::dispatch_pg_inherent!(self, list_steps, run_id);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, job_name, step_index, name, status, exit_code, log, started_at, finished_at FROM workflow_steps WHERE run_id = ?1 ORDER BY step_index",
@@ -387,12 +432,20 @@ impl MetadataDb {
                 finished_at: row.get(8)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     // ── Artifacts ──
 
-    pub fn create_artifact(&self, run_id: i64, name: &str, path: &str, size_bytes: i64) -> Result<i64> {
+    pub fn create_artifact(
+        &self,
+        run_id: i64,
+        name: &str,
+        path: &str,
+        size_bytes: i64,
+    ) -> Result<i64> {
+        crate::dispatch_pg_inherent!(self, create_artifact, run_id, name, path, size_bytes);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -403,6 +456,7 @@ impl MetadataDb {
     }
 
     pub fn list_artifacts(&self, run_id: i64) -> Result<Vec<ArtifactRecord>> {
+        crate::dispatch_pg_inherent!(self, list_artifacts, run_id);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE run_id = ?1 ORDER BY name",
@@ -416,13 +470,17 @@ impl MetadataDb {
                 created_at: row.get(4)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn get_artifact(&self, artifact_id: i64) -> Result<Option<ArtifactRecord>> {
+        crate::dispatch_pg_inherent!(self, get_artifact, artifact_id);
         let conn = self.conn()?;
         let result = conn
-            .prepare("SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE id = ?1")?
+            .prepare(
+                "SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE id = ?1",
+            )?
             .query_row([artifact_id], |row: &rusqlite::Row| {
                 Ok(ArtifactRecord {
                     id: row.get(0)?,
@@ -436,9 +494,102 @@ impl MetadataDb {
         Ok(result)
     }
 
+    /// Look up the storage path for an artifact. Retained in the
+    /// artifacts table so the ArtifactStore can re-open it without
+    /// reconstructing the filename rules on the fly.
+    pub fn get_artifact_path(&self, artifact_id: i64) -> Result<Option<(i64, String, String)>> {
+        let conn = self.conn()?;
+        let result = conn
+            .prepare("SELECT a.run_id, a.name, a.path FROM artifacts a WHERE a.id = ?1")?
+            .query_row([artifact_id], |row: &rusqlite::Row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok();
+        Ok(result)
+    }
+
+    /// Runs whose artifacts are eligible for pruning.
+    ///
+    /// Rules:
+    ///   * run finished before `cutoff_ts`, OR
+    ///   * run is outside the most-recent `keep_per_workflow` for its
+    ///     workflow.
+    /// Release-pinned artifacts are skipped at the caller-level
+    /// (delete_run_artifacts refuses to drop pinned rows), so it's safe to
+    /// over-report candidates here.
+    pub fn retention_candidates(&self, cutoff_ts: i64, keep_per_workflow: i64) -> Result<Vec<i64>> {
+        crate::dispatch_pg_inherent!(self, retention_candidates, cutoff_ts, keep_per_workflow);
+        let conn = self.conn()?;
+
+        let mut out = std::collections::BTreeSet::new();
+
+        // Age-based candidates.
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT r.id FROM workflow_runs r
+             JOIN artifacts a ON a.run_id = r.id
+             WHERE COALESCE(r.finished_at, r.created_at) < ?1",
+        )?;
+        let rows = stmt.query_map([cutoff_ts], |row: &rusqlite::Row| row.get::<_, i64>(0))?;
+        for id in rows {
+            out.insert(id?);
+        }
+
+        // Per-workflow rolling window.
+        let mut stmt = conn.prepare(
+            "SELECT r.id FROM (
+                SELECT id, workflow_id,
+                       ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY created_at DESC) AS rn
+                FROM workflow_runs
+             ) r
+             JOIN artifacts a ON a.run_id = r.id
+             WHERE r.rn > ?1",
+        )?;
+        let rows = stmt.query_map([keep_per_workflow], |row: &rusqlite::Row| {
+            row.get::<_, i64>(0)
+        })?;
+        for id in rows {
+            out.insert(id?);
+        }
+
+        Ok(out.into_iter().collect())
+    }
+
+    /// Remove every artifact row for `run_id` except those pinned to a
+    /// release. Caller is expected to delete the backend blobs first.
+    pub fn delete_run_artifacts(&self, run_id: i64) -> Result<usize> {
+        crate::dispatch_pg_inherent!(self, delete_run_artifacts, run_id);
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "DELETE FROM artifacts WHERE run_id = ?1
+             AND id NOT IN (SELECT artifact_id FROM release_artifacts)",
+            [run_id],
+        )?;
+        Ok(n)
+    }
+
     // ── Releases ──
 
-    pub fn create_release(&self, repo: &str, run_id: Option<i64>, tag: &str, name: &str, artifact_ids: &[i64]) -> Result<i64> {
+    pub fn create_release(
+        &self,
+        repo: &str,
+        run_id: Option<i64>,
+        tag: &str,
+        name: &str,
+        artifact_ids: &[i64],
+    ) -> Result<i64> {
+        crate::dispatch_pg_inherent!(
+            self,
+            create_release,
+            repo,
+            run_id,
+            tag,
+            name,
+            artifact_ids
+        );
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -457,6 +608,7 @@ impl MetadataDb {
     }
 
     pub fn list_releases(&self, repo: &str) -> Result<Vec<ReleaseRecord>> {
+        crate::dispatch_pg_inherent!(self, list_releases, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, run_id, tag, name, created_at FROM releases WHERE repo = ?1 ORDER BY created_at DESC",
@@ -471,10 +623,12 @@ impl MetadataDb {
                 created_at: row.get(5)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn get_release(&self, release_id: i64) -> Result<Option<ReleaseRecord>> {
+        crate::dispatch_pg_inherent!(self, get_release, release_id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, run_id, tag, name, created_at FROM releases WHERE id = ?1")?
@@ -493,11 +647,12 @@ impl MetadataDb {
     }
 
     pub fn get_release_artifact_ids(&self, release_id: i64) -> Result<Vec<i64>> {
+        crate::dispatch_pg_inherent!(self, get_release_artifact_ids, release_id);
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT artifact_id FROM release_artifacts WHERE release_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT artifact_id FROM release_artifacts WHERE release_id = ?1")?;
         let rows = stmt.query_map([release_id], |row: &rusqlite::Row| row.get(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 }

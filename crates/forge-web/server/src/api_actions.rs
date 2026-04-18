@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! REST API handlers for Actions (workflows, runs, artifacts, releases).
 
@@ -93,7 +93,9 @@ pub struct UpdateWorkflowBody {
     enabled: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Deserialize)]
 pub struct TriggerBody {
@@ -103,7 +105,9 @@ pub struct TriggerBody {
     triggered_by: String,
 }
 
-fn default_ref() -> String { "refs/heads/main".into() }
+fn default_ref() -> String {
+    "refs/heads/main".into()
+}
 
 #[derive(Deserialize)]
 pub struct RunsQuery {
@@ -115,7 +119,9 @@ pub struct RunsQuery {
     offset: i32,
 }
 
-fn default_limit() -> i32 { 50 }
+fn default_limit() -> i32 {
+    50
+}
 
 // ── Handlers ──
 
@@ -129,10 +135,18 @@ pub async fn list_workflows(
     };
     match grpc.list_workflows(&repo).await {
         Ok(resp) => {
-            let workflows: Vec<WorkflowJson> = resp.workflows.into_iter().map(|w| WorkflowJson {
-                id: w.id, name: w.name, yaml: w.yaml, enabled: w.enabled,
-                created_at: w.created_at, updated_at: w.updated_at,
-            }).collect();
+            let workflows: Vec<WorkflowJson> = resp
+                .workflows
+                .into_iter()
+                .map(|w| WorkflowJson {
+                    id: w.id,
+                    name: w.name,
+                    yaml: w.yaml,
+                    enabled: w.enabled,
+                    created_at: w.created_at,
+                    updated_at: w.updated_at,
+                })
+                .collect();
             (StatusCode::OK, Json(workflows)).into_response()
         }
         Err(e) => internal_error(e),
@@ -151,9 +165,17 @@ pub async fn create_workflow(
     match grpc.create_workflow(&repo, &body.name, &body.yaml).await {
         Ok(resp) => {
             if resp.success {
-                (StatusCode::CREATED, Json(serde_json::json!({"success": true, "id": resp.id}))).into_response()
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({"success": true, "id": resp.id})),
+                )
+                    .into_response()
             } else {
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": resp.error}))).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": resp.error})),
+                )
+                    .into_response()
             }
         }
         Err(e) => internal_error(e),
@@ -169,12 +191,19 @@ pub async fn update_workflow(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    match grpc.update_workflow(id, &body.name, &body.yaml, body.enabled).await {
+    match grpc
+        .update_workflow(id, &body.name, &body.yaml, body.enabled)
+        .await
+    {
         Ok(resp) => {
             if resp.success {
                 (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
             } else {
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": resp.error}))).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": resp.error})),
+                )
+                    .into_response()
             }
         }
         Err(e) => internal_error(e),
@@ -194,7 +223,11 @@ pub async fn delete_workflow(
             if resp.success {
                 (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
             } else {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": resp.error}))).into_response()
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": resp.error})),
+                )
+                    .into_response()
             }
         }
         Err(e) => internal_error(e),
@@ -210,12 +243,23 @@ pub async fn trigger_workflow(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    match grpc.trigger_workflow(id, &body.ref_name, &body.triggered_by).await {
+    match grpc
+        .trigger_workflow(id, &body.ref_name, &body.triggered_by)
+        .await
+    {
         Ok(resp) => {
             if resp.success {
-                (StatusCode::CREATED, Json(serde_json::json!({"success": true, "run_id": resp.run_id}))).into_response()
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({"success": true, "run_id": resp.run_id})),
+                )
+                    .into_response()
             } else {
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": resp.error}))).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": resp.error})),
+                )
+                    .into_response()
             }
         }
         Err(e) => internal_error(e),
@@ -231,15 +275,33 @@ pub async fn list_runs(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    match grpc.list_workflow_runs(&repo, query.workflow_id, query.limit, query.offset).await {
+    match grpc
+        .list_workflow_runs(&repo, query.workflow_id, query.limit, query.offset)
+        .await
+    {
         Ok(resp) => {
-            let runs: Vec<RunJson> = resp.runs.into_iter().map(|r| RunJson {
-                id: r.id, workflow_id: r.workflow_id, workflow_name: r.workflow_name,
-                trigger: r.trigger, trigger_ref: r.trigger_ref, commit_hash: r.commit_hash,
-                status: r.status, started_at: r.started_at, finished_at: r.finished_at,
-                created_at: r.created_at, triggered_by: r.triggered_by,
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!({"runs": runs, "total": resp.total}))).into_response()
+            let runs: Vec<RunJson> = resp
+                .runs
+                .into_iter()
+                .map(|r| RunJson {
+                    id: r.id,
+                    workflow_id: r.workflow_id,
+                    workflow_name: r.workflow_name,
+                    trigger: r.trigger,
+                    trigger_ref: r.trigger_ref,
+                    commit_hash: r.commit_hash,
+                    status: r.status,
+                    started_at: r.started_at,
+                    finished_at: r.finished_at,
+                    created_at: r.created_at,
+                    triggered_by: r.triggered_by,
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"runs": runs, "total": resp.total})),
+            )
+                .into_response()
         }
         Err(e) => internal_error(e),
     }
@@ -256,26 +318,112 @@ pub async fn get_run(
     match grpc.get_workflow_run(run_id).await {
         Ok(resp) => {
             let run = resp.run.map(|r| RunJson {
-                id: r.id, workflow_id: r.workflow_id, workflow_name: r.workflow_name,
-                trigger: r.trigger, trigger_ref: r.trigger_ref, commit_hash: r.commit_hash,
-                status: r.status, started_at: r.started_at, finished_at: r.finished_at,
-                created_at: r.created_at, triggered_by: r.triggered_by,
+                id: r.id,
+                workflow_id: r.workflow_id,
+                workflow_name: r.workflow_name,
+                trigger: r.trigger,
+                trigger_ref: r.trigger_ref,
+                commit_hash: r.commit_hash,
+                status: r.status,
+                started_at: r.started_at,
+                finished_at: r.finished_at,
+                created_at: r.created_at,
+                triggered_by: r.triggered_by,
             });
-            let steps: Vec<StepJson> = resp.steps.into_iter().map(|s| StepJson {
-                id: s.id, job_name: s.job_name, step_index: s.step_index,
-                name: s.name, status: s.status, exit_code: s.exit_code,
-                log: s.log, started_at: s.started_at, finished_at: s.finished_at,
-            }).collect();
-            let artifacts: Vec<ArtifactJson> = resp.artifacts.into_iter().map(|a| ArtifactJson {
-                id: a.id, run_id: a.run_id, name: a.name,
-                size_bytes: a.size_bytes, created_at: a.created_at,
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!({
-                "run": run, "steps": steps, "artifacts": artifacts,
-            }))).into_response()
+            let steps: Vec<StepJson> = resp
+                .steps
+                .into_iter()
+                .map(|s| StepJson {
+                    id: s.id,
+                    job_name: s.job_name,
+                    step_index: s.step_index,
+                    name: s.name,
+                    status: s.status,
+                    exit_code: s.exit_code,
+                    log: s.log,
+                    started_at: s.started_at,
+                    finished_at: s.finished_at,
+                })
+                .collect();
+            let artifacts: Vec<ArtifactJson> = resp
+                .artifacts
+                .into_iter()
+                .map(|a| ArtifactJson {
+                    id: a.id,
+                    run_id: a.run_id,
+                    name: a.name,
+                    size_bytes: a.size_bytes,
+                    created_at: a.created_at,
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "run": run, "steps": steps, "artifacts": artifacts,
+                })),
+            )
+                .into_response()
         }
         Err(e) => internal_error(e),
     }
+}
+
+/// Server-Sent Events bridge for live step logs.
+///
+/// Opens a gRPC `StreamStepLogs` call and emits each chunk as an SSE
+/// `log` event carrying `{ step_id, data, is_final }`. Browsers can
+/// consume it with `new EventSource('/api/repos/:repo/runs/:id/logs')`.
+///
+/// The browser's `EventSource` can't attach custom auth headers, but it
+/// does forward cookies — the session_token_layer middleware picks the
+/// session cookie up and our gRPC interceptor injects the bearer token.
+/// Query `?step=<id>` to filter to a single step.
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    #[serde(default)]
+    step: i64,
+    #[serde(default)]
+    no_follow: bool,
+}
+
+pub async fn stream_run_logs(
+    State(state): State<Arc<AppState>>,
+    Path((_repo, run_id)): Path<(String, i64)>,
+    Query(q): Query<LogsQuery>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+
+    let grpc = match state.grpc_client().await {
+        Ok(g) => g,
+        Err(e) => return internal_error(e),
+    };
+    let stream = match grpc.stream_step_logs(run_id, q.step, q.no_follow).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(e),
+    };
+
+    // Adapt tonic chunks → SSE events. Log data is raw bytes; convert with
+    // `from_utf8_lossy` so control bytes in compiler output don't kill the
+    // event. The browser side decodes the JSON payload, not the raw text.
+    let events = stream.map(|item| match item {
+        Ok(chunk) => {
+            let payload = serde_json::json!({
+                "step_id": chunk.step_id,
+                "data": String::from_utf8_lossy(&chunk.data),
+                "is_final": chunk.is_final,
+            });
+            Event::default().event("log").json_data(payload)
+        }
+        Err(e) => {
+            let payload = serde_json::json!({ "error": e.message() });
+            Event::default().event("error").json_data(payload)
+        }
+    });
+
+    Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
 }
 
 pub async fn cancel_run(
@@ -291,7 +439,11 @@ pub async fn cancel_run(
             if resp.success {
                 (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
             } else {
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": resp.error}))).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": resp.error})),
+                )
+                    .into_response()
             }
         }
         Err(e) => internal_error(e),
@@ -308,10 +460,17 @@ pub async fn list_artifacts(
     };
     match grpc.list_artifacts(run_id).await {
         Ok(resp) => {
-            let artifacts: Vec<ArtifactJson> = resp.artifacts.into_iter().map(|a| ArtifactJson {
-                id: a.id, run_id: a.run_id, name: a.name,
-                size_bytes: a.size_bytes, created_at: a.created_at,
-            }).collect();
+            let artifacts: Vec<ArtifactJson> = resp
+                .artifacts
+                .into_iter()
+                .map(|a| ArtifactJson {
+                    id: a.id,
+                    run_id: a.run_id,
+                    name: a.name,
+                    size_bytes: a.size_bytes,
+                    created_at: a.created_at,
+                })
+                .collect();
             (StatusCode::OK, Json(artifacts)).into_response()
         }
         Err(e) => internal_error(e),
@@ -328,16 +487,31 @@ pub async fn list_releases(
     };
     match grpc.list_releases(&repo).await {
         Ok(resp) => {
-            let releases: Vec<ReleaseJson> = resp.releases.into_iter().map(|r| {
-                let artifacts = r.artifacts.into_iter().map(|a| ArtifactJson {
-                    id: a.id, run_id: a.run_id, name: a.name,
-                    size_bytes: a.size_bytes, created_at: a.created_at,
-                }).collect();
-                ReleaseJson {
-                    id: r.id, tag: r.tag, name: r.name,
-                    run_id: r.run_id, created_at: r.created_at, artifacts,
-                }
-            }).collect();
+            let releases: Vec<ReleaseJson> = resp
+                .releases
+                .into_iter()
+                .map(|r| {
+                    let artifacts = r
+                        .artifacts
+                        .into_iter()
+                        .map(|a| ArtifactJson {
+                            id: a.id,
+                            run_id: a.run_id,
+                            name: a.name,
+                            size_bytes: a.size_bytes,
+                            created_at: a.created_at,
+                        })
+                        .collect();
+                    ReleaseJson {
+                        id: r.id,
+                        tag: r.tag,
+                        name: r.name,
+                        run_id: r.run_id,
+                        created_at: r.created_at,
+                        artifacts,
+                    }
+                })
+                .collect();
             (StatusCode::OK, Json(releases)).into_response()
         }
         Err(e) => internal_error(e),
@@ -355,17 +529,32 @@ pub async fn get_release(
     match grpc.get_release(release_id).await {
         Ok(resp) => {
             if let Some(r) = resp.release {
-                let artifacts = r.artifacts.into_iter().map(|a| ArtifactJson {
-                    id: a.id, run_id: a.run_id, name: a.name,
-                    size_bytes: a.size_bytes, created_at: a.created_at,
-                }).collect();
+                let artifacts = r
+                    .artifacts
+                    .into_iter()
+                    .map(|a| ArtifactJson {
+                        id: a.id,
+                        run_id: a.run_id,
+                        name: a.name,
+                        size_bytes: a.size_bytes,
+                        created_at: a.created_at,
+                    })
+                    .collect();
                 let release = ReleaseJson {
-                    id: r.id, tag: r.tag, name: r.name,
-                    run_id: r.run_id, created_at: r.created_at, artifacts,
+                    id: r.id,
+                    tag: r.tag,
+                    name: r.name,
+                    run_id: r.run_id,
+                    created_at: r.created_at,
+                    artifacts,
                 };
                 (StatusCode::OK, Json(release)).into_response()
             } else {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Release not found"}))).into_response()
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Release not found"})),
+                )
+                    .into_response()
             }
         }
         Err(e) => internal_error(e),

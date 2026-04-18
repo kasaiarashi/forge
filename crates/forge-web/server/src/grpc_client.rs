@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use forge_proto::forge::auth_service_client::AuthServiceClient;
 use forge_proto::forge::forge_service_client::ForgeServiceClient;
@@ -107,9 +107,7 @@ impl ForgeGrpcClient {
 
     /// Build a [`ForgeServiceClient`] for one request, attaching the current
     /// task-local session token (if any) as `Authorization: Bearer <token>`.
-    fn forge(
-        &self,
-    ) -> ForgeServiceClient<InterceptedService<Channel, BearerInterceptor>> {
+    fn forge(&self) -> ForgeServiceClient<InterceptedService<Channel, BearerInterceptor>> {
         ForgeServiceClient::with_interceptor(
             self.channel.clone(),
             BearerInterceptor::from_task_local(),
@@ -117,9 +115,7 @@ impl ForgeGrpcClient {
     }
 
     /// Build an [`AuthServiceClient`] for one request, same shape.
-    pub fn auth(
-        &self,
-    ) -> AuthServiceClient<InterceptedService<Channel, BearerInterceptor>> {
+    pub fn auth(&self) -> AuthServiceClient<InterceptedService<Channel, BearerInterceptor>> {
         AuthServiceClient::with_interceptor(
             self.channel.clone(),
             BearerInterceptor::from_task_local(),
@@ -145,9 +141,8 @@ pub struct BearerInterceptor {
 
 impl BearerInterceptor {
     fn from_task_local() -> Self {
-        let header = current_session_token().and_then(|tok| {
-            MetadataValue::try_from(format!("Bearer {tok}")).ok()
-        });
+        let header = current_session_token()
+            .and_then(|tok| MetadataValue::try_from(format!("Bearer {tok}")).ok());
         Self { header }
     }
 }
@@ -163,7 +158,6 @@ impl tonic::service::Interceptor for BearerInterceptor {
 
 #[allow(dead_code)] // some methods are unused but kept symmetric with the gRPC surface
 impl ForgeGrpcClient {
-
     /// List all repositories.
     pub async fn list_repos(&self) -> anyhow::Result<ListReposResponse> {
         let mut client = self.forge();
@@ -306,9 +300,7 @@ impl ForgeGrpcClient {
     /// Get server info (version, uptime, stats).
     pub async fn get_server_info(&self) -> anyhow::Result<GetServerInfoResponse> {
         let mut client = self.forge();
-        let resp = client
-            .get_server_info(GetServerInfoRequest {})
-            .await?;
+        let resp = client.get_server_info(GetServerInfoRequest {}).await?;
         Ok(resp.into_inner())
     }
 
@@ -376,23 +368,47 @@ impl ForgeGrpcClient {
 
     pub async fn list_workflows(&self, repo: &str) -> anyhow::Result<ListWorkflowsResponse> {
         let mut client = self.forge();
-        let resp = client.list_workflows(ListWorkflowsRequest { repo: repo.to_string() }).await?;
+        let resp = client
+            .list_workflows(ListWorkflowsRequest {
+                repo: repo.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn create_workflow(&self, repo: &str, name: &str, yaml: &str) -> anyhow::Result<CreateWorkflowResponse> {
+    pub async fn create_workflow(
+        &self,
+        repo: &str,
+        name: &str,
+        yaml: &str,
+    ) -> anyhow::Result<CreateWorkflowResponse> {
         let mut client = self.forge();
-        let resp = client.create_workflow(CreateWorkflowRequest {
-            repo: repo.to_string(), name: name.to_string(), yaml: yaml.to_string(),
-        }).await?;
+        let resp = client
+            .create_workflow(CreateWorkflowRequest {
+                repo: repo.to_string(),
+                name: name.to_string(),
+                yaml: yaml.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn update_workflow(&self, id: i64, name: &str, yaml: &str, enabled: bool) -> anyhow::Result<UpdateWorkflowResponse> {
+    pub async fn update_workflow(
+        &self,
+        id: i64,
+        name: &str,
+        yaml: &str,
+        enabled: bool,
+    ) -> anyhow::Result<UpdateWorkflowResponse> {
         let mut client = self.forge();
-        let resp = client.update_workflow(UpdateWorkflowRequest {
-            id, name: name.to_string(), yaml: yaml.to_string(), enabled,
-        }).await?;
+        let resp = client
+            .update_workflow(UpdateWorkflowRequest {
+                id,
+                name: name.to_string(),
+                yaml: yaml.to_string(),
+                enabled,
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
@@ -402,43 +418,96 @@ impl ForgeGrpcClient {
         Ok(resp.into_inner())
     }
 
-    pub async fn trigger_workflow(&self, workflow_id: i64, ref_name: &str, triggered_by: &str) -> anyhow::Result<TriggerWorkflowResponse> {
+    pub async fn trigger_workflow(
+        &self,
+        workflow_id: i64,
+        ref_name: &str,
+        triggered_by: &str,
+    ) -> anyhow::Result<TriggerWorkflowResponse> {
         let mut client = self.forge();
-        let resp = client.trigger_workflow(TriggerWorkflowRequest {
-            workflow_id, ref_name: ref_name.to_string(), triggered_by: triggered_by.to_string(),
-        }).await?;
+        let resp = client
+            .trigger_workflow(TriggerWorkflowRequest {
+                workflow_id,
+                ref_name: ref_name.to_string(),
+                triggered_by: triggered_by.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn list_workflow_runs(&self, repo: &str, workflow_id: i64, limit: i32, offset: i32) -> anyhow::Result<ListWorkflowRunsResponse> {
+    pub async fn list_workflow_runs(
+        &self,
+        repo: &str,
+        workflow_id: i64,
+        limit: i32,
+        offset: i32,
+    ) -> anyhow::Result<ListWorkflowRunsResponse> {
         let mut client = self.forge();
-        let resp = client.list_workflow_runs(ListWorkflowRunsRequest {
-            repo: repo.to_string(), workflow_id, limit, offset,
-        }).await?;
+        let resp = client
+            .list_workflow_runs(ListWorkflowRunsRequest {
+                repo: repo.to_string(),
+                workflow_id,
+                limit,
+                offset,
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
     pub async fn get_workflow_run(&self, run_id: i64) -> anyhow::Result<GetWorkflowRunResponse> {
         let mut client = self.forge();
-        let resp = client.get_workflow_run(GetWorkflowRunRequest { run_id }).await?;
+        let resp = client
+            .get_workflow_run(GetWorkflowRunRequest { run_id })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn cancel_workflow_run(&self, run_id: i64) -> anyhow::Result<CancelWorkflowRunResponse> {
+    /// Open a streaming `StreamStepLogs` RPC and return the raw tonic
+    /// stream. The caller (SSE bridge) adapts chunks into browser events.
+    /// Passing `step_id = 0` tails every step in the run.
+    pub async fn stream_step_logs(
+        &self,
+        run_id: i64,
+        step_id: i64,
+        no_follow: bool,
+    ) -> anyhow::Result<tonic::Streaming<StepLogChunk>> {
         let mut client = self.forge();
-        let resp = client.cancel_workflow_run(CancelWorkflowRunRequest { run_id }).await?;
+        let resp = client
+            .stream_step_logs(StreamStepLogsRequest {
+                run_id,
+                step_id,
+                no_follow,
+            })
+            .await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn cancel_workflow_run(
+        &self,
+        run_id: i64,
+    ) -> anyhow::Result<CancelWorkflowRunResponse> {
+        let mut client = self.forge();
+        let resp = client
+            .cancel_workflow_run(CancelWorkflowRunRequest { run_id })
+            .await?;
         Ok(resp.into_inner())
     }
 
     pub async fn list_artifacts(&self, run_id: i64) -> anyhow::Result<ListArtifactsResponse> {
         let mut client = self.forge();
-        let resp = client.list_artifacts(ListArtifactsRequest { run_id }).await?;
+        let resp = client
+            .list_artifacts(ListArtifactsRequest { run_id })
+            .await?;
         Ok(resp.into_inner())
     }
 
     pub async fn list_releases(&self, repo: &str) -> anyhow::Result<ListReleasesResponse> {
         let mut client = self.forge();
-        let resp = client.list_releases(ListReleasesRequest { repo: repo.to_string() }).await?;
+        let resp = client
+            .list_releases(ListReleasesRequest {
+                repo: repo.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
@@ -450,29 +519,66 @@ impl ForgeGrpcClient {
 
     // ── Issues ──
 
-    pub async fn list_issues(&self, repo: &str, status: &str, limit: i32, offset: i32) -> anyhow::Result<ListIssuesResponse> {
+    pub async fn list_issues(
+        &self,
+        repo: &str,
+        status: &str,
+        limit: i32,
+        offset: i32,
+    ) -> anyhow::Result<ListIssuesResponse> {
         let mut client = self.forge();
-        let resp = client.list_issues(ListIssuesRequest {
-            repo: repo.to_string(), status: status.to_string(), limit, offset,
-        }).await?;
+        let resp = client
+            .list_issues(ListIssuesRequest {
+                repo: repo.to_string(),
+                status: status.to_string(),
+                limit,
+                offset,
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn create_issue(&self, repo: &str, title: &str, body: &str, author: &str, labels: Vec<String>) -> anyhow::Result<CreateIssueResponse> {
+    pub async fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        author: &str,
+        labels: Vec<String>,
+    ) -> anyhow::Result<CreateIssueResponse> {
         let mut client = self.forge();
-        let resp = client.create_issue(CreateIssueRequest {
-            repo: repo.to_string(), title: title.to_string(), body: body.to_string(),
-            author: author.to_string(), labels,
-        }).await?;
+        let resp = client
+            .create_issue(CreateIssueRequest {
+                repo: repo.to_string(),
+                title: title.to_string(),
+                body: body.to_string(),
+                author: author.to_string(),
+                labels,
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn update_issue(&self, id: i64, title: &str, body: &str, status: &str, labels: Vec<String>, assignee: &str) -> anyhow::Result<UpdateIssueResponse> {
+    pub async fn update_issue(
+        &self,
+        id: i64,
+        title: &str,
+        body: &str,
+        status: &str,
+        labels: Vec<String>,
+        assignee: &str,
+    ) -> anyhow::Result<UpdateIssueResponse> {
         let mut client = self.forge();
-        let resp = client.update_issue(UpdateIssueRequest {
-            id, title: title.to_string(), body: body.to_string(),
-            status: status.to_string(), labels, assignee: assignee.to_string(),
-        }).await?;
+        let resp = client
+            .update_issue(UpdateIssueRequest {
+                id,
+                title: title.to_string(),
+                body: body.to_string(),
+                status: status.to_string(),
+                labels,
+                assignee: assignee.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
@@ -484,64 +590,141 @@ impl ForgeGrpcClient {
 
     // ── Pull Requests ──
 
-    pub async fn list_pull_requests(&self, repo: &str, status: &str, limit: i32, offset: i32) -> anyhow::Result<ListPullRequestsResponse> {
+    pub async fn list_pull_requests(
+        &self,
+        repo: &str,
+        status: &str,
+        limit: i32,
+        offset: i32,
+    ) -> anyhow::Result<ListPullRequestsResponse> {
         let mut client = self.forge();
-        let resp = client.list_pull_requests(ListPullRequestsRequest {
-            repo: repo.to_string(), status: status.to_string(), limit, offset,
-        }).await?;
+        let resp = client
+            .list_pull_requests(ListPullRequestsRequest {
+                repo: repo.to_string(),
+                status: status.to_string(),
+                limit,
+                offset,
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn create_pull_request(&self, repo: &str, title: &str, body: &str, author: &str, source_branch: &str, target_branch: &str, labels: Vec<String>) -> anyhow::Result<CreatePullRequestResponse> {
+    pub async fn create_pull_request(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        author: &str,
+        source_branch: &str,
+        target_branch: &str,
+        labels: Vec<String>,
+    ) -> anyhow::Result<CreatePullRequestResponse> {
         let mut client = self.forge();
-        let resp = client.create_pull_request(CreatePullRequestRequest {
-            repo: repo.to_string(), title: title.to_string(), body: body.to_string(),
-            author: author.to_string(), source_branch: source_branch.to_string(),
-            target_branch: target_branch.to_string(), labels,
-        }).await?;
+        let resp = client
+            .create_pull_request(CreatePullRequestRequest {
+                repo: repo.to_string(),
+                title: title.to_string(),
+                body: body.to_string(),
+                author: author.to_string(),
+                source_branch: source_branch.to_string(),
+                target_branch: target_branch.to_string(),
+                labels,
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn update_pull_request(&self, id: i64, title: &str, body: &str, status: &str, labels: Vec<String>, assignee: &str) -> anyhow::Result<UpdatePullRequestResponse> {
+    pub async fn update_pull_request(
+        &self,
+        id: i64,
+        title: &str,
+        body: &str,
+        status: &str,
+        labels: Vec<String>,
+        assignee: &str,
+    ) -> anyhow::Result<UpdatePullRequestResponse> {
         let mut client = self.forge();
-        let resp = client.update_pull_request(UpdatePullRequestRequest {
-            id, title: title.to_string(), body: body.to_string(),
-            status: status.to_string(), labels, assignee: assignee.to_string(),
-        }).await?;
+        let resp = client
+            .update_pull_request(UpdatePullRequestRequest {
+                id,
+                title: title.to_string(),
+                body: body.to_string(),
+                status: status.to_string(),
+                labels,
+                assignee: assignee.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
     pub async fn get_pull_request(&self, id: i64) -> anyhow::Result<GetPullRequestResponse> {
         let mut client = self.forge();
-        let resp = client.get_pull_request(GetPullRequestRequest { id }).await?;
+        let resp = client
+            .get_pull_request(GetPullRequestRequest { id })
+            .await?;
         Ok(resp.into_inner())
     }
 
     pub async fn merge_pull_request(&self, id: i64) -> anyhow::Result<MergePullRequestResponse> {
         let mut client = self.forge();
-        let resp = client.merge_pull_request(MergePullRequestRequest { id }).await?;
+        let resp = client
+            .merge_pull_request(MergePullRequestRequest { id })
+            .await?;
         Ok(resp.into_inner())
     }
 
     // ── Comments ────────────────────────────────────────────────────────────
 
-    pub async fn list_comments(&self, repo: &str, issue_id: i64, kind: &str) -> anyhow::Result<ListCommentsResponse> {
+    pub async fn list_comments(
+        &self,
+        repo: &str,
+        issue_id: i64,
+        kind: &str,
+    ) -> anyhow::Result<ListCommentsResponse> {
         let mut client = self.forge();
-        let resp = client.list_comments(ListCommentsRequest { repo: repo.to_string(), issue_id, kind: kind.to_string() }).await?;
+        let resp = client
+            .list_comments(ListCommentsRequest {
+                repo: repo.to_string(),
+                issue_id,
+                kind: kind.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn create_comment(&self, repo: &str, issue_id: i64, kind: &str, author: &str, body: &str) -> anyhow::Result<CreateCommentResponse> {
+    pub async fn create_comment(
+        &self,
+        repo: &str,
+        issue_id: i64,
+        kind: &str,
+        author: &str,
+        body: &str,
+    ) -> anyhow::Result<CreateCommentResponse> {
         let mut client = self.forge();
-        let resp = client.create_comment(CreateCommentRequest {
-            repo: repo.to_string(), issue_id, kind: kind.to_string(), author: author.to_string(), body: body.to_string(),
-        }).await?;
+        let resp = client
+            .create_comment(CreateCommentRequest {
+                repo: repo.to_string(),
+                issue_id,
+                kind: kind.to_string(),
+                author: author.to_string(),
+                body: body.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 
-    pub async fn update_comment(&self, id: i64, body: &str) -> anyhow::Result<UpdateCommentResponse> {
+    pub async fn update_comment(
+        &self,
+        id: i64,
+        body: &str,
+    ) -> anyhow::Result<UpdateCommentResponse> {
         let mut client = self.forge();
-        let resp = client.update_comment(UpdateCommentRequest { id, body: body.to_string() }).await?;
+        let resp = client
+            .update_comment(UpdateCommentRequest {
+                id,
+                body: body.to_string(),
+            })
+            .await?;
         Ok(resp.into_inner())
     }
 

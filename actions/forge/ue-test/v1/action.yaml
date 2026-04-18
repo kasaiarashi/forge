@@ -1,0 +1,27 @@
+# UE Automation Tests — runs headless editor with Automation RunTests.
+name: UE Automation Tests
+inputs:
+  project:
+    required: true
+  suites:
+    default: "Project.Functional Tests"
+  engine_version:
+    default: "5.7"
+  report_dir:
+    default: "./AutomationReports"
+outputs:
+  report_path: ${{ steps.test.outputs.report_path }}
+steps:
+  - name: Discover UE
+    id: ue
+    uses: "@builtin/ue-discover"
+    with:
+      version: "${{ inputs.engine_version }}"
+  - name: Run Automation
+    id: test
+    uses: "@builtin/run-editor-cmd"
+    with:
+      editor: "${{ steps.ue.outputs.editor_path }}"
+      project: "${{ inputs.project }}"
+      cmds: "Automation RunTests ${{ inputs.suites }}; Quit"
+      extra: "-ReportExportPath=${{ inputs.report_dir }}"

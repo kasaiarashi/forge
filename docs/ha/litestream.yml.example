@@ -1,0 +1,46 @@
+# Litestream replication config for forge-server SQLite metadata.
+#
+# Litestream streams the SQLite WAL to an object store continuously so
+# the DB can be restored to any point in time without stopping the
+# server. Pair this with regular `forge-server backup create` snapshots
+# (runs VACUUM INTO + emits a manifest) — Litestream handles the
+# live replication, the snapshot handles the human-readable audit
+# trail and schema-version manifest.
+#
+# Place at /etc/litestream.yml, then:
+#
+#   litestream replicate -config /etc/litestream.yml
+#
+# Restore before starting forge-server on a failover host:
+#
+#   litestream restore -o /var/lib/forge-data/forge.db \
+#       s3://forge-backups/$(hostname)/forge.db
+#
+# Docs: https://litestream.io/
+
+dbs:
+  - path: /var/lib/forge-data/forge.db
+    replicas:
+      - type: s3
+        bucket: forge-backups
+        # Prefix per-server so multiple forge-servers can share a
+        # bucket without stomping on each other's WAL segments.
+        path: primary/forge.db
+        region: us-east-1
+        # Drop the access_key_id/secret_access_key lines to inherit
+        # from the default AWS credential chain (env, profile, IAM
+        # role). Explicit creds here are for Minio / Ceph RGW deploys
+        # where the daemon doesn't carry its own credential context.
+        # access-key-id: <MINIO_ROOT_USER>
+        # secret-access-key: <MINIO_ROOT_PASSWORD>
+        # endpoint: https://minio.internal:9000
+        # force-path-style: true
+
+        # Retention: keep 72h of WAL segments. A fresh base snapshot
+        # is taken daily by litestream's internal scheduler so you
+        # never need to replay more than 24h of WAL on restore.
+        retention: 72h
+        retention-check-interval: 1h
+        # Snapshot every 24h so a full restore reads one snapshot +
+        # ≤24h of WAL at most.
+        snapshot-interval: 24h

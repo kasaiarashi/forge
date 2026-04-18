@@ -1,40 +1,271 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
-/// SQLite database for repos, refs, and locks metadata.
+/// Forward an inherent-method call on `MetadataDb` to its Postgres
+/// twin via the `MetadataBackend` trait. Used for the small Phase-1
+/// trait-covered surface (repos/refs/locks/upload sessions/repo ops/
+/// schema_version/ping/metrics_snapshot). The macro returns from the
+/// surrounding function on Postgres mode; SQLite path stays as-is.
+///
+/// The Postgres call runs on a fresh OS thread via `block_pg`. The
+/// `postgres` crate creates its own current-thread tokio runtime per
+/// connection; calling that from inside the gRPC server's tokio
+/// worker would panic with "Cannot start a runtime from within a
+/// runtime". `std::thread::scope` lets us escape the runtime
+/// without making the trait async or rewriting every gRPC handler.
+macro_rules! dispatch_pg {
+    ($self:ident, $method:ident $(, $arg:expr)* $(,)?) => {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = $self.pg.as_ref() {
+            let pg = pg.clone();
+            return crate::storage::db::block_pg(move || {
+                crate::storage::backend::MetadataBackend::$method(
+                    pg.as_ref(),
+                    $($arg),*
+                )
+            });
+        }
+    };
+}
+
+/// Variant of [`dispatch_pg!`] for methods that live as **inherent**
+/// methods on `PgMetadataBackend` (issues/PRs/comments/workflows/
+/// runs/steps/artifacts/releases/agents/secrets — i.e., the
+/// Phase-7g full-coverage surface that does NOT go through the
+/// `MetadataBackend` trait). Same runtime-escape semantics. Exposed
+/// via `#[macro_export]` so call sites in `services::actions::db`
+/// (a sibling module) can use it without forwarding boilerplate.
+#[macro_export]
+macro_rules! dispatch_pg_inherent {
+    ($self:ident, $method:ident $(, $arg:expr)* $(,)?) => {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = $self.pg.as_ref() {
+            let pg = pg.clone();
+            return $crate::storage::db::block_pg(move || pg.$method($($arg),*));
+        }
+    };
+}
+
+/// Run `f` on a thread that is NOT a tokio runtime worker. The
+/// `postgres` crate (sync facade over `tokio_postgres`) builds its
+/// own runtime per call and panics if it sees an existing one in
+/// scope. `std::thread::scope` spawns a fresh OS thread, runs the
+/// closure, and joins — no tokio context inherited. Costs a thread
+/// spawn per query (~50µs Linux, ~100µs Windows); good enough for
+/// v1 Postgres while we wait on a real async refactor.
+#[cfg(feature = "postgres")]
+pub(crate) fn block_pg<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    let result = std::thread::scope(|s| s.spawn(f).join());
+    match result {
+        Ok(r) => r,
+        Err(panic) => {
+            // Surface the panic message instead of "Any { .. }".
+            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<unknown panic payload>".to_string()
+            };
+            tracing::error!(panic = %msg, "block_pg dispatch thread panicked");
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
+/// Pooled connection handle returned by [`MetadataDb::conn`].
+///
+/// Derefs to [`rusqlite::Connection`] so existing call sites keep
+/// working unchanged. Carries its own busy-timeout and pragmas —
+/// installed by the pool's `on_acquire` hook so every hand-out is
+/// correctly configured, even after the pool spins up a new physical
+/// connection to satisfy demand.
+pub(crate) type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
+
+/// Connection-pool tuning baked into `MetadataDb::open`. These are
+/// sane defaults for a single-host server; the operator can override
+/// them via the `[database]` config block (see `ServerConfig`).
+#[derive(Debug, Clone, Copy)]
+pub struct DbPoolConfig {
+    /// Upper bound on pooled connections. SQLite serialises writes
+    /// regardless, but additional readers multiply WAL read throughput
+    /// and keep handler tasks from blocking on a single connection.
+    pub max_size: u32,
+    /// Per-connection `PRAGMA busy_timeout` in milliseconds. Controls
+    /// how long SQLite waits for the write lock before returning
+    /// `SQLITE_BUSY`. Pool-level wait is separate (r2d2's own timeout).
+    pub busy_timeout_ms: u64,
+}
+
+impl Default for DbPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_size: 16,
+            busy_timeout_ms: 5_000,
+        }
+    }
+}
+
+/// Metadata store. Either a SQLite pool (default, single-host) or a
+/// Postgres pool (`backend = "postgres"`). Every inherent method
+/// short-circuits through `dispatch_pg!` / `dispatch_pg_inherent!`
+/// when Postgres is installed, so the SQLite pool is never touched
+/// in Postgres mode — it stays `None`.
 pub struct MetadataDb {
-    pub(crate) conn: Mutex<Connection>,
+    pub(crate) pool: Option<Pool<SqliteConnectionManager>>,
+    /// Postgres backend. When `Some`, every trait-covered + inherent
+    /// method that has a PG twin dispatches through this and the
+    /// SQLite pool above stays `None`. Phase 7g ships full coverage
+    /// (issues/PRs/workflows/actions/agents/secrets all hit
+    /// Postgres), so operators picking `backend = "postgres"` run
+    /// entirely without SQLite on disk.
+    #[cfg(feature = "postgres")]
+    pub(crate) pg: Option<std::sync::Arc<crate::storage::postgres::PgMetadataBackend>>,
 }
 
 impl MetadataDb {
-    /// Acquire the database connection lock, converting poison errors to anyhow errors.
-    pub(crate) fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("database lock poisoned: {e}"))
+    /// Fetch a pooled connection. Blocks up to the r2d2 wait timeout
+    /// (currently the default 30 s) if all connections are in use —
+    /// should be rare on a correctly-sized pool, and a timeout here
+    /// indicates either runaway concurrency or a stuck long-held txn.
+    ///
+    /// Returns an error if the SQLite pool is absent (i.e., we're
+    /// running in Postgres mode). This should never happen in
+    /// practice because every public method short-circuits through
+    /// `dispatch_pg!` before getting here — if you hit this error,
+    /// a method is missing its dispatch line.
+    pub(crate) fn conn(&self) -> Result<PooledConn> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("sqlite pool not open (postgres mode); this method is missing its dispatch_pg dispatch line"))?;
+        pool.get()
+            .map_err(|e| anyhow::anyhow!("metadata pool get: {e}"))
+    }
+
+    /// Optional Postgres handle. Returns `Some` only when the
+    /// operator selected `[database] backend = "postgres"`. Used by
+    /// the trait-method dispatchers below to forward calls to
+    /// `PgMetadataBackend` instead of running the SQLite path.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn pg(&self) -> Option<&std::sync::Arc<crate::storage::postgres::PgMetadataBackend>> {
+        self.pg.as_ref()
+    }
+
+    /// Stub when the postgres feature is off — keeps call-site
+    /// dispatch code uniform without sprinkling `#[cfg]` everywhere.
+    #[cfg(not(feature = "postgres"))]
+    #[allow(dead_code)]
+    pub(crate) fn pg(&self) -> Option<&()> {
+        None
+    }
+
+    /// Returns true if this `MetadataDb` is wired through Postgres.
+    /// Handlers that need the SQLite-only surface (issues, PRs,
+    /// workflows, etc) check this and return UNAVAILABLE rather
+    /// than silently writing to a local SQLite file the operator
+    /// doesn't realise is in play.
+    pub fn is_postgres_backend(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        {
+            self.pg.is_some()
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            false
+        }
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_config(path, DbPoolConfig::default())
+    }
+
+    /// Open the SQLite pool plus a Postgres-backed trait dispatcher.
+    /// Both stay alive: the SQLite file under `<base>/legacy.db`
+    /// holds non-trait state (issues/PRs/workflows/etc) that the
+    /// v1 Postgres scope doesn't replicate, while the Postgres
+    /// pool serves the core VCS + auth surface.
+    #[cfg(feature = "postgres")]
+    pub fn open_with_postgres(
+        _sqlite_path: &Path,
+        pg_cfg: crate::storage::postgres::PgPoolConfig,
+    ) -> Result<Self> {
+        // Pure Postgres — no SQLite pool, no legacy file. Every
+        // inherent method dispatches through `dispatch_pg!` before
+        // touching `pool`, so `None` stays safe.
+        //
+        // Phase 7g made this viable: all tables the SQLite baseline
+        // creates inline now live in the Postgres full-schema
+        // migration too, so the server never needs to fall back.
+        let pg = block_pg(move || crate::storage::postgres::PgMetadataBackend::open(pg_cfg))
+            .context("open postgres metadata backend")?;
+        Ok(Self {
+            pool: None,
+            pg: Some(std::sync::Arc::new(pg)),
+        })
+    }
+
+    /// Open a pooled SQLite metadata store. The `on_acquire` callback
+    /// runs against every connection the pool produces, so pragmas
+    /// stick even when r2d2 grows the pool to handle a burst. Schema
+    /// creation is a single execute_batch on a connection borrowed
+    /// from the freshly-built pool.
+    pub fn open_with_config(path: &Path, cfg: DbPoolConfig) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("Failed to open database at {}", path.display()))?;
 
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .with_context(|| "Failed to enable WAL mode")?;
+        let busy_timeout_ms = cfg.busy_timeout_ms;
+        let manager = SqliteConnectionManager::file(path)
+            .with_flags(
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_CREATE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .with_init(move |c: &mut Connection| {
+                // Per-connection pragmas. Applied before any query runs.
+                c.busy_timeout(Duration::from_millis(busy_timeout_ms))?;
+                // WAL + NORMAL = one writer + many readers without the
+                // fsync-per-txn cost of the FULL mode. Survivable
+                // across crashes because the WAL itself is fsync'd on
+                // checkpoint boundaries.
+                c.pragma_update(None, "journal_mode", "WAL")?;
+                c.pragma_update(None, "synchronous", "NORMAL")?;
+                // Automatic WAL checkpoint every ~1000 pages so long-
+                // running servers don't accumulate a multi-gig WAL.
+                c.pragma_update(None, "wal_autocheckpoint", 1000)?;
+                // FK enforcement is off by default per-connection.
+                // Auth tables depend on ON DELETE CASCADE; must be on
+                // for every hand-out from the pool, not just the
+                // connection used at open time.
+                c.pragma_update(None, "foreign_keys", "ON")?;
+                Ok(())
+            });
 
-        // Enforce foreign-key constraints. SQLite leaves this off per
-        // connection by default; the auth tables (sessions / pats /
-        // repo_acls) rely on ON DELETE CASCADE to clean up after a user
-        // is deleted, so this must be on.
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .with_context(|| "Failed to enable foreign_keys pragma")?;
+        let pool = Pool::builder()
+            .max_size(cfg.max_size)
+            // Test the connection on checkout so a stale FD (e.g.
+            // after a DB file replace) doesn't poison a handler.
+            .test_on_check_out(true)
+            .build(manager)
+            .with_context(|| format!("Failed to build metadata pool for {}", path.display()))?;
+
+        // Schema setup runs on a freshly pooled connection. The pragmas
+        // above have already been applied via `with_init`.
+        let conn = pool
+            .get()
+            .with_context(|| "initial pool.get() failed during open()")?;
 
         conn.execute_batch(
             "
@@ -158,24 +389,831 @@ impl MetadataDb {
         )?;
 
         // Migrate: add assignee column if missing
-        let _ = conn.execute("ALTER TABLE issues ADD COLUMN assignee TEXT NOT NULL DEFAULT ''", []);
-        let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN assignee TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute(
+            "ALTER TABLE issues ADD COLUMN assignee TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE pull_requests ADD COLUMN assignee TEXT NOT NULL DEFAULT ''",
+            [],
+        );
         // Migrate: add default_branch column if missing
-        let _ = conn.execute("ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute(
+            "ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+
+        // Release the initial connection back to the pool so subsequent
+        // setup calls don't deadlock when the pool is small.
+        drop(conn);
 
         let db = Self {
-            conn: Mutex::new(conn),
+            pool: Some(pool),
+            #[cfg(feature = "postgres")]
+            pg: None,
         };
+        db.ensure_schema_version_table()?;
         db.create_actions_tables()?;
+        db.create_secrets_tables()?;
+        db.create_agent_tables()?;
+        db.create_upload_session_tables()?;
+        // Record the baseline schema so Phase 2b migrations can version
+        // their add-only DDL against a concrete starting point.
+        db.record_baseline_schema_version()?;
+        // Apply any numbered migrations beyond the baseline. Errors
+        // propagate — a half-applied schema is worse than a server
+        // that refuses to start.
+        db.apply_pending_migrations()?;
         Ok(db)
+    }
+
+    /// Run every SQLite migration whose version is greater than the
+    /// currently-recorded schema_version. Each migration lands in its
+    /// own BEGIN IMMEDIATE transaction alongside the `schema_version`
+    /// insert, so a crash in the middle of a migration leaves the DB
+    /// on the previous revision (never half-applied).
+    fn apply_pending_migrations(&self) -> Result<()> {
+        let current = self.current_schema_version()?;
+        let mut conn = self.conn()?;
+        let applied = crate::storage::migrations::apply_pending(
+            &mut conn,
+            current,
+            crate::storage::migrations::SQLITE_MIGRATIONS,
+        )?;
+        if applied == 0 {
+            tracing::debug!(current_version = current, "no pending migrations");
+        }
+        Ok(())
+    }
+
+    // -- Schema versioning --
+    //
+    // Every server start runs `ensure_schema_version_table()` and any
+    // pending migrations. The current file is treated as revision 1
+    // (the "baseline" captured at Phase 2a); add-only DDL for Phase 2b
+    // onwards will land as numbered migrations that this module applies
+    // idempotently at boot.
+
+    fn ensure_schema_version_table(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version     INTEGER PRIMARY KEY,
+                name        TEXT    NOT NULL,
+                applied_at  INTEGER NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+
+    fn record_baseline_schema_version(&self) -> Result<()> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version, name, applied_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![1i64, "baseline", now],
+        )?;
+        Ok(())
+    }
+
+    /// Return the highest applied schema version. Used by the Phase 2b
+    /// migration runner to skip already-applied steps.
+    #[allow(dead_code)]
+    pub(crate) fn current_schema_version(&self) -> Result<i64> {
+        let conn = self.conn()?;
+        let v: i64 = conn
+            .prepare("SELECT COALESCE(MAX(version), 0) FROM schema_version")?
+            .query_row([], |r| r.get(0))?;
+        Ok(v)
+    }
+
+    // -- Upload sessions (Phase 1 atomic push) --
+    //
+    // A push is a two-phase operation: PushObjects streams bytes into a
+    // per-session staging area, and CommitPush promotes those bytes into the
+    // live tree plus applies ref CAS updates inside a single transaction.
+    // These two tables track the session so CommitPush retries stay
+    // idempotent and a sweeper can reclaim staging from clients that crashed
+    // mid-push.
+
+    pub fn create_upload_session_tables(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS upload_sessions (
+                id           TEXT PRIMARY KEY,
+                repo         TEXT NOT NULL,
+                user_id      INTEGER,
+                state        TEXT NOT NULL
+                    CHECK(state IN ('uploading','committed','failed','abandoned'))
+                    DEFAULT 'uploading',
+                created_at   INTEGER NOT NULL,
+                expires_at   INTEGER NOT NULL,
+                committed_at INTEGER,
+                -- JSON-encoded CommitPush outcome captured at commit time so
+                -- an idempotent retry returns the same response.
+                result_json  TEXT,
+                -- Free-form error label when state='failed'. Not shown to
+                -- clients directly; useful for operator debugging.
+                failure      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_upload_sessions_state
+                ON upload_sessions(state, expires_at);
+            CREATE TABLE IF NOT EXISTS session_objects (
+                session_id TEXT NOT NULL
+                    REFERENCES upload_sessions(id) ON DELETE CASCADE,
+                hash       BLOB NOT NULL,
+                size       INTEGER NOT NULL,
+                PRIMARY KEY (session_id, hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_objects_session
+                ON session_objects(session_id);
+            ",
+        )?;
+        Ok(())
+    }
+
+    /// Create an upload session if it doesn't already exist. No-op on a
+    /// duplicate id so retried first-chunks (same session) are safe.
+    pub fn create_upload_session(
+        &self,
+        sid: &str,
+        repo: &str,
+        user_id: Option<i64>,
+        ttl_seconds: i64,
+    ) -> Result<()> {
+        dispatch_pg!(self, create_upload_session, sid, repo, user_id, ttl_seconds);
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        let expires = now + ttl_seconds;
+        conn.execute(
+            "INSERT OR IGNORE INTO upload_sessions
+                (id, repo, user_id, state, created_at, expires_at)
+             VALUES (?1, ?2, ?3, 'uploading', ?4, ?5)",
+            rusqlite::params![sid, repo, user_id, now, expires],
+        )?;
+        Ok(())
+    }
+
+    /// Record a successfully-staged object against a session. `OR IGNORE`
+    /// because a client resending a chunk for dedup is fine.
+    pub fn record_session_object(&self, sid: &str, hash: &[u8], size: i64) -> Result<()> {
+        dispatch_pg!(self, record_session_object, sid, hash, size);
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO session_objects (session_id, hash, size)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![sid, hash, size],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>> {
+        dispatch_pg!(self, get_upload_session, sid);
+        let conn = self.conn()?;
+        let row = conn
+            .prepare(
+                "SELECT id, repo, user_id, state, created_at, expires_at,
+                        committed_at, result_json, failure
+                 FROM upload_sessions WHERE id = ?1",
+            )?
+            .query_row([sid], |r| {
+                Ok(UploadSessionRecord {
+                    id: r.get(0)?,
+                    repo: r.get(1)?,
+                    user_id: r.get(2)?,
+                    state: r.get(3)?,
+                    created_at: r.get(4)?,
+                    expires_at: r.get(5)?,
+                    committed_at: r.get(6)?,
+                    result_json: r.get(7)?,
+                    failure: r.get(8)?,
+                })
+            })
+            .ok();
+        Ok(row)
+    }
+
+    pub fn list_session_object_hashes(&self, sid: &str) -> Result<Vec<Vec<u8>>> {
+        dispatch_pg!(self, list_session_object_hashes, sid);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT hash FROM session_objects WHERE session_id = ?1")?;
+        let rows = stmt.query_map([sid], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Hashes + declared sizes for every object recorded against a
+    /// session. Used by `QueryUploadSession` to tell the resuming
+    /// client how many bytes per object it's already announced — the
+    /// staging filesystem answers the "how many did I actually land"
+    /// question separately.
+    pub fn list_session_objects_with_sizes(&self, sid: &str) -> Result<Vec<(Vec<u8>, i64)>> {
+        dispatch_pg!(self, list_session_objects_with_sizes, sid);
+        let conn = self.conn()?;
+        let mut stmt =
+            conn.prepare("SELECT hash, size FROM session_objects WHERE session_id = ?1")?;
+        let rows = stmt.query_map([sid], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Mark a session failed. Retries of CommitPush against a failed session
+    /// will surface the same failure reason without re-running the work.
+    pub fn fail_upload_session(&self, sid: &str, reason: &str, result_json: &str) -> Result<()> {
+        dispatch_pg!(self, fail_upload_session, sid, reason, result_json);
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE upload_sessions
+             SET state = 'failed', failure = ?2, result_json = ?3
+             WHERE id = ?1 AND state = 'uploading'",
+            rusqlite::params![sid, reason, result_json],
+        )?;
+        Ok(())
+    }
+
+    /// Atomic commit: inside a single `BEGIN IMMEDIATE`, verify the session
+    /// is still in `uploading` state, apply each ref update (with the same
+    /// CAS / create / force semantics as `update_ref`), capture per-ref
+    /// outcomes, and mark the session committed. On retry against an
+    /// already-committed session, returns the cached result without doing
+    /// any writes.
+    ///
+    /// The caller is responsible for having already promoted objects from
+    /// staging → live before invoking this. Ref updates that reference
+    /// missing objects will fail the reachability check higher in the stack.
+    pub fn commit_upload_session(
+        &self,
+        sid: &str,
+        updates: &[RefUpdateSpec<'_>],
+    ) -> Result<CommitSessionOutcome> {
+        dispatch_pg!(self, commit_upload_session, sid, updates);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let session: Option<(String, Option<String>)> = tx
+            .prepare("SELECT state, result_json FROM upload_sessions WHERE id = ?1")?
+            .query_row([sid], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .ok();
+
+        let (state, cached_result) = match session {
+            Some(s) => s,
+            None => return Ok(CommitSessionOutcome::Unknown),
+        };
+
+        match state.as_str() {
+            "committed" => {
+                return Ok(CommitSessionOutcome::AlreadyCommitted {
+                    result_json: cached_result.unwrap_or_default(),
+                });
+            }
+            "failed" | "abandoned" => {
+                return Ok(CommitSessionOutcome::TerminallyFailed {
+                    reason: state,
+                    result_json: cached_result.unwrap_or_default(),
+                });
+            }
+            "uploading" => {}
+            other => {
+                anyhow::bail!("unexpected upload session state: {other}");
+            }
+        }
+
+        let repo: String = tx
+            .prepare("SELECT repo FROM upload_sessions WHERE id = ?1")?
+            .query_row([sid], |r| r.get(0))?;
+
+        // Apply ref updates one at a time. The whole thing is inside a
+        // single IMMEDIATE transaction so the outcomes we record match the
+        // state we leave on disk.
+        let mut ref_results = Vec::with_capacity(updates.len());
+        for u in updates {
+            let success = apply_ref_update_tx(&tx, &repo, u)?;
+            let error = if success {
+                String::new()
+            } else if u.force {
+                "force update failed".to_string()
+            } else if u.old_hash.iter().all(|&b| b == 0) {
+                "ref already exists".to_string()
+            } else {
+                "ref has been updated by another client".to_string()
+            };
+            ref_results.push(RefUpdateOutcome {
+                ref_name: u.ref_name.to_string(),
+                success,
+                error,
+            });
+        }
+
+        let all_success = ref_results.iter().all(|r| r.success);
+        let now = chrono::Utc::now().timestamp();
+
+        let result_json = serde_json::to_string(&ref_results).unwrap_or_else(|_| "[]".into());
+
+        if all_success {
+            tx.execute(
+                "UPDATE upload_sessions
+                 SET state = 'committed', committed_at = ?2, result_json = ?3
+                 WHERE id = ?1",
+                rusqlite::params![sid, now, result_json],
+            )?;
+        } else {
+            // Leave session in 'uploading' so the client can adjust (e.g.
+            // rebase) and retry without losing its staged objects. The
+            // sweeper still reclaims if the client never retries.
+        }
+
+        tx.commit()?;
+
+        Ok(CommitSessionOutcome::Committed {
+            ref_results,
+            all_success,
+        })
+    }
+
+    /// Return (id, repo) for sessions eligible for garbage collection:
+    /// state = 'uploading' and expires_at <= cutoff, or state in
+    /// ('failed','abandoned','committed') older than the cutoff.
+    pub fn list_stale_upload_sessions(&self, cutoff_ts: i64) -> Result<Vec<(String, String)>> {
+        dispatch_pg!(self, list_stale_upload_sessions, cutoff_ts);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, repo FROM upload_sessions
+             WHERE (state = 'uploading' AND expires_at <= ?1)
+                OR (state IN ('failed','abandoned','committed') AND
+                    COALESCE(committed_at, created_at) <= ?1)",
+        )?;
+        let rows = stmt.query_map([cutoff_ts], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Delete a session row. Cascades to session_objects via FK. Caller is
+    /// responsible for having already cleaned up the staging directory.
+    pub fn delete_upload_session(&self, sid: &str) -> Result<()> {
+        dispatch_pg!(self, delete_upload_session, sid);
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM upload_sessions WHERE id = ?1", [sid])?;
+        Ok(())
+    }
+
+    // -- Pending repo ops (Phase 3b.5 durable drain queue) --
+    //
+    // S3 `rename_repo` / `delete_repo` can't be done atomically — they
+    // walk the bucket keyspace with CopyObject + DeleteObjects. The
+    // table persists the work item so a server restart mid-drain just
+    // picks it up on next boot. Claims use a visibility-timeout pattern
+    // (`not_before` bumped on claim, reset on completion/backoff) so a
+    // crashed worker doesn't wedge the op.
+
+    pub fn enqueue_repo_op(
+        &self,
+        op_type: &str,
+        repo: &str,
+        new_repo: Option<&str>,
+    ) -> Result<i64> {
+        dispatch_pg!(self, enqueue_repo_op, op_type, repo, new_repo);
+        if op_type != "rename" && op_type != "delete" {
+            anyhow::bail!("op_type must be 'rename' or 'delete', got '{op_type}'");
+        }
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO pending_repo_ops
+                (op_type, repo, new_repo, created_at, not_before, attempts)
+             VALUES (?1, ?2, ?3, ?4, 0, 0)",
+            rusqlite::params![op_type, repo, new_repo, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn claim_next_repo_op(&self, visibility_secs: i64) -> Result<Option<PendingRepoOp>> {
+        dispatch_pg!(self, claim_next_repo_op, visibility_secs);
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        let next_visible = now + visibility_secs;
+        let mut stmt = conn.prepare(
+            "UPDATE pending_repo_ops
+             SET not_before = ?1, attempts = attempts + 1
+             WHERE id = (
+                 SELECT id FROM pending_repo_ops
+                 WHERE not_before <= ?2
+                 ORDER BY created_at
+                 LIMIT 1
+             )
+             RETURNING id, op_type, repo, new_repo, attempts",
+        )?;
+        let row = stmt
+            .query_row(rusqlite::params![next_visible, now], |r| {
+                Ok(PendingRepoOp {
+                    id: r.get(0)?,
+                    op_type: r.get(1)?,
+                    repo: r.get(2)?,
+                    new_repo: r.get(3)?,
+                    attempts: r.get(4)?,
+                })
+            })
+            .ok();
+        Ok(row)
+    }
+
+    pub fn complete_repo_op(&self, id: i64) -> Result<()> {
+        dispatch_pg!(self, complete_repo_op, id);
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM pending_repo_ops WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn fail_repo_op(&self, id: i64, error: &str, retry_delay_secs: i64) -> Result<()> {
+        dispatch_pg!(self, fail_repo_op, id, error, retry_delay_secs);
+        let conn = self.conn()?;
+        let retry_at = chrono::Utc::now().timestamp() + retry_delay_secs;
+        conn.execute(
+            "UPDATE pending_repo_ops
+             SET last_error = ?2, not_before = ?3
+             WHERE id = ?1",
+            rusqlite::params![id, error, retry_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_pending_repo_ops(&self) -> Result<Vec<PendingRepoOp>> {
+        dispatch_pg!(self, list_pending_repo_ops,);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, op_type, repo, new_repo, attempts
+             FROM pending_repo_ops
+             ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PendingRepoOp {
+                id: r.get(0)?,
+                op_type: r.get(1)?,
+                repo: r.get(2)?,
+                new_repo: r.get(3)?,
+                attempts: r.get(4)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    // -- Metrics snapshot (Phase 7 observability) --
+
+    /// Cheap, read-only counts used by `/metrics`. One connection,
+    /// four `SELECT COUNT(*)` queries — SQLite WAL makes these
+    /// effectively free even mid-push, and the pool has 16 slots so
+    /// the scraper won't contend with handler work.
+    pub fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
+        dispatch_pg!(self, metrics_snapshot,);
+        let conn = self.conn()?;
+        let uploading_sessions: i64 = conn
+            .prepare("SELECT COUNT(*) FROM upload_sessions WHERE state = 'uploading'")?
+            .query_row([], |r| r.get(0))?;
+        let total_locks: i64 = conn
+            .prepare("SELECT COUNT(*) FROM locks")?
+            .query_row([], |r| r.get(0))?;
+        let total_repos: i64 = conn
+            .prepare("SELECT COUNT(*) FROM repos")?
+            .query_row([], |r| r.get(0))?;
+        let pending_repo_ops: i64 = conn
+            .prepare("SELECT COUNT(*) FROM pending_repo_ops")?
+            .query_row([], |r| r.get(0))?;
+        Ok(MetricsSnapshot {
+            uploading_sessions,
+            total_locks,
+            total_repos,
+            pending_repo_ops,
+        })
+    }
+
+    /// Liveness / readiness probe. Runs `SELECT 1` against a pooled
+    /// connection so a wedged pool or broken DB file shows up as a
+    /// 503 on `/readyz` instead of silently serving traffic.
+    pub fn ping(&self) -> Result<()> {
+        dispatch_pg!(self, ping,);
+        let conn = self.conn()?;
+        let _: i64 = conn.prepare("SELECT 1")?.query_row([], |r| r.get(0))?;
+        Ok(())
+    }
+
+    // -- Agents (Phase 2 distributed runners) --
+
+    pub fn create_agent_tables(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS agents (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT    NOT NULL UNIQUE,
+                token_hash  TEXT    NOT NULL,
+                labels_json TEXT    NOT NULL DEFAULT '[]',
+                version     TEXT    NOT NULL DEFAULT '',
+                os          TEXT    NOT NULL DEFAULT '',
+                last_seen   INTEGER,
+                created_at  INTEGER NOT NULL
+            );
+            -- Track which agent has claimed which run. Null claimed_by =
+            -- the server's in-process engine (embedded mode).
+            CREATE TABLE IF NOT EXISTS run_claims (
+                run_id      INTEGER PRIMARY KEY,
+                agent_id    INTEGER,
+                claimed_at  INTEGER NOT NULL
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_agent(
+        &self,
+        name: &str,
+        token_hash: &str,
+        labels_json: &str,
+        version: &str,
+        os: &str,
+    ) -> Result<i64> {
+        dispatch_pg_inherent!(self, upsert_agent, name, token_hash, labels_json, version, os);
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO agents (name, token_hash, labels_json, version, os, last_seen, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(name) DO UPDATE SET
+                labels_json = excluded.labels_json,
+                version     = excluded.version,
+                os          = excluded.os,
+                last_seen   = excluded.last_seen",
+            rusqlite::params![name, token_hash, labels_json, version, os, now],
+        )?;
+        let id: i64 = conn
+            .prepare("SELECT id FROM agents WHERE name = ?1")?
+            .query_row([name], |row| row.get(0))?;
+        Ok(id)
+    }
+
+    pub fn get_agent_by_name(&self, name: &str) -> Result<Option<(i64, String, String)>> {
+        dispatch_pg_inherent!(self, get_agent_by_name, name);
+        let conn = self.conn()?;
+        let result = conn
+            .prepare("SELECT id, token_hash, labels_json FROM agents WHERE name = ?1")?
+            .query_row([name], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok();
+        Ok(result)
+    }
+
+    pub fn get_agent_by_id(&self, id: i64) -> Result<Option<(String, String, String)>> {
+        dispatch_pg_inherent!(self, get_agent_by_id, id);
+        let conn = self.conn()?;
+        let result = conn
+            .prepare("SELECT name, token_hash, labels_json FROM agents WHERE id = ?1")?
+            .query_row([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok();
+        Ok(result)
+    }
+
+    pub fn touch_agent_last_seen(&self, id: i64) -> Result<()> {
+        dispatch_pg_inherent!(self, touch_agent_last_seen, id);
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE agents SET last_seen = ?1 WHERE id = ?2",
+            rusqlite::params![chrono::Utc::now().timestamp(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_agents(&self) -> Result<Vec<(i64, String, String, i64, String, String)>> {
+        // (id, name, labels_json, last_seen, version, os)
+        dispatch_pg_inherent!(self, list_agents,);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, labels_json, COALESCE(last_seen, 0), version, os
+             FROM agents ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn delete_agent(&self, id: i64) -> Result<bool> {
+        dispatch_pg_inherent!(self, delete_agent, id);
+        let conn = self.conn()?;
+        let n = conn.execute("DELETE FROM agents WHERE id = ?1", [id])?;
+        Ok(n > 0)
+    }
+
+    /// Atomically claim the oldest queued run whose workflow doesn't
+    /// require labels the agent is missing. Returns (run_id) on success
+    /// or None when no work is available.
+    pub fn claim_next_run(&self, agent_id: i64, _agent_labels: &[String]) -> Result<Option<i64>> {
+        dispatch_pg_inherent!(self, claim_next_run, agent_id, _agent_labels);
+        // v1 label routing is permissive: if the run has no claim yet and
+        // is queued, any agent can take it. Full label matching lands when
+        // runs-on is parsed out of the workflow YAML in Phase 3.
+        let mut conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        // BEGIN IMMEDIATE so the write lock is reserved up front. With a
+        // deferred txn, the SELECT-then-INSERT pattern can hit
+        // SQLITE_BUSY when another writer lands between the two
+        // statements under pool contention.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let candidate: Option<i64> = tx
+            .prepare(
+                "SELECT r.id FROM workflow_runs r
+                 LEFT JOIN run_claims c ON c.run_id = r.id
+                 WHERE r.status = 'queued' AND c.run_id IS NULL
+                 ORDER BY r.created_at ASC LIMIT 1",
+            )?
+            .query_row([], |row| row.get(0))
+            .ok();
+        if let Some(run_id) = candidate {
+            tx.execute(
+                "INSERT INTO run_claims (run_id, agent_id, claimed_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![run_id, agent_id, now],
+            )?;
+            tx.execute(
+                "UPDATE workflow_runs SET status = 'running', started_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, run_id],
+            )?;
+            tx.commit()?;
+            Ok(Some(run_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Find runs claimed by agents whose `last_seen` is older than
+    /// `cutoff_ts` (or never). Drops the claim and re-queues the run so
+    /// another agent can pick it up. Returns the number of runs requeued.
+    pub fn requeue_stale_runs(&self, cutoff_ts: i64) -> Result<usize> {
+        dispatch_pg_inherent!(self, requeue_stale_runs, cutoff_ts);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Collect stale (run_id, agent_id) pairs first; we need the ids
+        // to scope the workflow_runs reset to runs still in 'running'.
+        let mut stmt = tx.prepare(
+            "SELECT c.run_id, c.agent_id
+             FROM run_claims c
+             JOIN agents a ON a.id = c.agent_id
+             WHERE COALESCE(a.last_seen, 0) < ?1",
+        )?;
+        let stale: Vec<(i64, i64)> = stmt
+            .query_map([cutoff_ts], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut n = 0usize;
+        for (run_id, _agent_id) in &stale {
+            tx.execute("DELETE FROM run_claims WHERE run_id = ?1", [run_id])?;
+            // Only rewind runs that are still 'running'; if the agent
+            // already reported success/failure we must not flip them back.
+            let changed = tx.execute(
+                "UPDATE workflow_runs
+                 SET status = 'queued', started_at = NULL
+                 WHERE id = ?1 AND status = 'running'",
+                [run_id],
+            )?;
+            if changed > 0 {
+                n += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    pub fn get_run_claim_agent(&self, run_id: i64) -> Result<Option<i64>> {
+        dispatch_pg_inherent!(self, get_run_claim_agent, run_id);
+        let conn = self.conn()?;
+        let result = conn
+            .prepare("SELECT agent_id FROM run_claims WHERE run_id = ?1")?
+            .query_row([run_id], |row: &rusqlite::Row| row.get::<_, i64>(0))
+            .ok();
+        Ok(result)
+    }
+
+    // -- Secrets --
+
+    pub fn create_secrets_tables(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS secrets (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo         TEXT    NOT NULL,
+                key          TEXT    NOT NULL,
+                nonce        BLOB    NOT NULL,
+                ciphertext   BLOB    NOT NULL,
+                created_at   INTEGER NOT NULL,
+                updated_at   INTEGER NOT NULL,
+                UNIQUE(repo, key)
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_secret(
+        &self,
+        repo: &str,
+        key: &str,
+        nonce: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<()> {
+        dispatch_pg_inherent!(self, upsert_secret, repo, key, nonce, ciphertext);
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO secrets (repo, key, nonce, ciphertext, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(repo, key) DO UPDATE SET
+                nonce = excluded.nonce,
+                ciphertext = excluded.ciphertext,
+                updated_at = excluded.updated_at",
+            rusqlite::params![repo, key, nonce, ciphertext, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_secret(&self, repo: &str, key: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        dispatch_pg_inherent!(self, get_secret, repo, key);
+        let conn = self.conn()?;
+        let result = conn
+            .prepare("SELECT nonce, ciphertext FROM secrets WHERE repo = ?1 AND key = ?2")?
+            .query_row(rusqlite::params![repo, key], |row: &rusqlite::Row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .ok();
+        Ok(result)
+    }
+
+    pub fn delete_secret(&self, repo: &str, key: &str) -> Result<bool> {
+        dispatch_pg_inherent!(self, delete_secret, repo, key);
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "DELETE FROM secrets WHERE repo = ?1 AND key = ?2",
+            rusqlite::params![repo, key],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn list_secret_keys(
+        &self,
+        repo: &str,
+    ) -> Result<Vec<crate::services::secrets::SecretMeta>> {
+        dispatch_pg_inherent!(self, list_secret_keys, repo);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT repo, key, created_at, updated_at FROM secrets WHERE repo = ?1 ORDER BY key",
+        )?;
+        let rows = stmt.query_map([repo], |row: &rusqlite::Row| {
+            Ok(crate::services::secrets::SecretMeta {
+                repo: row.get(0)?,
+                key: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     // -- Repos --
 
     pub fn list_repos(&self) -> Result<Vec<RepoRecord>> {
+        dispatch_pg!(self, list_repos,);
         let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("SELECT name, description, created_at, visibility, default_branch FROM repos")?;
+        let mut stmt = conn.prepare(
+            "SELECT name, description, created_at, visibility, default_branch FROM repos",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok(RepoRecord {
                 name: row.get(0)?,
@@ -196,11 +1234,10 @@ impl MetadataDb {
     /// repo doesn't exist. Used by the gRPC interceptor's read-path authz
     /// check to allow anonymous clones of public repos.
     pub fn get_repo_visibility(&self, name: &str) -> Result<Option<String>> {
+        dispatch_pg!(self, get_repo_visibility, name);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT visibility FROM repos WHERE name = ?1")?;
-        let result = stmt
-            .query_row([name], |row| row.get::<_, String>(0))
-            .ok();
+        let result = stmt.query_row([name], |row| row.get::<_, String>(0)).ok();
         Ok(result)
     }
 
@@ -209,12 +1246,27 @@ impl MetadataDb {
     /// exist — the latter is fine because the read handler will fail later
     /// with NotFound.
     pub fn is_repo_public(&self, name: &str) -> bool {
-        matches!(self.get_repo_visibility(name).ok().flatten().as_deref(), Some("public"))
+        // The dispatch_pg! macro short-circuits Result-returning
+        // methods. is_repo_public returns plain bool, so we have
+        // to inline the bounce-off-runtime dance here.
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = self.pg.as_ref() {
+            let pg = pg.clone();
+            let name = name.to_string();
+            return crate::storage::db::block_pg(move || {
+                crate::storage::backend::MetadataBackend::is_repo_public(pg.as_ref(), &name)
+            });
+        }
+        matches!(
+            self.get_repo_visibility(name).ok().flatten().as_deref(),
+            Some("public")
+        )
     }
 
     /// Set the visibility of a repo. Returns true on success, false if the
     /// repo doesn't exist.
     pub fn set_repo_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        dispatch_pg!(self, set_repo_visibility, name, visibility);
         if visibility != "private" && visibility != "public" {
             anyhow::bail!("visibility must be 'private' or 'public'");
         }
@@ -227,6 +1279,7 @@ impl MetadataDb {
     }
 
     pub fn create_repo(&self, name: &str, description: &str) -> Result<bool> {
+        dispatch_pg!(self, create_repo, name, description);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let affected = conn.execute(
@@ -237,6 +1290,7 @@ impl MetadataDb {
     }
 
     pub fn update_repo(&self, name: &str, new_name: &str, description: &str) -> Result<bool> {
+        dispatch_pg!(self, update_repo, name, new_name, description);
         let mut conn = self.conn()?;
 
         // Check that the repo exists.
@@ -261,7 +1315,7 @@ impl MetadataDb {
             }
         }
 
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         tx.execute(
             "UPDATE repos SET name = ?1, description = ?2 WHERE name = ?3",
@@ -285,8 +1339,9 @@ impl MetadataDb {
     }
 
     pub fn delete_repo(&self, name: &str) -> Result<bool> {
+        dispatch_pg!(self, delete_repo, name);
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let affected = tx.execute("DELETE FROM repos WHERE name = ?1", [name])?;
         tx.execute("DELETE FROM refs WHERE repo = ?1", [name])?;
         tx.execute("DELETE FROM locks WHERE repo = ?1", [name])?;
@@ -297,15 +1352,19 @@ impl MetadataDb {
     // -- Refs --
 
     pub fn get_ref(&self, repo: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        dispatch_pg!(self, get_ref, repo, name);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT hash FROM refs WHERE repo = ?1 AND name = ?2")?;
         let result = stmt
-            .query_row(rusqlite::params![repo, name], |row| row.get::<_, Vec<u8>>(0))
+            .query_row(rusqlite::params![repo, name], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
             .ok();
         Ok(result)
     }
 
     pub fn get_all_refs(&self, repo: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        dispatch_pg!(self, get_all_refs, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT name, hash FROM refs WHERE repo = ?1")?;
         let rows = stmt.query_map([repo], |row| {
@@ -337,6 +1396,7 @@ impl MetadataDb {
         new_hash: &[u8],
         force: bool,
     ) -> Result<bool> {
+        dispatch_pg!(self, update_ref, repo, name, old_hash, new_hash, force);
         let conn = self.conn()?;
 
         if force {
@@ -381,6 +1441,7 @@ impl MetadataDb {
         workspace_id: &str,
         reason: &str,
     ) -> Result<std::result::Result<(), LockInfo>> {
+        dispatch_pg!(self, acquire_lock, repo, path, owner, workspace_id, reason);
         let conn = self.conn()?;
 
         // Check if already locked.
@@ -411,9 +1472,13 @@ impl MetadataDb {
     }
 
     pub fn release_lock(&self, repo: &str, path: &str, owner: &str, force: bool) -> Result<bool> {
+        dispatch_pg!(self, release_lock, repo, path, owner, force);
         let conn = self.conn()?;
         let affected = if force {
-            conn.execute("DELETE FROM locks WHERE repo = ?1 AND path = ?2", rusqlite::params![repo, path])?
+            conn.execute(
+                "DELETE FROM locks WHERE repo = ?1 AND path = ?2",
+                rusqlite::params![repo, path],
+            )?
         } else {
             conn.execute(
                 "DELETE FROM locks WHERE repo = ?1 AND path = ?2 AND owner = ?3",
@@ -423,7 +1488,13 @@ impl MetadataDb {
         Ok(affected > 0)
     }
 
-    pub fn list_locks(&self, repo: &str, path_prefix: &str, owner_filter: &str) -> Result<Vec<LockInfo>> {
+    pub fn list_locks(
+        &self,
+        repo: &str,
+        path_prefix: &str,
+        owner_filter: &str,
+    ) -> Result<Vec<LockInfo>> {
+        dispatch_pg!(self, list_locks, repo, path_prefix, owner_filter);
         let conn = self.conn()?;
         let mut locks = Vec::new();
 
@@ -442,15 +1513,18 @@ impl MetadataDb {
             "SELECT path, owner, workspace_id, created_at, reason FROM locks WHERE repo = ?1 AND path LIKE ?2 AND owner LIKE ?3 LIMIT 10000"
         )?;
 
-        let rows = stmt.query_map(rusqlite::params![repo, prefix_pattern, owner_pattern], |row| {
-            Ok(LockInfo {
-                path: row.get(0)?,
-                owner: row.get(1)?,
-                workspace_id: row.get(2)?,
-                created_at: row.get(3)?,
-                reason: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![repo, prefix_pattern, owner_pattern],
+            |row| {
+                Ok(LockInfo {
+                    path: row.get(0)?,
+                    owner: row.get(1)?,
+                    workspace_id: row.get(2)?,
+                    created_at: row.get(3)?,
+                    reason: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                })
+            },
+        )?;
 
         for row in rows {
             locks.push(row?);
@@ -461,7 +1535,14 @@ impl MetadataDb {
 
     // -- Issues --
 
-    pub fn list_issues(&self, repo: &str, status: &str, limit: i32, offset: i32) -> Result<(Vec<IssueRecord>, i32, i32, i32)> {
+    pub fn list_issues(
+        &self,
+        repo: &str,
+        status: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<(Vec<IssueRecord>, i32, i32, i32)> {
+        dispatch_pg_inherent!(self, list_issues, repo, status, limit, offset);
         let conn = self.conn()?;
         let lim = if limit <= 0 { 50 } else { limit };
 
@@ -485,14 +1566,25 @@ impl MetadataDb {
             stmt.query_map(rusqlite::params![repo, lim, offset], Self::map_issue)?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map(rusqlite::params![repo, lim, offset, status], Self::map_issue)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
+            stmt.query_map(
+                rusqlite::params![repo, lim, offset, status],
+                Self::map_issue,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?
         };
 
         Ok((rows, total, open_count, closed_count))
     }
 
-    pub fn create_issue(&self, repo: &str, title: &str, body: &str, author: &str, labels: &str) -> Result<i64> {
+    pub fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        author: &str,
+        labels: &str,
+    ) -> Result<i64> {
+        dispatch_pg_inherent!(self, create_issue, repo, title, body, author, labels);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -504,6 +1596,7 @@ impl MetadataDb {
 
     /// Get a single issue by ID.
     pub fn get_issue(&self, id: i64) -> Result<Option<IssueRecord>> {
+        dispatch_pg_inherent!(self, get_issue, id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, title, body, author, status, labels, created_at, updated_at, comment_count, assignee FROM issues WHERE id = ?1")?
@@ -513,7 +1606,16 @@ impl MetadataDb {
     }
 
     /// Partial update: empty strings mean "keep current value".
-    pub fn update_issue(&self, id: i64, title: &str, body: &str, status: &str, labels: &str, assignee: &str) -> Result<bool> {
+    pub fn update_issue(
+        &self,
+        id: i64,
+        title: &str,
+        body: &str,
+        status: &str,
+        labels: &str,
+        assignee: &str,
+    ) -> Result<bool> {
+        dispatch_pg_inherent!(self, update_issue, id, title, body, status, labels, assignee);
         let current = self.get_issue(id)?;
         let current = match current {
             Some(c) => c,
@@ -522,11 +1624,27 @@ impl MetadataDb {
 
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
-        let new_title = if title.is_empty() { &current.title } else { title };
+        let new_title = if title.is_empty() {
+            &current.title
+        } else {
+            title
+        };
         let new_body = if body.is_empty() { &current.body } else { body };
-        let new_status = if status.is_empty() { &current.status } else { status };
-        let new_labels = if labels.is_empty() { &current.labels } else { labels };
-        let new_assignee = if assignee.is_empty() { &current.assignee } else { assignee };
+        let new_status = if status.is_empty() {
+            &current.status
+        } else {
+            status
+        };
+        let new_labels = if labels.is_empty() {
+            &current.labels
+        } else {
+            labels
+        };
+        let new_assignee = if assignee.is_empty() {
+            &current.assignee
+        } else {
+            assignee
+        };
 
         let affected = conn.execute(
             "UPDATE issues SET title = ?1, body = ?2, status = ?3, labels = ?4, assignee = ?5, updated_at = ?6 WHERE id = ?7",
@@ -553,7 +1671,14 @@ impl MetadataDb {
 
     // -- Pull Requests --
 
-    pub fn list_pull_requests(&self, repo: &str, status: &str, limit: i32, offset: i32) -> Result<(Vec<PullRequestRecord>, i32, i32, i32)> {
+    pub fn list_pull_requests(
+        &self,
+        repo: &str,
+        status: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<(Vec<PullRequestRecord>, i32, i32, i32)> {
+        dispatch_pg_inherent!(self, list_pull_requests, repo, status, limit, offset);
         let conn = self.conn()?;
         let lim = if limit <= 0 { 50 } else { limit };
 
@@ -584,7 +1709,27 @@ impl MetadataDb {
         Ok((rows, total, open_count, closed_count))
     }
 
-    pub fn create_pull_request(&self, repo: &str, title: &str, body: &str, author: &str, source_branch: &str, target_branch: &str, labels: &str) -> Result<i64> {
+    pub fn create_pull_request(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        author: &str,
+        source_branch: &str,
+        target_branch: &str,
+        labels: &str,
+    ) -> Result<i64> {
+        dispatch_pg_inherent!(
+            self,
+            create_pull_request,
+            repo,
+            title,
+            body,
+            author,
+            source_branch,
+            target_branch,
+            labels
+        );
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -596,6 +1741,7 @@ impl MetadataDb {
 
     /// Get a single pull request by ID.
     pub fn get_pull_request(&self, id: i64) -> Result<Option<PullRequestRecord>> {
+        dispatch_pg_inherent!(self, get_pull_request, id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at, comment_count, assignee FROM pull_requests WHERE id = ?1")?
@@ -605,7 +1751,25 @@ impl MetadataDb {
     }
 
     /// Partial update: empty strings mean "keep current value".
-    pub fn update_pull_request(&self, id: i64, title: &str, body: &str, status: &str, labels: &str, assignee: &str) -> Result<bool> {
+    pub fn update_pull_request(
+        &self,
+        id: i64,
+        title: &str,
+        body: &str,
+        status: &str,
+        labels: &str,
+        assignee: &str,
+    ) -> Result<bool> {
+        dispatch_pg_inherent!(
+            self,
+            update_pull_request,
+            id,
+            title,
+            body,
+            status,
+            labels,
+            assignee
+        );
         let current = self.get_pull_request(id)?;
         let current = match current {
             Some(c) => c,
@@ -614,11 +1778,27 @@ impl MetadataDb {
 
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
-        let new_title = if title.is_empty() { &current.title } else { title };
+        let new_title = if title.is_empty() {
+            &current.title
+        } else {
+            title
+        };
         let new_body = if body.is_empty() { &current.body } else { body };
-        let new_status = if status.is_empty() { &current.status } else { status };
-        let new_labels = if labels.is_empty() { &current.labels } else { labels };
-        let new_assignee = if assignee.is_empty() { &current.assignee } else { assignee };
+        let new_status = if status.is_empty() {
+            &current.status
+        } else {
+            status
+        };
+        let new_labels = if labels.is_empty() {
+            &current.labels
+        } else {
+            labels
+        };
+        let new_assignee = if assignee.is_empty() {
+            &current.assignee
+        } else {
+            assignee
+        };
 
         let affected = conn.execute(
             "UPDATE pull_requests SET title = ?1, body = ?2, status = ?3, labels = ?4, assignee = ?5, updated_at = ?6 WHERE id = ?7",
@@ -630,6 +1810,7 @@ impl MetadataDb {
     // -- Default branch --
 
     pub fn get_default_branch(&self, repo: &str) -> Result<String> {
+        dispatch_pg_inherent!(self, get_default_branch, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT default_branch FROM repos WHERE name = ?1")?;
         let result = stmt
@@ -640,6 +1821,7 @@ impl MetadataDb {
     }
 
     pub fn set_default_branch(&self, repo: &str, branch: &str) -> Result<bool> {
+        dispatch_pg_inherent!(self, set_default_branch, repo, branch);
         let conn = self.conn()?;
         let n = conn.execute(
             "UPDATE repos SET default_branch = ?1 WHERE name = ?2",
@@ -650,7 +1832,13 @@ impl MetadataDb {
 
     // -- Comments --
 
-    pub fn list_comments(&self, repo: &str, issue_id: i64, kind: &str) -> Result<Vec<CommentRecord>> {
+    pub fn list_comments(
+        &self,
+        repo: &str,
+        issue_id: i64,
+        kind: &str,
+    ) -> Result<Vec<CommentRecord>> {
+        dispatch_pg_inherent!(self, list_comments, repo, issue_id, kind);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, issue_id, kind, author, body, created_at, updated_at
@@ -672,7 +1860,15 @@ impl MetadataDb {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn create_comment(&self, repo: &str, issue_id: i64, kind: &str, author: &str, body: &str) -> Result<i64> {
+    pub fn create_comment(
+        &self,
+        repo: &str,
+        issue_id: i64,
+        kind: &str,
+        author: &str,
+        body: &str,
+    ) -> Result<i64> {
+        dispatch_pg_inherent!(self, create_comment, repo, issue_id, kind, author, body);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -681,7 +1877,11 @@ impl MetadataDb {
         )?;
         let id = conn.last_insert_rowid();
         // Increment comment_count on the parent
-        let table = if kind == "pull_request" { "pull_requests" } else { "issues" };
+        let table = if kind == "pull_request" {
+            "pull_requests"
+        } else {
+            "issues"
+        };
         conn.execute(
             &format!("UPDATE {table} SET comment_count = comment_count + 1 WHERE id = ?1"),
             [issue_id],
@@ -690,6 +1890,7 @@ impl MetadataDb {
     }
 
     pub fn update_comment(&self, id: i64, body: &str) -> Result<bool> {
+        dispatch_pg_inherent!(self, update_comment, id, body);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let n = conn.execute(
@@ -700,6 +1901,7 @@ impl MetadataDb {
     }
 
     pub fn delete_comment(&self, id: i64) -> Result<bool> {
+        dispatch_pg_inherent!(self, delete_comment, id);
         let conn = self.conn()?;
         // Get the comment first to decrement the parent's count
         let comment: Option<(String, i64, String)> = conn
@@ -709,7 +1911,11 @@ impl MetadataDb {
         let n = conn.execute("DELETE FROM comments WHERE id = ?1", [id])?;
         if n > 0 {
             if let Some((_repo, issue_id, kind)) = comment {
-                let table = if kind == "pull_request" { "pull_requests" } else { "issues" };
+                let table = if kind == "pull_request" {
+                    "pull_requests"
+                } else {
+                    "issues"
+                };
                 conn.execute(
                     &format!("UPDATE {table} SET comment_count = CASE WHEN comment_count > 0 THEN comment_count - 1 ELSE 0 END WHERE id = ?1"),
                     [issue_id],
@@ -720,6 +1926,7 @@ impl MetadataDb {
     }
 
     pub fn get_comment(&self, id: i64) -> Result<Option<CommentRecord>> {
+        dispatch_pg_inherent!(self, get_comment, id);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, issue_id, kind, author, body, created_at, updated_at FROM comments WHERE id = ?1",
@@ -802,6 +2009,119 @@ pub struct LockInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct UploadSessionRecord {
+    pub id: String,
+    pub repo: String,
+    pub user_id: Option<i64>,
+    pub state: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub committed_at: Option<i64>,
+    pub result_json: Option<String>,
+    pub failure: Option<String>,
+}
+
+/// Cheap gauge bundle for the `/metrics` endpoint. Refreshed on
+/// every scrape; holds no state between scrapes.
+#[derive(Debug, Clone, Default)]
+pub struct MetricsSnapshot {
+    pub uploading_sessions: i64,
+    pub total_locks: i64,
+    pub total_repos: i64,
+    pub pending_repo_ops: i64,
+}
+
+/// Row shape for the Phase 3b.5 durable-drain queue.
+///
+/// Rows sit in `pending_repo_ops` until a drain worker claims, executes,
+/// and deletes them. `op_type` is `"rename"` (needs `new_repo`) or
+/// `"delete"` (leaves `new_repo` null). `attempts` counts how many
+/// times this row has been claimed — a climbing value indicates a
+/// persistently-failing op that operators should investigate.
+#[derive(Debug, Clone)]
+pub struct PendingRepoOp {
+    pub id: i64,
+    pub op_type: String,
+    pub repo: String,
+    pub new_repo: Option<String>,
+    pub attempts: i32,
+}
+
+/// One ref update inside an atomic CommitPush. Borrowed to avoid cloning
+/// hash buffers on the hot path.
+#[derive(Debug, Clone)]
+pub struct RefUpdateSpec<'a> {
+    pub ref_name: &'a str,
+    pub old_hash: &'a [u8],
+    pub new_hash: &'a [u8],
+    pub force: bool,
+}
+
+/// Per-ref outcome captured inside the commit transaction.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RefUpdateOutcome {
+    pub ref_name: String,
+    pub success: bool,
+    pub error: String,
+}
+
+/// High-level result of `commit_upload_session`.
+#[derive(Debug)]
+pub enum CommitSessionOutcome {
+    /// Session id is not known to the server.
+    Unknown,
+    /// First-time commit completed. `all_success` is false when one or
+    /// more refs failed their CAS (the session is left in 'uploading' so
+    /// the client can rebase + retry without re-uploading objects).
+    Committed {
+        ref_results: Vec<RefUpdateOutcome>,
+        all_success: bool,
+    },
+    /// Retry against an already-committed session. The client should
+    /// decode `result_json` and return the same response it would have
+    /// gotten the first time.
+    AlreadyCommitted { result_json: String },
+    /// Retry against a session that was already failed. Client surfaces
+    /// the prior outcome to the user (the session cannot be revived —
+    /// start a new push).
+    TerminallyFailed { reason: String, result_json: String },
+}
+
+/// Apply one ref update using the same semantics as [`MetadataDb::update_ref`]
+/// but inside an existing transaction. Kept private — callers go through
+/// [`MetadataDb::commit_upload_session`].
+fn apply_ref_update_tx(
+    tx: &rusqlite::Transaction<'_>,
+    repo: &str,
+    u: &RefUpdateSpec<'_>,
+) -> Result<bool> {
+    if u.force {
+        let affected = tx.execute(
+            "INSERT INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)
+             ON CONFLICT(repo, name) DO UPDATE SET hash = excluded.hash",
+            rusqlite::params![repo, u.ref_name, u.new_hash],
+        )?;
+        return Ok(affected > 0);
+    }
+
+    let is_create = u.old_hash.iter().all(|&b| b == 0);
+
+    let affected = if is_create {
+        tx.execute(
+            "INSERT OR IGNORE INTO refs (repo, name, hash) VALUES (?1, ?2, ?3)",
+            rusqlite::params![repo, u.ref_name, u.new_hash],
+        )?
+    } else {
+        tx.execute(
+            "UPDATE refs SET hash = ?1 WHERE repo = ?2 AND name = ?3 AND hash = ?4",
+            rusqlite::params![u.new_hash, repo, u.ref_name, u.old_hash],
+        )?
+    };
+
+    Ok(affected > 0)
+}
+
+#[derive(Debug, Clone)]
 pub struct RepoRecord {
     pub name: String,
     pub description: String,
@@ -820,6 +2140,145 @@ pub struct CommentRecord {
     pub body: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl crate::storage::backend::MetadataBackend for MetadataDb {
+    fn list_repos(&self) -> Result<Vec<RepoRecord>> {
+        MetadataDb::list_repos(self)
+    }
+    fn get_repo_visibility(&self, name: &str) -> Result<Option<String>> {
+        MetadataDb::get_repo_visibility(self, name)
+    }
+    fn is_repo_public(&self, name: &str) -> bool {
+        MetadataDb::is_repo_public(self, name)
+    }
+    fn set_repo_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        MetadataDb::set_repo_visibility(self, name, visibility)
+    }
+    fn create_repo(&self, name: &str, description: &str) -> Result<bool> {
+        MetadataDb::create_repo(self, name, description)
+    }
+    fn update_repo(&self, name: &str, new_name: &str, description: &str) -> Result<bool> {
+        MetadataDb::update_repo(self, name, new_name, description)
+    }
+    fn delete_repo(&self, name: &str) -> Result<bool> {
+        MetadataDb::delete_repo(self, name)
+    }
+
+    fn get_ref(&self, repo: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        MetadataDb::get_ref(self, repo, name)
+    }
+    fn get_all_refs(&self, repo: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        MetadataDb::get_all_refs(self, repo)
+    }
+    fn update_ref(
+        &self,
+        repo: &str,
+        name: &str,
+        old_hash: &[u8],
+        new_hash: &[u8],
+        force: bool,
+    ) -> Result<bool> {
+        MetadataDb::update_ref(self, repo, name, old_hash, new_hash, force)
+    }
+
+    fn acquire_lock(
+        &self,
+        repo: &str,
+        path: &str,
+        owner: &str,
+        workspace_id: &str,
+        reason: &str,
+    ) -> Result<std::result::Result<(), LockInfo>> {
+        MetadataDb::acquire_lock(self, repo, path, owner, workspace_id, reason)
+    }
+    fn release_lock(&self, repo: &str, path: &str, owner: &str, force: bool) -> Result<bool> {
+        MetadataDb::release_lock(self, repo, path, owner, force)
+    }
+    fn list_locks(
+        &self,
+        repo: &str,
+        path_prefix: &str,
+        owner_filter: &str,
+    ) -> Result<Vec<LockInfo>> {
+        MetadataDb::list_locks(self, repo, path_prefix, owner_filter)
+    }
+
+    fn create_upload_session(
+        &self,
+        sid: &str,
+        repo: &str,
+        user_id: Option<i64>,
+        ttl_seconds: i64,
+    ) -> Result<()> {
+        MetadataDb::create_upload_session(self, sid, repo, user_id, ttl_seconds)
+    }
+    fn record_session_object(&self, sid: &str, hash: &[u8], size: i64) -> Result<()> {
+        MetadataDb::record_session_object(self, sid, hash, size)
+    }
+    fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>> {
+        MetadataDb::get_upload_session(self, sid)
+    }
+    fn list_session_object_hashes(&self, sid: &str) -> Result<Vec<Vec<u8>>> {
+        MetadataDb::list_session_object_hashes(self, sid)
+    }
+    fn list_session_objects_with_sizes(&self, sid: &str) -> Result<Vec<(Vec<u8>, i64)>> {
+        MetadataDb::list_session_objects_with_sizes(self, sid)
+    }
+    fn fail_upload_session(&self, sid: &str, reason: &str, result_json: &str) -> Result<()> {
+        MetadataDb::fail_upload_session(self, sid, reason, result_json)
+    }
+    fn commit_upload_session(
+        &self,
+        sid: &str,
+        updates: &[RefUpdateSpec<'_>],
+    ) -> Result<CommitSessionOutcome> {
+        MetadataDb::commit_upload_session(self, sid, updates)
+    }
+    fn list_stale_upload_sessions(&self, cutoff_ts: i64) -> Result<Vec<(String, String)>> {
+        MetadataDb::list_stale_upload_sessions(self, cutoff_ts)
+    }
+    fn delete_upload_session(&self, sid: &str) -> Result<()> {
+        MetadataDb::delete_upload_session(self, sid)
+    }
+
+    fn enqueue_repo_op(&self, op_type: &str, repo: &str, new_repo: Option<&str>) -> Result<i64> {
+        MetadataDb::enqueue_repo_op(self, op_type, repo, new_repo)
+    }
+    fn claim_next_repo_op(&self, visibility_secs: i64) -> Result<Option<PendingRepoOp>> {
+        MetadataDb::claim_next_repo_op(self, visibility_secs)
+    }
+    fn complete_repo_op(&self, id: i64) -> Result<()> {
+        MetadataDb::complete_repo_op(self, id)
+    }
+    fn fail_repo_op(&self, id: i64, error: &str, retry_delay_secs: i64) -> Result<()> {
+        MetadataDb::fail_repo_op(self, id, error, retry_delay_secs)
+    }
+    fn list_pending_repo_ops(&self) -> Result<Vec<PendingRepoOp>> {
+        MetadataDb::list_pending_repo_ops(self)
+    }
+
+    fn current_schema_version(&self) -> Result<i64> {
+        MetadataDb::current_schema_version(self)
+    }
+
+    fn apply_pending_migrations(&self) -> Result<usize> {
+        let current = MetadataDb::current_schema_version(self)?;
+        let mut conn = self.conn()?;
+        crate::storage::migrations::apply_pending(
+            &mut conn,
+            current,
+            crate::storage::migrations::SQLITE_MIGRATIONS,
+        )
+    }
+
+    fn ping(&self) -> Result<()> {
+        MetadataDb::ping(self)
+    }
+
+    fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
+        MetadataDb::metrics_snapshot(self)
+    }
 }
 
 #[cfg(test)]
@@ -871,7 +2330,9 @@ mod tests {
         assert!(!ok);
         // The original hash is preserved.
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xAA)
         );
     }
@@ -883,11 +2344,19 @@ mod tests {
             .unwrap();
         // CAS update with the right old_hash succeeds.
         let ok = db
-            .update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xBB), false)
+            .update_ref(
+                "alice/forcetest",
+                "refs/heads/main",
+                &h(0xAA),
+                &h(0xBB),
+                false,
+            )
             .unwrap();
         assert!(ok);
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xBB)
         );
     }
@@ -898,16 +2367,30 @@ mod tests {
         db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
             .unwrap();
         // Someone else moved the ref to 0xBB
-        db.update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xBB), false)
-            .unwrap();
+        db.update_ref(
+            "alice/forcetest",
+            "refs/heads/main",
+            &h(0xAA),
+            &h(0xBB),
+            false,
+        )
+        .unwrap();
         // We try to update assuming it's still 0xAA — must fail.
         let ok = db
-            .update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xCC), false)
+            .update_ref(
+                "alice/forcetest",
+                "refs/heads/main",
+                &h(0xAA),
+                &h(0xCC),
+                false,
+            )
             .unwrap();
         assert!(!ok);
         // And the existing ref is untouched.
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xBB)
         );
     }
@@ -920,11 +2403,19 @@ mod tests {
         // Force-push to a totally unrelated hash, with a stale old_hash to
         // prove force bypasses the CAS check.
         let ok = db
-            .update_ref("alice/forcetest", "refs/heads/main", &h(0xDE), &h(0xCC), true)
+            .update_ref(
+                "alice/forcetest",
+                "refs/heads/main",
+                &h(0xDE),
+                &h(0xCC),
+                true,
+            )
             .unwrap();
         assert!(ok);
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xCC)
         );
     }
@@ -938,7 +2429,9 @@ mod tests {
             .unwrap();
         assert!(ok);
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/dev").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/dev")
+                .unwrap()
+                .unwrap(),
             h(0xEE)
         );
     }
@@ -955,8 +2448,351 @@ mod tests {
             .unwrap();
         assert!(ok);
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xAA)
         );
+    }
+
+    // ── upload sessions (Phase 1 atomic push) ───────────────────────────
+
+    #[test]
+    fn session_create_is_idempotent() {
+        let (_tmp, db) = fresh_db();
+        // First create — inserts.
+        db.create_upload_session("sid-1", "alice/forcetest", Some(42), 60)
+            .unwrap();
+        // Second call is a silent no-op via INSERT OR IGNORE.
+        db.create_upload_session("sid-1", "alice/forcetest", Some(99), 60)
+            .unwrap();
+
+        let rec = db.get_upload_session("sid-1").unwrap().unwrap();
+        assert_eq!(rec.id, "sid-1");
+        assert_eq!(rec.state, "uploading");
+        // First insertion wins — user_id stays 42, not 99.
+        assert_eq!(rec.user_id, Some(42));
+    }
+
+    #[test]
+    fn session_objects_dedup() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
+        db.record_session_object("sid-1", &h(0x11), 100).unwrap();
+        // Duplicate hash must not blow up; INSERT OR IGNORE handles it.
+        db.record_session_object("sid-1", &h(0x11), 100).unwrap();
+        db.record_session_object("sid-1", &h(0x22), 200).unwrap();
+
+        let hashes = db.list_session_object_hashes("sid-1").unwrap();
+        assert_eq!(hashes.len(), 2, "dup hash should not produce dup row");
+        assert!(hashes.iter().any(|h| h == &vec![0x11u8; 32]));
+        assert!(hashes.iter().any(|h| h == &vec![0x22u8; 32]));
+    }
+
+    #[test]
+    fn commit_session_applies_ref_and_marks_committed() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
+
+        let update = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xAA),
+            force: false,
+        };
+        let outcome = db.commit_upload_session("sid-1", &[update]).unwrap();
+        match outcome {
+            CommitSessionOutcome::Committed {
+                ref_results,
+                all_success,
+            } => {
+                assert!(all_success);
+                assert_eq!(ref_results.len(), 1);
+                assert!(ref_results[0].success);
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+        // Ref is in place.
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
+            h(0xAA)
+        );
+        // Session marked committed.
+        let rec = db.get_upload_session("sid-1").unwrap().unwrap();
+        assert_eq!(rec.state, "committed");
+        assert!(rec.committed_at.is_some());
+    }
+
+    #[test]
+    fn commit_session_is_idempotent_on_retry() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
+
+        let update = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xAA),
+            force: false,
+        };
+
+        // First commit moves the ref and marks session committed.
+        let first = db
+            .commit_upload_session("sid-1", &[update.clone()])
+            .unwrap();
+        assert!(matches!(first, CommitSessionOutcome::Committed { .. }));
+
+        // Retry against the same session returns AlreadyCommitted WITHOUT
+        // re-applying the ref. This is what makes a CommitPush retry safe
+        // when the client loses its connection between the stream and the
+        // commit reply.
+        let retry = db.commit_upload_session("sid-1", &[update]).unwrap();
+        match retry {
+            CommitSessionOutcome::AlreadyCommitted { result_json } => {
+                assert!(result_json.contains("refs/heads/main"));
+            }
+            other => panic!("expected AlreadyCommitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit_session_cas_failure_leaves_session_uploading() {
+        let (_tmp, db) = fresh_db();
+        // Start with main@0xAA already there (someone else won the race).
+        db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
+            .unwrap();
+
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
+
+        // Our push thinks main was at zero — a stale view.
+        let stale = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xBB),
+            force: false,
+        };
+        let outcome = db.commit_upload_session("sid-1", &[stale]).unwrap();
+        match outcome {
+            CommitSessionOutcome::Committed {
+                ref_results,
+                all_success,
+            } => {
+                assert!(!all_success);
+                assert_eq!(ref_results.len(), 1);
+                assert!(!ref_results[0].success);
+            }
+            other => panic!("expected Committed with failure, got {other:?}"),
+        }
+
+        // Session is NOT marked committed so the client can re-plan (pull,
+        // rebase, retry) without re-uploading objects.
+        let rec = db.get_upload_session("sid-1").unwrap().unwrap();
+        assert_eq!(rec.state, "uploading");
+
+        // Ref is unchanged.
+        assert_eq!(
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
+            h(0xAA)
+        );
+    }
+
+    #[test]
+    fn commit_session_rejects_unknown_id() {
+        let (_tmp, db) = fresh_db();
+        let update = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xAA),
+            force: false,
+        };
+        let outcome = db
+            .commit_upload_session("does-not-exist", &[update])
+            .unwrap();
+        assert!(matches!(outcome, CommitSessionOutcome::Unknown));
+    }
+
+    #[test]
+    fn commit_session_surfaces_prior_failure() {
+        let (_tmp, db) = fresh_db();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
+        db.fail_upload_session("sid-1", "lock_conflict", "[]")
+            .unwrap();
+
+        let update = RefUpdateSpec {
+            ref_name: "refs/heads/main",
+            old_hash: &ZERO,
+            new_hash: &h(0xAA),
+            force: false,
+        };
+        let outcome = db.commit_upload_session("sid-1", &[update]).unwrap();
+        match outcome {
+            CommitSessionOutcome::TerminallyFailed { reason, .. } => {
+                assert_eq!(reason, "failed");
+            }
+            other => panic!("expected TerminallyFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_version_records_baseline_then_migrations() {
+        let (_tmp, db) = fresh_db();
+        // Baseline is 1; the runner_bootstrap_check migration bumps to
+        // at least 2. Future phases may push this higher — assert ≥ 2
+        // rather than == 2 so this test doesn't need touching every
+        // time a new migration lands.
+        let v = db.current_schema_version().unwrap();
+        assert!(
+            v >= 2,
+            "expected migrations to advance schema_version past baseline, got {v}"
+        );
+    }
+
+    #[test]
+    fn migration_runner_is_idempotent_across_opens() {
+        // Open, close, re-open against the same DB file — the second
+        // open() must be a no-op from the runner's perspective.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("forge.db");
+        let v1 = {
+            let db = MetadataDb::open(&path).unwrap();
+            db.current_schema_version().unwrap()
+        };
+        let v2 = {
+            let db = MetadataDb::open(&path).unwrap();
+            db.current_schema_version().unwrap()
+        };
+        assert_eq!(v1, v2, "re-open must not change schema_version");
+
+        // And the runner_bootstrap_check sentinel row is still there
+        // exactly once (confirming ON CONFLICT DO NOTHING held).
+        let db = MetadataDb::open(&path).unwrap();
+        let conn = db.conn().unwrap();
+        let count: i64 = conn
+            .prepare("SELECT COUNT(*) FROM schema_runner_check")
+            .unwrap()
+            .query_row([], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "bootstrap-check row must be singleton");
+    }
+
+    #[test]
+    fn migration_apply_pending_detects_ascending_only() {
+        // The runner's debug-only invariant: migration versions must
+        // ascend strictly. Constructing an out-of-order list and
+        // passing it through apply_pending would trip the assert —
+        // we verify the same condition logically here so Postgres (or
+        // future maintainers) can't accidentally land a regression.
+        use crate::storage::migrations::SQLITE_MIGRATIONS;
+        let mut prev: i64 = 0;
+        for m in SQLITE_MIGRATIONS {
+            assert!(
+                m.version > prev,
+                "migration {} must have a higher version than {}",
+                m.name,
+                prev
+            );
+            prev = m.version;
+        }
+    }
+
+    /// Regression guard for Phase 2a's core change: with the single
+    /// Mutex gone, concurrent readers + writers must interleave instead
+    /// of serialising. This test fails fast against the pre-Phase-2a
+    /// design because every lock contention would be waited on
+    /// sequentially; the pooled design completes in sub-second wall
+    /// time on a laptop.
+    #[test]
+    fn concurrent_reads_and_writes_do_not_deadlock() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = TempDir::new().unwrap();
+        let db = Arc::new(MetadataDb::open(&tmp.path().join("forge.db")).unwrap());
+        db.create_repo("alice/pool", "").unwrap();
+        // Seed a few refs so readers have something to scan.
+        for b in 0u8..8 {
+            db.update_ref(
+                "alice/pool",
+                &format!("refs/heads/b{b}"),
+                &ZERO,
+                &h(b),
+                false,
+            )
+            .unwrap();
+        }
+
+        let start = std::time::Instant::now();
+        let mut handles = Vec::new();
+
+        // 24 readers, hammering get_all_refs + list_locks.
+        for _ in 0..24 {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for _ in 0..200 {
+                    let refs = db.get_all_refs("alice/pool").unwrap();
+                    assert!(refs.len() >= 8);
+                    let _ = db.list_locks("alice/pool", "", "").unwrap();
+                }
+            }));
+        }
+
+        // 8 writers, each claiming a disjoint lock path so SQLITE_BUSY
+        // should not surface (WAL + BEGIN IMMEDIATE + busy_timeout).
+        for i in 0..8 {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for j in 0..25 {
+                    let path = format!("Content/path_{i}_{j}.uasset");
+                    db.acquire_lock("alice/pool", &path, &format!("writer-{i}"), "ws", "")
+                        .unwrap()
+                        .unwrap_or_else(|_| panic!("lock conflict unexpected in disjoint paths"));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let elapsed = start.elapsed();
+        // Sanity cap: 24 readers × 400 ops + 8 writers × 25 ops = ~9.8K
+        // metadata ops. On a workstation SSD this should complete well
+        // under two seconds with the pooled design; anything past 10s
+        // is a regression to the single-Mutex era.
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "32-way pool workload took {:?}, regression vs pooled design",
+            elapsed
+        );
+
+        // Writers landed exactly 200 locks.
+        let locks = db.list_locks("alice/pool", "", "").unwrap();
+        assert_eq!(locks.len(), 200);
+    }
+
+    #[test]
+    fn stale_sessions_surface_for_sweeping() {
+        let (_tmp, db) = fresh_db();
+        // Short TTL so the session is immediately stale in wall-clock
+        // terms once we query with a future cutoff.
+        db.create_upload_session("sid-stale", "alice/forcetest", None, 60)
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        // Pretend 24h have passed.
+        let list = db.list_stale_upload_sessions(now + 24 * 3600).unwrap();
+        assert!(list.iter().any(|(sid, _)| sid == "sid-stale"));
+
+        // Delete and confirm.
+        db.delete_upload_session("sid-stale").unwrap();
+        let list = db.list_stale_upload_sessions(now + 24 * 3600).unwrap();
+        assert!(list.iter().all(|(sid, _)| sid != "sid-stale"));
     }
 }

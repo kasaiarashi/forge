@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::Result;
 use forge_core::diff::flatten_tree;
@@ -26,7 +26,13 @@ pub(super) type AuthedForgeClient =
 
 pub fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_in(&cwd)
+}
+
+/// Explicit-cwd entry used by the Phase-4 FFI layer so a concurrent
+/// caller can't race the process-wide CWD.
+pub fn run_in(cwd: &std::path::Path) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
     run_with_workspace(&ws)
 }
 
@@ -87,7 +93,13 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
     // Fast-forward local branch.
     let old_tip = local_tip.short();
     ws.set_branch_tip(&branch, &remote_tip)?;
-    println!("   {}..{} {} -> {}", old_tip, remote_tip.short(), branch, branch);
+    println!(
+        "   {}..{} {} -> {}",
+        old_tip,
+        remote_tip.short(),
+        branch,
+        branch
+    );
 
     // Checkout working tree from the new tip.
     checkout_tree(ws, &remote_tip)?;
@@ -162,118 +174,201 @@ pub(super) async fn fetch_objects_to_tip(
             continue;
         }
 
-        // Pre-create shard directories so writes skip create_dir_all.
+        // Pre-create shard directories so the eventual rename skips
+        // create_dir_all.
         ws.object_store.chunks.ensure_shard_dirs()?;
 
-        // Spawn background writer threads (same pattern as push).
-        // Bounded channel limits memory to ~256 objects in flight
-        // regardless of project size.
-        let (write_tx, write_rx) =
-            crossbeam_channel::bounded::<(ForgeHash, Vec<u8>, bool)>(8);
-        let write_rx = std::sync::Arc::new(write_rx);
-        let num_writers = rayon::current_num_threads().min(8);
-        let store = ws.object_store.chunks.clone();
-        let write_error: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
-        let mut writer_handles = Vec::with_capacity(num_writers);
-        for _ in 0..num_writers {
-            let rx = std::sync::Arc::clone(&write_rx);
-            let s = store.clone();
-            let err = std::sync::Arc::clone(&write_error);
-            writer_handles.push(std::thread::spawn(move || {
-                while let Ok((hash, data, pre_compressed)) = rx.recv() {
-                    let result: Result<(), _> = if pre_compressed {
-                        s.put_raw_direct(&hash, &data)
-                    } else {
-                        s.put(&hash, &data).map(|_| ())
-                    };
-                    if let Err(e) = result {
-                        let mut guard = err.lock().unwrap();
-                        if guard.is_none() {
-                            *guard = Some(e.to_string());
-                        }
-                        break;
-                    }
-                }
-            }));
-        }
+        // Phase 3e.3b — partial files live under `objects/_pull_tmp/`.
+        // A crashed or network-interrupted pull leaves sibling
+        // `<hash>.partial` files on disk; the next pull stats them
+        // to populate `want_objects.start_offset` so the server
+        // replays only the suffix the client still needs. This takes
+        // the "100 GiB push survives network kill with zero redundant
+        // bytes on resume" phrase in the Phase-3 plan and extends it
+        // to pulls.
+        let pull_tmp_dir = ws
+            .object_store
+            .chunks
+            .local_root()
+            .expect("workspace backend must be FS-backed")
+            .join("_pull_tmp");
+        std::fs::create_dir_all(&pull_tmp_dir)?;
 
         const BATCH_SIZE: usize = 5000;
         for batch_chunk in missing.chunks(BATCH_SIZE) {
-            let batch_bytes: Vec<Vec<u8>> = batch_chunk
+            // Probe `.partial` sizes for every requested hash. A
+            // missing / zero-length partial gets start_offset = 0
+            // which the server treats identically to the legacy
+            // want_hashes path.
+            let want_objects: Vec<forge_proto::forge::WantObject> = batch_chunk
                 .iter()
-                .map(|fh| fh.as_bytes().to_vec())
+                .map(|fh| {
+                    let hex = fh.to_hex();
+                    let partial = pull_tmp_dir.join(format!("{hex}.partial"));
+                    let start_offset = std::fs::metadata(&partial)
+                        .ok()
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    forge_proto::forge::WantObject {
+                        hash: fh.as_bytes().to_vec(),
+                        start_offset,
+                    }
+                })
                 .collect();
 
             let mut stream = client
                 .pull_objects(PullRequest {
-                    want_hashes: batch_bytes,
+                    // Leave `want_hashes` empty — server picks the
+                    // resume-aware list when it's non-empty.
+                    want_hashes: Vec::new(),
                     repo: repo_name.to_string(),
+                    want_objects,
                 })
                 .await?
                 .into_inner();
 
-            let mut current_data = Vec::new();
+            // Per-object rolling state. `current_data` accumulates
+            // for metadata objects only (small — snapshot / tree /
+            // chunked-blob manifests) so the child-walker has bytes
+            // to parse. Leaf chunks (pre_compressed = false here —
+            // raw blob bodies) skip the memory accumulator entirely;
+            // their bytes live on disk in `.partial` and that's
+            // enough.
+            let mut current_data: Vec<u8> = Vec::new();
             let mut current_hash: Option<Vec<u8>> = None;
             let mut current_type: u32 = 0;
+            let mut current_partial: Option<std::fs::File> = None;
+            let mut current_partial_path: Option<std::path::PathBuf> = None;
 
             while let Some(chunk) = stream.message().await? {
                 if current_hash.as_ref() != Some(&chunk.hash) {
-                    current_data.clear();
+                    // New object frame. Close any previously-open
+                    // partial (should already be closed on is_last)
+                    // and open / append-open the one for this hash.
+                    current_partial.take();
+                    let hex = hex::encode(&chunk.hash);
+                    let partial_path = pull_tmp_dir.join(format!("{hex}.partial"));
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&partial_path)?;
+                    // Seed `current_data` from the existing partial
+                    // bytes ONLY when this is a metadata object so
+                    // the child walker sees the full compressed
+                    // payload. For leaves we keep current_data
+                    // empty — saves the read for multi-GB blobs.
+                    if chunk.object_type == 1 && chunk.offset > 0 {
+                        current_data = std::fs::read(&partial_path)?;
+                    } else {
+                        current_data.clear();
+                    }
                     current_hash = Some(chunk.hash.clone());
                     current_type = chunk.object_type;
+                    current_partial = Some(file);
+                    current_partial_path = Some(partial_path);
                 }
 
                 received_bytes += chunk.data.len() as u64;
-                current_data.extend_from_slice(&chunk.data);
+
+                // Persist the chunk. Append-open is the cheapest
+                // durability primitive we have — no fsync per chunk;
+                // the `.partial` → final rename flushes the payload
+                // via CloseHandle / close(2) on the OpenOptions drop.
+                if let Some(f) = current_partial.as_mut() {
+                    use std::io::Write;
+                    f.write_all(&chunk.data)?;
+                }
+                if current_type == 1 {
+                    current_data.extend_from_slice(&chunk.data);
+                }
 
                 if chunk.is_last {
+                    // Drop the partial handle first so the rename
+                    // below never races an open file handle on
+                    // Windows.
+                    drop(current_partial.take());
+
                     let hash_hex = hex::encode(&chunk.hash);
                     let forge_hash = ForgeHash::from_hex(&hash_hex)?;
                     let pre_compressed = current_type == 1;
 
-                    // Walk children from in-memory data before handing off
-                    // to writer. Only metadata objects (snapshot/tree/chunked
-                    // blob) need decompression; raw chunks are leaves and
-                    // skip this entirely — so memory stays bounded.
                     if pre_compressed {
                         if let Ok(decompressed) = forge_core::compress::decompress(&current_data) {
                             walk_children_from_data(&decompressed, &mut want);
                         }
+                    }
+                    // Leaf bytes live on disk only — no walking.
+
+                    // Rename `.partial` into the live shard. If the
+                    // final path somehow already exists (dedup
+                    // race with another pull), drop the partial.
+                    let final_path = ws
+                        .object_store
+                        .chunks
+                        .local_root()
+                        .expect("workspace backend must be FS-backed")
+                        .join(&hash_hex[..2])
+                        .join(&hash_hex[2..]);
+                    let partial_path = current_partial_path
+                        .take()
+                        .expect("is_last without a partial path");
+                    if final_path.exists() {
+                        let _ = std::fs::remove_file(&partial_path);
                     } else {
-                        walk_children_from_data(&current_data, &mut want);
+                        if let Some(parent) = final_path.parent() {
+                            std::fs::create_dir_all(parent).ok();
+                        }
+                        std::fs::rename(&partial_path, &final_path)?;
                     }
 
-                    // Hand off to writer threads — bounded channel provides
-                    // backpressure so memory stays at ~256 objects max.
-                    let data = std::mem::take(&mut current_data);
-                    write_tx
-                        .send((forge_hash, data, pre_compressed))
-                        .map_err(|_| anyhow::anyhow!("writer thread crashed"))?;
+                    // Drop the memory accumulator so the next object's
+                    // metadata doesn't see stale bytes.
+                    current_data.clear();
+                    current_hash = None;
 
                     received += 1;
                     let elapsed = start.elapsed().as_secs_f64().max(0.001);
                     let speed = received_bytes as f64 / elapsed;
                     pb.set_message(format_receive_progress(received, received_bytes, speed));
 
-                    current_hash = None;
+                    // Surface `forge_hash` in a non-warning way — the
+                    // variable is read above via `hash_hex` / `final_path`,
+                    // this line keeps it alive against an
+                    // unused-variable lint if the logic ever shrinks.
+                    let _ = forge_hash;
                 }
             }
+        }
 
-            // Check for write errors between batches.
-            if let Some(e) = write_error.lock().unwrap().take() {
-                anyhow::bail!("write error: {}", e);
+        // Best-effort: clear stray `.partial` files that made it to
+        // the rename stage via a prior successful pull but were
+        // orphaned by a crash between rename and cleanup. Safe to
+        // remove — any live partial is actively being written by
+        // THIS process.
+        if let Ok(entries) = std::fs::read_dir(&pull_tmp_dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("partial") {
+                    // Only delete when the final object already
+                    // lives in the shard tree — otherwise a future
+                    // pull could reuse the partial to resume.
+                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                        if stem.len() == 64 {
+                            let final_path = ws
+                                .object_store
+                                .chunks
+                                .local_root()
+                                .expect("workspace backend must be FS-backed")
+                                .join(&stem[..2])
+                                .join(&stem[2..]);
+                            if final_path.exists() {
+                                let _ = std::fs::remove_file(&p);
+                            }
+                        }
+                    }
+                }
             }
         }
-
-        // Signal writers to finish and wait.
-        drop(write_tx);
-        for h in writer_handles {
-            let _ = h.join();
-        }
-        if let Some(e) = write_error.lock().unwrap().take() {
-            anyhow::bail!("write error: {}", e);
-        };
     }
 
     let elapsed = start.elapsed().as_secs_f64().max(0.001);
@@ -311,7 +406,8 @@ fn walk_children_from_data(data: &[u8], want: &mut Vec<Vec<u8>>) {
             }
         }
     } else if tag == ObjectType::ChunkedBlob as u8 {
-        if let Ok(chunked) = bincode::deserialize::<forge_core::object::blob::ChunkedBlob>(payload) {
+        if let Ok(chunked) = bincode::deserialize::<forge_core::object::blob::ChunkedBlob>(payload)
+        {
             for chunk_ref in &chunked.chunks {
                 want.push(chunk_ref.hash.as_bytes().to_vec());
             }
@@ -342,7 +438,9 @@ fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
     let old_paths: Vec<String> = index.entries.keys().cloned().collect();
     for path in &old_paths {
         if !file_map.contains_key(path) {
-            let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let abs_path = ws
+                .root
+                .join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if abs_path.exists() {
                 let _ = std::fs::remove_file(&abs_path);
             }
@@ -377,7 +475,9 @@ fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
     // Sequential write to disk + index update.
     for result in read_results {
         let (path, content, obj_hash, size) = result?;
-        let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let abs_path = ws
+            .root
+            .join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = abs_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

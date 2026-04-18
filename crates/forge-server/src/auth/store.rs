@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! User, session, PAT, and per-repo ACL persistence.
 //!
@@ -157,7 +157,8 @@ pub trait UserStore: Send + Sync {
         scopes: &[Scope],
         expires_at: Option<i64>,
     ) -> Result<(PersonalAccessToken, PatPlaintext)>;
-    fn find_pat_by_plaintext(&self, plaintext: &str) -> Result<Option<(PersonalAccessToken, User)>>;
+    fn find_pat_by_plaintext(&self, plaintext: &str)
+        -> Result<Option<(PersonalAccessToken, User)>>;
     fn list_pats_for_user(&self, user_id: i64) -> Result<Vec<PersonalAccessToken>>;
     fn revoke_pat(&self, pat_id: i64) -> Result<bool>;
     fn touch_pat(&self, pat_id: i64) -> Result<()>;
@@ -232,8 +233,7 @@ fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     })
 }
 
-const SESSION_COLUMNS: &str =
-    "id, user_id, created_at, last_used_at, expires_at, user_agent, ip";
+const SESSION_COLUMNS: &str = "id, user_id, created_at, last_used_at, expires_at, user_agent, ip";
 
 fn map_pat(row: &rusqlite::Row<'_>) -> Result<PersonalAccessToken> {
     let scopes_str: String = row.get(4).map_err(|e| anyhow!("get scopes: {e}"))?;
@@ -248,8 +248,7 @@ fn map_pat(row: &rusqlite::Row<'_>) -> Result<PersonalAccessToken> {
     })
 }
 
-const PAT_COLUMNS: &str =
-    "id, name, user_id, created_at, scopes, last_used_at, expires_at";
+const PAT_COLUMNS: &str = "id, name, user_id, created_at, scopes, last_used_at, expires_at";
 
 impl UserStore for SqliteUserStore {
     // ── Users ───────────────────────────────────────────────────────────────
@@ -301,9 +300,7 @@ impl UserStore for SqliteUserStore {
         let conn = self.db.conn()?;
         let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE username = ?1");
         let mut stmt = conn.prepare(&sql)?;
-        let result = stmt
-            .query_row(params![username], map_user)
-            .optional()?;
+        let result = stmt.query_row(params![username], map_user).optional()?;
         Ok(result)
     }
 
@@ -360,9 +357,7 @@ impl UserStore for SqliteUserStore {
 
     fn verify_password(&self, username: &str, password: &str) -> Result<Option<User>> {
         let conn = self.db.conn()?;
-        let sql = format!(
-            "SELECT {USER_COLUMNS}, password_hash FROM users WHERE username = ?1"
-        );
+        let sql = format!("SELECT {USER_COLUMNS}, password_hash FROM users WHERE username = ?1");
         let row = conn
             .prepare(&sql)?
             .query_row(params![username], |row| {
@@ -444,10 +439,7 @@ impl UserStore for SqliteUserStore {
             "SELECT s.{}, s.token_hash, u.{}
              FROM sessions s JOIN users u ON u.id = s.user_id
              WHERE s.token_prefix = ?1",
-            SESSION_COLUMNS
-                .split(", ")
-                .collect::<Vec<_>>()
-                .join(", s."),
+            SESSION_COLUMNS.split(", ").collect::<Vec<_>>().join(", s."),
             USER_COLUMNS.split(", ").collect::<Vec<_>>().join(", u.")
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -543,17 +535,17 @@ impl UserStore for SqliteUserStore {
         Ok((pat, token))
     }
 
-    fn find_pat_by_plaintext(&self, plaintext: &str) -> Result<Option<(PersonalAccessToken, User)>> {
+    fn find_pat_by_plaintext(
+        &self,
+        plaintext: &str,
+    ) -> Result<Option<(PersonalAccessToken, User)>> {
         let prefix = tokens::prefix_of(plaintext);
         let conn = self.db.conn()?;
         let sql = format!(
             "SELECT p.{}, p.token_hash, u.{}
              FROM personal_access_tokens p JOIN users u ON u.id = p.user_id
              WHERE p.token_prefix = ?1",
-            PAT_COLUMNS
-                .split(", ")
-                .collect::<Vec<_>>()
-                .join(", p."),
+            PAT_COLUMNS.split(", ").collect::<Vec<_>>().join(", p."),
             USER_COLUMNS.split(", ").collect::<Vec<_>>().join(", u.")
         );
         let mut stmt = conn.prepare(&sql)?;

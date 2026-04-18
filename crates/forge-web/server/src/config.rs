@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,41 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub web: WebConfig,
     pub server: ServerConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+/// Logging + audit sinks. Mirrors `forge-server`'s `LoggingSection`: file
+/// sinks use daily rotation, `format` accepts `text` or `json`, and an
+/// empty `dir` disables file logging (stdout-only behaviour).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default = "default_log_format")]
+    pub format: String,
+    #[serde(default)]
+    pub dir: PathBuf,
+    #[serde(default)]
+    pub stdout: bool,
+}
+
+fn default_log_level() -> String {
+    "info".into()
+}
+fn default_log_format() -> String {
+    "text".into()
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            format: default_log_format(),
+            dir: PathBuf::new(),
+            stdout: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +231,7 @@ impl Default for Config {
                 grpc_url: default_grpc_url(),
                 ca_cert_path: None,
             },
+            logging: LoggingConfig::default(),
         }
     }
 }

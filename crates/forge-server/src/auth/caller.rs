@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! The [`Caller`] is the authenticated identity attached to every request
 //! that flows through the gRPC interceptor (phase 3).

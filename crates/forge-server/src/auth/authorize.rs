@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Per-handler authorization helpers.
 //!
@@ -54,9 +54,10 @@ pub fn require_repo_read(
     if auth.is_server_admin {
         return Ok(());
     }
-    let role = store
-        .get_repo_role(repo, auth.user_id)
-        .map_err(|e| { tracing::error!(error = %e, "repo role lookup"); Status::internal("internal server error") })?;
+    let role = store.get_repo_role(repo, auth.user_id).map_err(|e| {
+        tracing::error!(error = %e, "repo role lookup");
+        Status::internal("internal server error")
+    })?;
     match role {
         Some(r) if r.satisfies(RepoRole::Read) => Ok(()),
         _ => Err(Status::permission_denied(format!(
@@ -78,9 +79,10 @@ pub fn require_repo_write(
     if auth.is_server_admin {
         return Ok(());
     }
-    let role = store
-        .get_repo_role(repo, auth.user_id)
-        .map_err(|e| { tracing::error!(error = %e, "repo role lookup"); Status::internal("internal server error") })?;
+    let role = store.get_repo_role(repo, auth.user_id).map_err(|e| {
+        tracing::error!(error = %e, "repo role lookup");
+        Status::internal("internal server error")
+    })?;
     match role {
         Some(r) if r.satisfies(RepoRole::Write) => Ok(()),
         _ => Err(Status::permission_denied(format!(
@@ -101,9 +103,10 @@ pub fn require_repo_admin(
     if auth.is_server_admin {
         return Ok(());
     }
-    let role = store
-        .get_repo_role(repo, auth.user_id)
-        .map_err(|e| { tracing::error!(error = %e, "repo role lookup"); Status::internal("internal server error") })?;
+    let role = store.get_repo_role(repo, auth.user_id).map_err(|e| {
+        tracing::error!(error = %e, "repo role lookup");
+        Status::internal("internal server error")
+    })?;
     match role {
         Some(RepoRole::Admin) => Ok(()),
         _ => Err(Status::permission_denied(format!(
@@ -129,7 +132,9 @@ pub fn require_server_admin(caller: &Caller) -> Result<(), Status> {
 /// Allow the operation for any logged-in caller. No repo or scope check.
 /// Used by `WhoAmI`, `ListMySessions`, `ListPersonalAccessTokens`, and
 /// any other "act on my own account" endpoint.
-pub fn require_authenticated(caller: &Caller) -> Result<&super::caller::AuthenticatedCaller, Status> {
+pub fn require_authenticated(
+    caller: &Caller,
+) -> Result<&super::caller::AuthenticatedCaller, Status> {
     match caller {
         Caller::Authenticated(a) => Ok(a),
         Caller::Anonymous => Err(Status::unauthenticated("login required")),

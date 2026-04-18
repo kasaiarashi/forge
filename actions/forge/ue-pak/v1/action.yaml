@@ -1,0 +1,28 @@
+# UE Pak — package cooked content into .pak/.utoc/.ucas.
+# Encryption key MUST come from secrets; the primitive rejects any other
+# source for the `encryption_key` input.
+name: UE Pak
+inputs:
+  project:
+    required: true
+  cooked_dir:
+    required: true
+  output:
+    default: "./Saved/Packaged/default.pak"
+  encryption_key:
+    default: ""
+  engine_version:
+    default: "5.7"
+steps:
+  - name: Discover UE
+    id: ue
+    uses: "@builtin/ue-discover"
+    with:
+      version: "${{ inputs.engine_version }}"
+  - name: Pack
+    uses: "@builtin/unreal-pak"
+    with:
+      unreal_pak: "${{ steps.ue.outputs.unreal_pak_path }}"
+      cooked_dir: "${{ inputs.cooked_dir }}"
+      output: "${{ inputs.output }}"
+      encryption_key: "${{ inputs.encryption_key }}"

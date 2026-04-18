@@ -11,12 +11,29 @@ use crate::credentials;
 
 pub fn run(message: Option<String>, all: bool, amend: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_in(&cwd, message, all, amend, json)
+}
+
+/// Variant that takes an explicit starting directory so the Phase-4
+/// FFI layer can drive commit without mutating the process-wide CWD.
+pub fn run_in(
+    cwd: &std::path::Path,
+    message: Option<String>,
+    all: bool,
+    amend: bool,
+    json: bool,
+) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
     let mut index = Index::load(&ws.forge_dir().join("index"))?;
 
     // If --all, auto-stage all modified/deleted files.
     if all {
         auto_stage(&ws, &mut index)?;
+        // auto_stage shells out to `add::run` for modified/untracked files,
+        // which rewrites the index on disk. Reload so the in-memory copy
+        // reflects those staged entries — otherwise the staged-filter below
+        // sees the pre-stage snapshot and bails with "Nothing staged".
+        index = Index::load(&ws.forge_dir().join("index"))?;
     }
 
     let staged: Vec<(String, forge_core::index::IndexEntry)> = index

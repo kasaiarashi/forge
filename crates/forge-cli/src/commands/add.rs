@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::{Context, Result};
 use forge_core::chunk::{self, ChunkResult};
@@ -20,9 +20,17 @@ struct CompressedChunk {
 
 pub fn run(paths: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
-    let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
-        .unwrap_or_default();
+    run_in(&cwd, paths)
+}
+
+/// Variant that takes an explicit starting directory. The CLI's
+/// process-wide `run()` uses `std::env::current_dir()` above; the
+/// Phase-4 FFI layer ([`crate::ops::add`]) calls this one so a
+/// concurrent caller can't race the global CWD.
+pub fn run_in(cwd: &Path, paths: Vec<String>) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
+    let ignore =
+        forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore")).unwrap_or_default();
 
     // 1. Collect all file paths first (fast walk).
     let mut file_paths: Vec<PathBuf> = Vec::new();
@@ -58,10 +66,7 @@ pub fn run(paths: Vec<String>) -> Result<()> {
                 .filter_map(|e| e.ok())
             {
                 if entry.file_type().is_file() {
-                    let rel = entry
-                        .path()
-                        .strip_prefix(&ws.root)
-                        .unwrap_or(entry.path());
+                    let rel = entry.path().strip_prefix(&ws.root).unwrap_or(entry.path());
                     let rel_str = rel.to_string_lossy().replace('\\', "/");
                     if !ignore.is_ignored(&rel_str) {
                         file_paths.push(entry.into_path());
@@ -92,7 +97,9 @@ pub fn run(paths: Vec<String>) -> Result<()> {
             })
         };
         if dominated {
-            let abs = ws.root.join(idx_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let abs = ws
+                .root
+                .join(idx_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if !abs.exists() {
                 deleted_paths.push(idx_path.clone());
             }
@@ -110,9 +117,10 @@ pub fn run(paths: Vec<String>) -> Result<()> {
         if let Some(entry) = index.get(&rel_path) {
             // Check if content changed using mtime + size fast path.
             if let Ok(metadata) = std::fs::metadata(abs_path) {
-                if let Ok(mtime) = metadata.modified().and_then(|m| {
-                    Ok(m.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
-                }) {
+                if let Ok(mtime) = metadata
+                    .modified()
+                    .and_then(|m| Ok(m.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default()))
+                {
                     if mtime.as_secs() as i64 == entry.mtime_secs
                         && mtime.subsec_nanos() == entry.mtime_nanos
                         && metadata.len() == entry.size

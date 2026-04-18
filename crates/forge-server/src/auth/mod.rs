@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 // Phase 1 ships the persistence layer that phases 2/3/4 will consume.
 // Until those land, most items in this module have no in-crate caller.
@@ -29,10 +29,15 @@ pub mod caller;
 pub mod interceptor;
 pub mod password;
 pub mod store;
+#[cfg(feature = "postgres")]
+pub mod store_postgres;
 pub mod tokens;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "postgres-tests"))]
+mod tests_postgres;
 
 // Phase-1 ergonomic re-exports. Downstream phases (interceptor, gRPC service,
 // CLI subcommands) will import from here rather than the submodules. Marked
@@ -42,8 +47,7 @@ mod tests;
 pub use caller::{AuthenticatedCaller, Caller, CredentialKind};
 #[allow(unused_imports)]
 pub use store::{
-    NewUser, PersonalAccessToken, RepoRole, Session, SessionToken, SqliteUserStore, User,
-    UserStore,
+    NewUser, PersonalAccessToken, RepoRole, Session, SessionToken, SqliteUserStore, User, UserStore,
 };
 #[allow(unused_imports)]
 pub use tokens::{PatPlaintext, Scope};

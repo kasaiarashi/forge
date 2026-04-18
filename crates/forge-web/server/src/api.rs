@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -333,7 +333,10 @@ pub async fn update_repo(
     let visibility = body.visibility.unwrap_or_default();
     let default_branch = body.default_branch.unwrap_or_default();
 
-    match grpc.update_repo(&repo, &new_name, &description, &visibility, &default_branch).await {
+    match grpc
+        .update_repo(&repo, &new_name, &description, &visibility, &default_branch)
+        .await
+    {
         Ok(resp) => {
             if resp.success {
                 (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
@@ -350,10 +353,7 @@ pub async fn update_repo(
 }
 
 /// DELETE /api/repos/:repo -- delete a repo.
-pub async fn delete_repo(
-    State(state): State<Arc<AppState>>,
-    Path(repo): Path<String>,
-) -> Response {
+pub async fn delete_repo(State(state): State<Arc<AppState>>, Path(repo): Path<String>) -> Response {
     let grpc = match state.grpc_client().await {
         Ok(c) => c,
         Err(e) => return internal_error(e),
@@ -471,7 +471,11 @@ pub async fn get_tree(
                 .entries
                 .into_iter()
                 .map(|e| {
-                    let asset_class = if e.asset_class.is_empty() { None } else { Some(e.asset_class) };
+                    let asset_class = if e.asset_class.is_empty() {
+                        None
+                    } else {
+                        Some(e.asset_class)
+                    };
                     TreeEntryJson {
                         name: e.name,
                         kind: e.kind,
@@ -513,7 +517,10 @@ pub async fn get_blob(
         Err(e) => return internal_error(e),
     };
 
-    match grpc.get_file_content(&repo, &commit_hash, &query.path).await {
+    match grpc
+        .get_file_content(&repo, &commit_hash, &query.path)
+        .await
+    {
         Ok(resp) => {
             let content = if resp.is_binary {
                 None
@@ -555,23 +562,24 @@ pub async fn get_raw(
         Err(e) => return internal_error(e),
     };
 
-    match grpc.get_file_content(&repo, &commit_hash, &query.path).await {
+    match grpc
+        .get_file_content(&repo, &commit_hash, &query.path)
+        .await
+    {
         Ok(resp) => {
             // Basename of the requested path. Percent-encode it for both the
             // ASCII-fallback `filename=` and the RFC 5987 `filename*` form so
             // a commit that contains quotes, semicolons, or non-ASCII
             // characters cannot inject header content.
             let raw_name = query.path.rsplit('/').next().unwrap_or("file");
-            let encoded: String =
-                utf8_percent_encode(raw_name, DISPOSITION_FILENAME).collect();
+            let encoded: String = utf8_percent_encode(raw_name, DISPOSITION_FILENAME).collect();
             let content_type = if resp.is_binary {
                 "application/octet-stream"
             } else {
                 "text/plain; charset=utf-8"
             };
-            let disposition = format!(
-                "attachment; filename=\"{encoded}\"; filename*=UTF-8''{encoded}"
-            );
+            let disposition =
+                format!("attachment; filename=\"{encoded}\"; filename*=UTF-8''{encoded}");
 
             (
                 StatusCode::OK,
@@ -673,7 +681,10 @@ pub async fn acquire_lock(
     let workspace_id = body.workspace_id.unwrap_or_default();
     let reason = body.reason.unwrap_or_default();
 
-    match grpc.acquire_lock(&repo, &body.path, &owner, &workspace_id, &reason).await {
+    match grpc
+        .acquire_lock(&repo, &body.path, &owner, &workspace_id, &reason)
+        .await
+    {
         Ok(resp) => {
             let existing = resp.existing_lock.map(|l| LockJson {
                 path: l.path,
@@ -785,21 +796,40 @@ pub async fn list_issues(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    let resp = match grpc.list_issues(&repo, q.status.as_deref().unwrap_or(""), q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await {
+    let resp = match grpc
+        .list_issues(
+            &repo,
+            q.status.as_deref().unwrap_or(""),
+            q.limit.unwrap_or(50),
+            q.offset.unwrap_or(0),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
-    let issues: Vec<IssueJson> = resp.issues.into_iter().map(|i| IssueJson {
-        id: i.id, title: i.title, body: i.body, author: i.author,
-        status: i.status, labels: i.labels, created_at: i.created_at,
-        updated_at: i.updated_at, comment_count: i.comment_count,
-    }).collect();
+    let issues: Vec<IssueJson> = resp
+        .issues
+        .into_iter()
+        .map(|i| IssueJson {
+            id: i.id,
+            title: i.title,
+            body: i.body,
+            author: i.author,
+            status: i.status,
+            labels: i.labels,
+            created_at: i.created_at,
+            updated_at: i.updated_at,
+            comment_count: i.comment_count,
+        })
+        .collect();
     Json(serde_json::json!({
         "issues": issues,
         "total": resp.total,
         "open_count": resp.open_count,
         "closed_count": resp.closed_count,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -819,11 +849,16 @@ pub async fn create_issue(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    let resp = match grpc.create_issue(
-        &repo, &body.title, body.body.as_deref().unwrap_or(""),
-        body.author.as_deref().unwrap_or("web-user"),
-        body.labels.unwrap_or_default(),
-    ).await {
+    let resp = match grpc
+        .create_issue(
+            &repo,
+            &body.title,
+            body.body.as_deref().unwrap_or(""),
+            body.author.as_deref().unwrap_or("web-user"),
+            body.labels.unwrap_or_default(),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
@@ -848,11 +883,17 @@ pub async fn update_issue(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    let resp = match grpc.update_issue(
-        id, body.title.as_deref().unwrap_or(""), body.body.as_deref().unwrap_or(""),
-        body.status.as_deref().unwrap_or(""), body.labels.unwrap_or_default(),
-        body.assignee.as_deref().unwrap_or(""),
-    ).await {
+    let resp = match grpc
+        .update_issue(
+            id,
+            body.title.as_deref().unwrap_or(""),
+            body.body.as_deref().unwrap_or(""),
+            body.status.as_deref().unwrap_or(""),
+            body.labels.unwrap_or_default(),
+            body.assignee.as_deref().unwrap_or(""),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
@@ -887,22 +928,42 @@ pub async fn list_pull_requests(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    let resp = match grpc.list_pull_requests(&repo, q.status.as_deref().unwrap_or(""), q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await {
+    let resp = match grpc
+        .list_pull_requests(
+            &repo,
+            q.status.as_deref().unwrap_or(""),
+            q.limit.unwrap_or(50),
+            q.offset.unwrap_or(0),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
-    let prs: Vec<PullRequestJson> = resp.pull_requests.into_iter().map(|p| PullRequestJson {
-        id: p.id, title: p.title, body: p.body, author: p.author,
-        status: p.status, source_branch: p.source_branch, target_branch: p.target_branch,
-        labels: p.labels, created_at: p.created_at, updated_at: p.updated_at,
-        comment_count: p.comment_count,
-    }).collect();
+    let prs: Vec<PullRequestJson> = resp
+        .pull_requests
+        .into_iter()
+        .map(|p| PullRequestJson {
+            id: p.id,
+            title: p.title,
+            body: p.body,
+            author: p.author,
+            status: p.status,
+            source_branch: p.source_branch,
+            target_branch: p.target_branch,
+            labels: p.labels,
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            comment_count: p.comment_count,
+        })
+        .collect();
     Json(serde_json::json!({
         "pull_requests": prs,
         "total": resp.total,
         "open_count": resp.open_count,
         "closed_count": resp.closed_count,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -924,12 +985,18 @@ pub async fn create_pull_request(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    let resp = match grpc.create_pull_request(
-        &repo, &body.title, body.body.as_deref().unwrap_or(""),
-        body.author.as_deref().unwrap_or("web-user"),
-        &body.source_branch, body.target_branch.as_deref().unwrap_or("main"),
-        body.labels.unwrap_or_default(),
-    ).await {
+    let resp = match grpc
+        .create_pull_request(
+            &repo,
+            &body.title,
+            body.body.as_deref().unwrap_or(""),
+            body.author.as_deref().unwrap_or("web-user"),
+            &body.source_branch,
+            body.target_branch.as_deref().unwrap_or("main"),
+            body.labels.unwrap_or_default(),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
@@ -945,11 +1012,17 @@ pub async fn update_pull_request(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    let resp = match grpc.update_pull_request(
-        id, body.title.as_deref().unwrap_or(""), body.body.as_deref().unwrap_or(""),
-        body.status.as_deref().unwrap_or(""), body.labels.unwrap_or_default(),
-        body.assignee.as_deref().unwrap_or(""),
-    ).await {
+    let resp = match grpc
+        .update_pull_request(
+            id,
+            body.title.as_deref().unwrap_or(""),
+            body.body.as_deref().unwrap_or(""),
+            body.status.as_deref().unwrap_or(""),
+            body.labels.unwrap_or_default(),
+            body.assignee.as_deref().unwrap_or(""),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
@@ -989,8 +1062,13 @@ pub async fn get_issue(
             "status": i.status, "labels": i.labels, "assignee": i.assignee,
             "created_at": i.created_at, "updated_at": i.updated_at,
             "comment_count": i.comment_count,
-        })).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response(),
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Not found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -1013,8 +1091,13 @@ pub async fn get_pull_request(
             "labels": p.labels, "assignee": p.assignee,
             "created_at": p.created_at, "updated_at": p.updated_at,
             "comment_count": p.comment_count,
-        })).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response(),
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Not found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -1086,7 +1169,9 @@ pub async fn language_stats(
                     .map(|e| format!(".{}", e.to_lowercase()))
                     .unwrap_or_default();
                 if !ext.is_empty() && ext != format!(".{}", entry.name.to_lowercase()) {
-                    let stats = ext_map.entry(ext).or_insert(ExtStats { bytes: 0, count: 0 });
+                    let stats = ext_map
+                        .entry(ext)
+                        .or_insert(ExtStats { bytes: 0, count: 0 });
                     stats.bytes += entry.size;
                     stats.count += 1;
                 }
@@ -1156,9 +1241,17 @@ pub async fn language_stats(
         })
         .collect();
 
-    languages.sort_by(|a, b| b.percentage.partial_cmp(&a.percentage).unwrap_or(std::cmp::Ordering::Equal));
+    languages.sort_by(|a, b| {
+        b.percentage
+            .partial_cmp(&a.percentage)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    (StatusCode::OK, Json(serde_json::json!({ "languages": languages }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "languages": languages })),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,7 +1273,14 @@ pub async fn list_comments(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    let resp = match grpc.list_comments(&repo, q.issue_id.unwrap_or(0), q.kind.as_deref().unwrap_or("issue")).await {
+    let resp = match grpc
+        .list_comments(
+            &repo,
+            q.issue_id.unwrap_or(0),
+            q.kind.as_deref().unwrap_or("issue"),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
@@ -1203,7 +1303,16 @@ pub async fn create_comment(
         Ok(g) => g,
         Err(e) => return internal_error(e),
     };
-    let resp = match grpc.create_comment(&repo, body.issue_id, body.kind.as_deref().unwrap_or("issue"), "web-user", &body.body).await {
+    let resp = match grpc
+        .create_comment(
+            &repo,
+            body.issue_id,
+            body.kind.as_deref().unwrap_or("issue"),
+            "web-user",
+            &body.body,
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => return internal_error(e),
     };
@@ -1288,16 +1397,11 @@ async fn resolve_branch(
                 }
             }
         }
-        return Err(
-            tonic::Status::not_found(format!("commit '{branch}' not found")).into(),
-        );
+        return Err(tonic::Status::not_found(format!("commit '{branch}' not found")).into());
     }
 
     let refs_resp = grpc.get_refs(repo).await?;
-    let ref_name_candidates = [
-        branch.to_string(),
-        format!("refs/heads/{branch}"),
-    ];
+    let ref_name_candidates = [branch.to_string(), format!("refs/heads/{branch}")];
 
     for candidate in &ref_name_candidates {
         if let Some(hash_bytes) = refs_resp.refs.get(candidate) {

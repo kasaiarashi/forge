@@ -1,16 +1,90 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::{bail, Result};
 use forge_core::hash::ForgeHash;
 use forge_core::workspace::Workspace;
 use forge_proto::forge::*;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
-pub fn run(force: bool) -> Result<()> {
+/// Sidecar file that survives across `forge push` invocations so an
+/// interrupted push can resume on the server instead of re-uploading
+/// the entire object set. Matches the server-side upload session's
+/// 1h TTL; older sidecars are discarded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSession {
+    session_id: String,
+    repo: String,
+    ref_name: String,
+    local_tip: String,
+    remote_tip: String,
+    created_at: i64,
+}
+
+/// Seconds of wall time after which a persisted session file is
+/// assumed stale. Matches the server default upload TTL. We don't
+/// trust the client clock alone — `QueryUploadSession` is the
+/// authoritative check before any real work happens.
+const SESSION_FILE_TTL_SECS: i64 = 60 * 60;
+
+fn session_file_path(ws: &Workspace) -> PathBuf {
+    ws.forge_dir().join("last_push_session.json")
+}
+
+fn load_session_if_fresh(
+    ws: &Workspace,
+    repo: &str,
+    ref_name: &str,
+    local_tip_hex: &str,
+    remote_tip_hex: &str,
+) -> Option<PersistedSession> {
+    let path = session_file_path(ws);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let parsed: PersistedSession = serde_json::from_str(&raw).ok()?;
+    // Only reuse if every dimension matches — a local commit or a
+    // remote rebase between attempts means the object set has shifted.
+    if parsed.repo != repo
+        || parsed.ref_name != ref_name
+        || parsed.local_tip != local_tip_hex
+        || parsed.remote_tip != remote_tip_hex
+    {
+        return None;
+    }
+    let now = chrono::Utc::now().timestamp();
+    if now.saturating_sub(parsed.created_at) > SESSION_FILE_TTL_SECS {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn save_session(ws: &Workspace, session: &PersistedSession) {
+    let path = session_file_path(ws);
+    if let Ok(json) = serde_json::to_string_pretty(session) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+fn clear_session(ws: &Workspace) {
+    let _ = std::fs::remove_file(session_file_path(ws));
+}
+
+pub fn run(force: bool, remote_arg: Option<&str>, branch_arg: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_in(&cwd, force, remote_arg, branch_arg)
+}
+
+/// Variant that takes an explicit starting directory so the Phase-4
+/// FFI layer can push without mutating the process-wide CWD.
+pub fn run_in(
+    cwd: &std::path::Path,
+    force: bool,
+    remote_arg: Option<&str>,
+    branch_arg: Option<&str>,
+) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
     let config = ws.config()?;
 
     let server_url = config
@@ -28,6 +102,32 @@ pub fn run(force: bool) -> Result<()> {
         .default_remote()
         .map(|r| r.name.clone())
         .unwrap_or_else(|| "origin".to_string());
+
+    // Git-compat positional args. Forge only supports a single configured
+    // remote and always pushes the current branch, so we accept `forge push
+    // origin main` but reject any value that doesn't match — silently
+    // ignoring a mismatch would push to a different target than the user
+    // asked for.
+    if let Some(r) = remote_arg {
+        if r != remote_name {
+            bail!(
+                "remote '{}' is not configured (current: '{}'). Use `forge remote` to inspect.",
+                r,
+                remote_name
+            );
+        }
+    }
+    if let Some(b) = branch_arg {
+        if let Some(current) = ws.current_branch()? {
+            if b != current {
+                bail!(
+                    "forge push always targets the current branch ('{}'). Switch first: forge switch {}",
+                    current,
+                    b
+                );
+            }
+        }
+    }
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async { push_async(&ws, &server_url, &repo_name, &remote_name, force).await })
@@ -122,7 +222,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
 
     // Check which objects the server already has.
     // For small pushes (<100 objects), skip the has_objects round-trip — server deduplicates via put_raw.
-    let missing = if objects_to_push.is_empty() {
+    let mut missing: Vec<ForgeHash> = if objects_to_push.is_empty() {
         vec![]
     } else if objects_to_push.len() < 100 {
         // Small push: skip has_objects check, just push everything (server deduplicates).
@@ -144,6 +244,118 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
             .map(|(h, _)| *h)
             .collect::<Vec<ForgeHash>>()
     };
+
+    // Session allocation: reuse a persisted session from a prior
+    // interrupted push when the workspace state lines up (same repo,
+    // ref, local + remote tips) AND the server still has it, else
+    // mint a fresh UUIDv7. UUIDv7 embeds a timestamp so sweeper logs
+    // sort nicely.
+    let local_tip_hex = hex::encode(local_tip.as_bytes());
+    let remote_tip_hex = hex::encode(&remote_tip_bytes);
+
+    let mut resumed_progress: Option<HashMap<Vec<u8>, (u64, u64)>> = None;
+    let session_id = match load_session_if_fresh(
+        ws,
+        repo_name,
+        &ref_name,
+        &local_tip_hex,
+        &remote_tip_hex,
+    ) {
+        Some(persisted) => {
+            // Probe the server — the session may have been swept even
+            // if our local sidecar is still inside its TTL.
+            let q = client
+                .query_upload_session(QueryUploadSessionRequest {
+                    repo: repo_name.to_string(),
+                    upload_session_id: persisted.session_id.clone(),
+                })
+                .await;
+            match q {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    match resp.state.as_str() {
+                        "uploading" => {
+                            let map: HashMap<Vec<u8>, (u64, u64)> = resp
+                                .objects
+                                .iter()
+                                .map(|o| {
+                                    (o.hash.clone(), (o.received_bytes, o.declared_size))
+                                })
+                                .collect();
+                            if !map.is_empty() {
+                                println!(
+                                    "Resuming push (session {}, {} object(s) already known to server)",
+                                    &persisted.session_id[..persisted.session_id.len().min(8)],
+                                    map.len(),
+                                );
+                            }
+                            resumed_progress = Some(map);
+                            persisted.session_id
+                        }
+                        "committed" => {
+                            // Server already committed. Short-circuit
+                            // to the CommitPush path so the idempotent
+                            // replay surfaces the original result.
+                            println!("Server already committed this push — replaying result.");
+                            persisted.session_id
+                        }
+                        "failed" | "abandoned" => {
+                            // Prior attempt terminally failed on the
+                            // server. Start fresh so the user doesn't
+                            // get stuck with an unrecoverable session.
+                            clear_session(ws);
+                            uuid::Uuid::now_v7().to_string()
+                        }
+                        _ => {
+                            // Empty state = unknown session (TTL).
+                            // Other = unexpected string — reset.
+                            clear_session(ws);
+                            uuid::Uuid::now_v7().to_string()
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Treat query failure as "fresh push"; the worst
+                    // case is re-uploading the objects the server
+                    // already has, which is dedup'd server-side.
+                    clear_session(ws);
+                    uuid::Uuid::now_v7().to_string()
+                }
+            }
+        }
+        None => uuid::Uuid::now_v7().to_string(),
+    };
+
+    // Persist session early so a mid-push crash leaves a resume hint
+    // on disk. Expectation: `clear_session` runs on successful commit.
+    save_session(
+        ws,
+        &PersistedSession {
+            session_id: session_id.clone(),
+            repo: repo_name.to_string(),
+            ref_name: ref_name.clone(),
+            local_tip: local_tip_hex.clone(),
+            remote_tip: remote_tip_hex.clone(),
+            created_at: chrono::Utc::now().timestamp(),
+        },
+    );
+
+    // Filter `missing` against the resume snapshot so fully-received
+    // objects are dropped from the upload list. Partial objects stay
+    // — the current streaming layer can't resume mid-object yet
+    // (Phase 3e packfile work will revisit), so we re-upload them
+    // and the server dedups via content addressing.
+    if let Some(ref progress) = resumed_progress {
+        missing.retain(|h| {
+            let hash_bytes = h.as_bytes().to_vec();
+            match progress.get(&hash_bytes) {
+                Some(&(received, declared)) => {
+                    declared == 0 || received < declared
+                }
+                None => true,
+            }
+        });
+    }
 
     if !missing.is_empty() {
         let store = forge_core::store::chunk_store::ChunkStore::new(ws.forge_dir().join("objects"));
@@ -185,6 +397,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         // multi-chunk objects are never interleaved in the stream.
         const CHUNK_SIZE: usize = 4 * 1024 * 1024;
         let repo_name_owned = repo_name.to_string();
+        let session_id_owned = session_id.clone();
         // gRPC channel holds ≤4 MiB chunks, so 64 slots = 256 MiB max.
         // Read channel holds full objects — keep small for large assets.
         let (grpc_tx, rx) = tokio::sync::mpsc::channel::<ObjectChunk>(64);
@@ -217,6 +430,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
                         data,
                         is_last: true,
                         repo: repo_name_owned.clone(),
+                        upload_session_id: session_id_owned.clone(),
                     }).is_err() {
                         break;
                     }
@@ -235,6 +449,7 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
                             data: slice.to_vec(),
                             is_last,
                             repo: repo_name_owned.clone(),
+                            upload_session_id: session_id_owned.clone(),
                         }).is_err() {
                             break;
                         }
@@ -258,21 +473,46 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         }
     }
 
-    // Update remote ref. Pass `force` through so the server knows whether
-    // to do an atomic compare-and-swap (default) or an unconditional
-    // overwrite (--force).
-    let update_resp = client
-        .update_ref(UpdateRefRequest {
-            repo: repo_name.to_string(),
-            ref_name: ref_name.clone(),
-            old_hash: remote_tip_bytes.clone(),
-            new_hash: local_tip.as_bytes().to_vec(),
-            force,
-        })
-        .await?
-        .into_inner();
+    // Finalise the push: promote staged objects into the live tree and
+    // apply the ref update atomically. The server keeps CommitPush
+    // idempotent for the same `upload_session_id`, so we can retry on a
+    // transient error without worrying about double-applying.
+    let ref_update = RefUpdate {
+        ref_name: ref_name.clone(),
+        old_hash: remote_tip_bytes.clone(),
+        new_hash: local_tip.as_bytes().to_vec(),
+        force,
+    };
+    let commit_req = CommitPushRequest {
+        repo: repo_name.to_string(),
+        upload_session_id: session_id.clone(),
+        ref_updates: vec![ref_update],
+        touched_paths: Vec::new(),
+    };
 
-    if update_resp.success {
+    // One automatic retry on a transient network error. The session id is
+    // the same across both attempts, so if the server committed on the
+    // first call the retry hits the idempotent-replay path.
+    let commit_resp = match client.commit_push(commit_req.clone()).await {
+        Ok(r) => r.into_inner(),
+        Err(e)
+            if matches!(
+                e.code(),
+                tonic::Code::Unavailable
+                    | tonic::Code::DeadlineExceeded
+                    | tonic::Code::Aborted
+            ) =>
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            client.commit_push(commit_req).await?.into_inner()
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    if commit_resp.success {
+        // Session finished cleanly — drop the sidecar so the next
+        // push doesn't try to resume a stale id.
+        clear_session(ws);
         let remote_short = ForgeHash::from_hex(&hex::encode(&remote_tip_bytes))
             .map(|h| h.short())
             .unwrap_or_else(|_| "(new)".to_string());
@@ -287,11 +527,27 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
                 remote_short, local_tip.short(), branch, remote_name, branch
             );
         }
+    } else if !commit_resp.blocking_locks.is_empty() {
+        let mut msg = String::from(
+            "Push rejected: one or more paths are locked by another user.\n",
+        );
+        for lock in &commit_resp.blocking_locks {
+            msg.push_str(&format!(
+                "    {}  (locked by {})\n",
+                lock.path, lock.owner
+            ));
+        }
+        msg.push_str(
+            "\nAsk the lock holder to release, or use `forge locks` to \
+             inspect. Non-blocking workflow:  `forge pull`, coordinate \
+             with the owner, then push again.",
+        );
+        bail!("{msg}");
     } else if force {
         bail!(
             "Force push to {} rejected: {}.",
             ref_name,
-            update_resp.error
+            commit_resp.error
         );
     } else {
         bail!(
@@ -299,12 +555,13 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
              Pull and rebase, then push again — or use `forge push --force` \
              to overwrite the remote (rewrites history; use with care).",
             ref_name,
-            update_resp.error
+            commit_resp.error
         );
     }
 
     Ok(())
 }
+
 
 /// Return true if `ancestor` is reachable from `descendant` via parent links
 /// (or equal). Used as a client-side fast-forward pre-flight.

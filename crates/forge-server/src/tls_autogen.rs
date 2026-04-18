@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Self-signed CA + leaf certificate bootstrap.
 //!
@@ -64,27 +64,25 @@ pub fn ensure(paths: &TlsPaths, san_list: &[String]) -> Result<()> {
     }
 
     if let Some(dir) = paths.leaf_cert.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
 
     // Reuse an existing CA if one is already on disk (e.g. only the leaf
     // was deleted). Otherwise generate a fresh one.
-    let (ca_cert_pem, ca_key_pair) =
-        if paths.ca_cert.exists() && paths.ca_key.exists() {
-            let key_pem = std::fs::read_to_string(&paths.ca_key)
-                .with_context(|| format!("reading {}", paths.ca_key.display()))?;
-            let cert_pem = std::fs::read_to_string(&paths.ca_cert)
-                .with_context(|| format!("reading {}", paths.ca_cert.display()))?;
-            let key = KeyPair::from_pem(&key_pem).context("parse CA key")?;
-            (cert_pem, key)
-        } else {
-            mint_ca(paths)?
-        };
+    let (ca_cert_pem, ca_key_pair) = if paths.ca_cert.exists() && paths.ca_key.exists() {
+        let key_pem = std::fs::read_to_string(&paths.ca_key)
+            .with_context(|| format!("reading {}", paths.ca_key.display()))?;
+        let cert_pem = std::fs::read_to_string(&paths.ca_cert)
+            .with_context(|| format!("reading {}", paths.ca_cert.display()))?;
+        let key = KeyPair::from_pem(&key_pem).context("parse CA key")?;
+        (cert_pem, key)
+    } else {
+        mint_ca(paths)?
+    };
 
     // Re-parse the CA so we can sign the leaf with it.
-    let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
-        .context("parse CA cert for signing")?;
+    let ca_params =
+        CertificateParams::from_ca_cert_pem(&ca_cert_pem).context("parse CA cert for signing")?;
     let ca_cert = ca_params
         .self_signed(&ca_key_pair)
         .context("re-sign CA for issuing")?;
@@ -103,10 +101,7 @@ pub fn ensure(paths: &TlsPaths, san_list: &[String]) -> Result<()> {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "Forge VCS Server");
         dn.push(DnType::OrganizationName, "Forge VCS");
-        dn.push(
-            DnType::OrganizationalUnitName,
-            "Krishna Teja Mekala",
-        );
+        dn.push(DnType::OrganizationalUnitName, "Krishna Teja Mekala");
         dn
     };
     leaf_params.is_ca = IsCa::NoCa;
@@ -115,17 +110,16 @@ pub fn ensure(paths: &TlsPaths, san_list: &[String]) -> Result<()> {
         KeyUsagePurpose::KeyEncipherment,
     ];
     leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    leaf_params.subject_alt_names = all_sans
-        .iter()
-        .map(|s| match IpAddr::from_str(s) {
-            Ok(ip) => SanType::IpAddress(ip),
-            Err(_) => SanType::DnsName(
-                s.as_str().try_into().unwrap_or_else(|_| {
+    leaf_params.subject_alt_names =
+        all_sans
+            .iter()
+            .map(|s| match IpAddr::from_str(s) {
+                Ok(ip) => SanType::IpAddress(ip),
+                Err(_) => SanType::DnsName(s.as_str().try_into().unwrap_or_else(|_| {
                     "localhost".try_into().expect("localhost is always valid")
-                }),
-            ),
-        })
-        .collect();
+                })),
+            })
+            .collect();
 
     // Validity window: today through 1 year from today (rounded to whole
     // days). Rotation happens by deleting server.{crt,key} and restarting
@@ -168,10 +162,7 @@ fn mint_ca(paths: &TlsPaths) -> Result<(String, KeyPair)> {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "Forge VCS Local CA");
         dn.push(DnType::OrganizationName, "Forge VCS");
-        dn.push(
-            DnType::OrganizationalUnitName,
-            "Krishna Teja Mekala",
-        );
+        dn.push(DnType::OrganizationalUnitName, "Krishna Teja Mekala");
         dn
     };
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -260,7 +251,10 @@ fn decode_base64(s: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     }
-    let clean: Vec<u8> = s.bytes().filter(|b| *b != b'=' && !b.is_ascii_whitespace()).collect();
+    let clean: Vec<u8> = s
+        .bytes()
+        .filter(|b| *b != b'=' && !b.is_ascii_whitespace())
+        .collect();
     let mut out = Vec::with_capacity(clean.len() * 3 / 4);
     let mut buf: u32 = 0;
     let mut bits: u32 = 0;

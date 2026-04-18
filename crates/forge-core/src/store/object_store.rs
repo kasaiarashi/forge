@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::ForgeError;
 use crate::hash::ForgeHash;
@@ -6,23 +7,45 @@ use crate::object::blob::ChunkedBlob;
 use crate::object::snapshot::Snapshot;
 use crate::object::tree::Tree;
 use crate::object::ObjectType;
+use crate::store::backend::ObjectBackend;
 use crate::store::chunk_store::ChunkStore;
 
-/// Typed wrapper over ChunkStore for serialized Forge objects.
+/// Typed wrapper over any [`ObjectBackend`] for serialized Forge
+/// objects. Backend-agnostic as of Phase 3b.3 — the `chunks` field
+/// holds a trait object so the server can plug in an S3 backend for
+/// the live store while clients keep using [`ChunkStore`] (the FS
+/// backend). Old callers constructing via [`ObjectStore::new`] keep
+/// the FS path by default.
 pub struct ObjectStore {
-    pub chunks: ChunkStore,
+    /// Field name preserved for backwards compatibility with every
+    /// `ws.object_store.chunks.get(...)` call site in forge-cli; the
+    /// trait surface covers `get`/`put`/`has`/`delete`/`file_size`/
+    /// `iter_all` plus the Phase-3b.3 additions (`ensure_shard_dirs`,
+    /// `put_raw_direct`, `local_root`).
+    pub chunks: Arc<dyn ObjectBackend>,
 }
 
 impl ObjectStore {
+    /// Construct an FS-backed store. Retained as the default entry
+    /// point so every existing call site (`ObjectStore::new(path)`)
+    /// compiles unchanged.
     pub fn new(objects_dir: impl Into<PathBuf>) -> Self {
         Self {
-            chunks: ChunkStore::new(objects_dir),
+            chunks: Arc::new(ChunkStore::new(objects_dir)),
         }
     }
 
-    /// Returns the root objects directory path.
-    pub fn objects_dir(&self) -> &std::path::Path {
-        self.chunks.root()
+    /// Construct from an already-built backend. Phase 3b.3 callers
+    /// (gRPC handlers, the FFI session) use this to wire an S3
+    /// backend into the same typed-object surface.
+    pub fn with_backend(backend: Arc<dyn ObjectBackend>) -> Self {
+        Self { chunks: backend }
+    }
+
+    /// Returns the root objects directory when the backend is
+    /// FS-backed. S3 and other non-local stores return `None`.
+    pub fn objects_dir(&self) -> Option<&Path> {
+        self.chunks.local_root()
     }
 
     // -- Snapshot --

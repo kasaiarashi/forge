@@ -8,6 +8,9 @@ members = [
     "crates/forge-ignore",
     "crates/forge-web/server",
     "crates/forge-unreal",
+    "crates/forge-agent",
+    "crates/forge-ffi",
+    "crates/forge-client",
 ]
 resolver = "2"
 
@@ -41,11 +44,12 @@ thiserror = "2"
 anyhow = "1"
 # Logging
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 # Misc
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 hex = "0.4"
 walkdir = "2"
 rayon = "1"
@@ -55,13 +59,31 @@ globset = "0.4"
 bytes = "1"
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+postgres = { version = "0.19", features = ["with-chrono-0_4"] }
+r2d2_postgres = "0.18"
+# S3 object backend (Phase 3b). Pulls in the full AWS SDK stack —
+# only built when the `s3-objects` feature is enabled on forge-server.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+aws-smithy-types = "1"
+aws-credential-types = "1"
 # Internal
 forge-core = { path = "crates/forge-core" }
 forge-diff = { path = "crates/forge-diff" }
 forge-proto = { path = "crates/forge-proto" }
 forge-ignore = { path = "crates/forge-ignore" }
+forge-client = { path = "crates/forge-client" }
 tempfile = "3"
 similar = "2"
+# Benchmarking (Phase 7f). Criterion drives the forge-server benches/*.rs
+# suite + upcoming core-side chunk/hash benches. Dev-dep only.
+criterion = { version = "0.5", features = ["html_reports"] }
+# Latency histograms for the Phase 7f load-test subcommand (and any
+# future SLI panel). HDR histograms keep N=500-user, M=10k-op runs in
+# bounded memory while preserving p99 fidelity.
+hdrhistogram = "7"
 indicatif = "0.17"
 forge-unreal = { path = "crates/forge-unreal" }
 serde_yaml = "0.9"
