@@ -40,6 +40,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Forge CLI binary
 Source: "{#ArtifactDir}\forge-windows-client\forge.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; Rust FFI cdylib — loaded in-process by the UE plugin's FFI fast path
+; instead of shelling out to forge.exe per op. Lives next to forge.exe
+; rather than inside the plugin because Fab rejects binary payloads in
+; code plugins; the plugin finds this at runtime by scanning PATH for
+; forge.exe and picking up the sibling DLL.
+Source: "{#ArtifactDir}\forge-windows-client\forge_ffi.dll"; DestDir: "{app}"; Flags: ignoreversion
+
+; Registry marker the UE plugin can read to locate this install
+; directory even when PATH hasn't been refreshed in the editor
+; process (the PATH entry above requires a reboot / env re-read).
+; Written under HKLM so any user on the machine — including the one
+; running the Unreal editor from a non-admin session — can discover it.
+
 ; UE Plugin files (only installed if user selects local install)
 Source: "{#PluginDir}\ForgeSourceControl.uplugin"; DestDir: "{code:GetUEPluginDestDir}"; Flags: ignoreversion; Check: ShouldInstallPlugin
 Source: "{#PluginDir}\Source\*"; DestDir: "{code:GetUEPluginDestDir}\Source"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallPlugin
@@ -51,6 +64,13 @@ Source: "{#PluginDir}\Resources\*"; DestDir: "{code:GetUEPluginDestDir}\Resource
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; \
     ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; \
     Check: NeedsAddPath(ExpandConstant('{app}'))
+
+; Install-dir marker for the UE plugin's FFI loader. Cleared on
+; uninstall via `uninsdeletekey` so a later reinstall at a different
+; path doesn't leave a stale pointer.
+Root: HKLM; Subkey: "SOFTWARE\ForgeVCS"; ValueType: string; ValueName: "InstallDir"; \
+    ValueData: "{app}"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "SOFTWARE\ForgeVCS"; Flags: uninsdeletekeyifempty
 
 [Icons]
 Name: "{group}\Forge Command Prompt"; Filename: "{cmd}"; Parameters: "/K set PATH={app};%PATH%"; WorkingDir: "{userdocs}"
