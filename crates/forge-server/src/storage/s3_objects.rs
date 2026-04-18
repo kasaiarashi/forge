@@ -144,6 +144,30 @@ impl S3ObjectBackend {
         self
     }
 
+    /// Build a view that prepends `extra_prefix` to every key this
+    /// backend computes, while sharing the underlying SDK `Client`
+    /// (which is `Clone` and internally arc-wrapped). Used by
+    /// `S3RepoStorage` to hand out a per-repo scoped backend without
+    /// paying a full credential + endpoint resolution per repo —
+    /// otherwise every call to `repo_object_backend(repo)` would need
+    /// an async construction, which doesn't fit the sync
+    /// `RepoStorageBackend` trait.
+    pub fn scoped(&self, extra_prefix: &str) -> Self {
+        let mut combined = self.prefix.clone();
+        combined.push_str(extra_prefix);
+        // Always end in `/` so the key formatter produces
+        // `<base><repo>/objects/<ab>/<rest>` without double-slashing.
+        if !combined.is_empty() && !combined.ends_with('/') {
+            combined.push('/');
+        }
+        Self {
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+            prefix: combined,
+            fallback_rt: self.fallback_rt.clone(),
+        }
+    }
+
     fn key_for(&self, hash: &ForgeHash) -> String {
         let hex = hash.to_hex();
         format!("{}{}/{}", self.prefix, &hex[..2], &hex[2..])

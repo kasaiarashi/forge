@@ -39,6 +39,70 @@ pub struct ServerConfig {
     /// Metadata database backend and pool tuning.
     #[serde(default)]
     pub database: DatabaseSection,
+
+    /// Live object-store backend. Phase 3b.4 — FS (default) stores
+    /// every repo's objects under `<base_path>/repos/<repo>/objects/`;
+    /// `backend = "s3"` publishes them to an S3-compatible bucket
+    /// (MinIO, AWS S3, Ceph RGW) while staging stays on local disk.
+    #[serde(default)]
+    pub objects: ObjectsSection,
+}
+
+/// `[objects]` block — picks the live object-store backend. Staging
+/// is always on local disk (see `S3RepoStorage` for why); this
+/// selector only controls where committed objects land.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObjectsSection {
+    /// `"fs"` (default) keeps the pre-Phase-3b.4 local layout. `"s3"`
+    /// publishes to the `[objects.s3]` bucket; requires the
+    /// `s3-objects` Cargo feature at compile time (else the server
+    /// bails loudly at startup).
+    #[serde(default = "default_objects_backend")]
+    pub backend: String,
+
+    /// S3 connection settings. Only consulted when
+    /// `backend = "s3"`. The shape mirrors `[artifacts.s3]` on
+    /// purpose so an operator who already configured artifact
+    /// storage can copy-paste.
+    #[serde(default)]
+    pub s3: ObjectsS3,
+}
+
+fn default_objects_backend() -> String {
+    "fs".into()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObjectsS3 {
+    /// Required. Bucket name (NOT URI — use `endpoint_url` for
+    /// non-AWS endpoints).
+    #[serde(default)]
+    pub bucket: String,
+    /// Optional AWS region. Empty → `us-east-1` (MinIO ignores
+    /// it but the SDK still wants something non-empty).
+    #[serde(default)]
+    pub region: String,
+    /// Custom endpoint URL for MinIO / Ceph RGW. Empty → AWS
+    /// default endpoint resolver.
+    #[serde(default)]
+    pub endpoint_url: String,
+    /// Optional key prefix that wraps every repo's tree. Lets
+    /// multiple forge-servers share a bucket — each gets its
+    /// own prefix, per-repo subtrees land as
+    /// `{prefix}{repo}/objects/<ab>/<rest>`.
+    #[serde(default)]
+    pub prefix: String,
+    /// Static access key. Empty → fall back to the default AWS
+    /// credential chain (env / profile / IMDS).
+    #[serde(default)]
+    pub access_key_id: String,
+    /// Static secret key. Empty → default chain.
+    #[serde(default)]
+    pub secret_access_key: String,
+    /// Force path-style URLs. Required for MinIO's standard
+    /// deployment; MUST be `false` for AWS virtual-hosted style.
+    #[serde(default)]
+    pub path_style: bool,
 }
 
 /// Metadata backend configuration. The default is SQLite with pooled
@@ -473,6 +537,7 @@ impl Default for ServerConfig {
             logging: LoggingSection::default(),
             limits: LimitsSection::default(),
             database: DatabaseSection::default(),
+            objects: ObjectsSection::default(),
         }
     }
 }

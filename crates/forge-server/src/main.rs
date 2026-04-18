@@ -555,13 +555,33 @@ pub(crate) async fn serve_inner(
         .filter_map(|(name, rc)| rc.path.as_ref().map(|p| (name.clone(), p.clone())))
         .collect();
     let fs = Arc::new(FsStorage::new(base.join("repos"), repo_overrides));
-    // Phase 3b.3 — hand gRPC a trait-object view of storage so S3
-    // can plug in without the handlers knowing. Single concrete
-    // backend today (`fs`); 3b.4 adds the config-driven
-    // RepoStorageBackend selector that picks S3 when
-    // `[objects] backend = "s3"`.
+
+    // Phase 3b.4 — construct the RepoStorageBackend per `[objects]`.
+    // FS is the default + zero-dep path. S3 is opt-in at build-time
+    // (`s3-objects` Cargo feature) *and* at config-time — asking for
+    // `backend = "s3"` in a build without the feature hard-errors at
+    // startup so operators never think they have S3 when they don't.
     let storage: Arc<dyn storage::repo_backend::RepoStorageBackend> =
-        Arc::clone(&fs) as Arc<dyn storage::repo_backend::RepoStorageBackend>;
+        match config.objects.backend.as_str() {
+            "fs" => Arc::clone(&fs) as Arc<dyn storage::repo_backend::RepoStorageBackend>,
+            "s3" => {
+                #[cfg(feature = "s3-objects")]
+                {
+                    build_s3_repo_storage(&config.objects.s3, Arc::clone(&fs)).await?
+                }
+                #[cfg(not(feature = "s3-objects"))]
+                {
+                    anyhow::bail!(
+                        "[objects] backend = \"s3\" requires the `s3-objects` \
+                         Cargo feature. Rebuild forge-server with \
+                         `--features s3-objects` or set backend = \"fs\"."
+                    );
+                }
+            }
+            other => anyhow::bail!(
+                "[objects] backend = \"{other}\" — expected \"fs\" or \"s3\""
+            ),
+        };
 
     let user_store: Arc<dyn auth::UserStore> =
         Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
@@ -803,6 +823,55 @@ pub(crate) async fn serve_inner(
 
     info!("Forge server stopped cleanly");
     Ok(())
+}
+
+/// Build an `S3RepoStorage` from the `[objects.s3]` config block.
+/// Called from `serve_inner` when the operator picks the S3 backend.
+/// `fs` is handed in so staging — which stays on local disk because
+/// S3 has no native append — reuses the already-built instance.
+///
+/// Lives in a helper so the `#[cfg]` gate in `serve_inner` stays a
+/// one-liner.
+#[cfg(feature = "s3-objects")]
+async fn build_s3_repo_storage(
+    cfg: &config::ObjectsS3,
+    fs: Arc<FsStorage>,
+) -> Result<Arc<dyn storage::repo_backend::RepoStorageBackend>> {
+    use storage::s3_objects::{S3ObjectBackend, S3ObjectBackendConfig};
+    use storage::s3_repo::S3RepoStorage;
+
+    if cfg.bucket.is_empty() {
+        anyhow::bail!("[objects.s3] bucket is required when backend = \"s3\"");
+    }
+
+    // The S3 SDK client resolves credentials + endpoint lazily on
+    // first request, but we construct here so a bad config fails at
+    // startup rather than on the first push. `S3ObjectBackend::new`
+    // is async because aws-config's loader is; `serve_inner` runs
+    // on the tokio runtime already, so we can just `.await`.
+    let s3_cfg = S3ObjectBackendConfig {
+        bucket: cfg.bucket.clone(),
+        prefix: cfg.prefix.clone(),
+        region: cfg.region.clone(),
+        endpoint_url: cfg.endpoint_url.clone(),
+        access_key_id: cfg.access_key_id.clone(),
+        secret_access_key: cfg.secret_access_key.clone(),
+        path_style: cfg.path_style,
+    };
+    let base = Arc::new(
+        S3ObjectBackend::new(s3_cfg)
+            .await
+            .context("construct S3 live object backend")?,
+    );
+    info!(
+        bucket = %cfg.bucket,
+        region = %cfg.region,
+        endpoint = %cfg.endpoint_url,
+        prefix = %cfg.prefix,
+        "objects backend: S3 (live in bucket, staging on local disk)"
+    );
+
+    Ok(Arc::new(S3RepoStorage::new(base, fs)))
 }
 
 /// `forge-server service install/uninstall/start/stop` dispatcher.
