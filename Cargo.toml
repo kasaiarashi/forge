@@ -80,6 +80,10 @@ similar = "2"
 # Benchmarking (Phase 7f). Criterion drives the forge-server benches/*.rs
 # suite + upcoming core-side chunk/hash benches. Dev-dep only.
 criterion = { version = "0.5", features = ["html_reports"] }
+# Latency histograms for the Phase 7f load-test subcommand (and any
+# future SLI panel). HDR histograms keep N=500-user, M=10k-op runs in
+# bounded memory while preserving p99 fidelity.
+hdrhistogram = "7"
 indicatif = "0.17"
 forge-unreal = { path = "crates/forge-unreal" }
 serde_yaml = "0.9"

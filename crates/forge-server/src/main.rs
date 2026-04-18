@@ -59,6 +59,23 @@ struct Cli {
     #[arg(short, long, global = true)]
     storage: Option<String>,
 
+    /// Run as a read-only edge replica. Every write RPC is rejected
+    /// at the tower layer with `FailedPrecondition`; reads (pulls,
+    /// has-checks, ref/lock listings, browser endpoints) serve out
+    /// of the local DB + object store. Only meaningful for the
+    /// `serve` command. Pair with a Litestream-replicated DB and
+    /// rsync/S3-mirrored objects on each edge host.
+    #[arg(long, global = true)]
+    read_only: bool,
+
+    /// Upstream primary URL surfaced in the error message a write
+    /// RPC sees when this server is `--read-only`. A smart client
+    /// (forge-cli future release) reads the hint and transparently
+    /// retries against the primary. Defaults to a generic message
+    /// when omitted.
+    #[arg(long, global = true)]
+    upstream_write_url: Option<String>,
+
     /// Internal: hand off to the Windows Service Control Manager instead
     /// of running interactively. The installer-registered service has
     /// this flag baked into the binPath; users should never set it by
@@ -147,6 +164,44 @@ enum Commands {
         /// Restrict to a single repo. Omit to sweep every repo.
         #[arg(long)]
         repo: Option<String>,
+    },
+    /// Run a closed-loop load test against an existing server.
+    /// Spawns N virtual users on a tokio runtime, each running a
+    /// weighted workload mix (lock acquire/release, list locks,
+    /// ref reads), and reports per-RPC p50/p95/p99 plus aggregate
+    /// RPS. Use against a non-production server only — every run
+    /// produces real DB rows.
+    LoadTest {
+        /// Target server URL, e.g. https://localhost:50051.
+        #[arg(long)]
+        target: String,
+        /// PAT for authenticated calls. Anonymous when omitted —
+        /// only useful against a public test repo.
+        #[arg(long)]
+        token: Option<String>,
+        /// Repo to exercise, e.g. "alice/loadtest".
+        #[arg(long)]
+        repo: String,
+        /// Number of concurrent virtual users.
+        #[arg(long, default_value_t = 50)]
+        users: usize,
+        /// Wall-clock duration in seconds.
+        #[arg(long, default_value_t = 30)]
+        duration: u64,
+        /// PEM-encoded CA cert path. Falls back to `FORGE_CA_CERT`
+        /// env var, then system trust roots. Required for
+        /// self-signed targets.
+        #[arg(long)]
+        ca_cert: Option<std::path::PathBuf>,
+        /// Skip TLS verification. Currently unsupported because the
+        /// tonic ClientTlsConfig surface doesn't expose a hook —
+        /// pass `--ca-cert` instead.
+        #[arg(long)]
+        insecure: bool,
+        /// Synthetic workspace_id every virtual user shares. Only
+        /// matters if you're inspecting locks server-side.
+        #[arg(long, default_value = "loadtest-ws")]
+        workspace_id: String,
     },
     /// Check for updates and self-update the server
     Update {
@@ -470,6 +525,37 @@ fn main() -> Result<()> {
             cli_admin::repack(&config, dry_run, max_loose_bytes, repo.as_deref())?;
             return Ok(());
         }
+        Some(Commands::LoadTest {
+            ref target,
+            ref token,
+            ref repo,
+            users,
+            duration,
+            ref ca_cert,
+            insecure,
+            ref workspace_id,
+        }) => {
+            // No config or DB needed — the harness is purely a gRPC
+            // client. Build a multi-thread tokio runtime here so the
+            // user's `--users N` choice can saturate cores.
+            let cfg = services::load_test::LoadTestConfig {
+                target: target.clone(),
+                token: token.clone(),
+                repo: repo.clone(),
+                users,
+                duration: std::time::Duration::from_secs(duration),
+                ca_cert: ca_cert.clone(),
+                insecure,
+                workspace_id: workspace_id.clone(),
+            };
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for load-test")?;
+            let report = rt.block_on(services::load_test::run(cfg))?;
+            services::load_test::print_report(&report);
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -492,7 +578,11 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("build tokio runtime")?;
-    rt.block_on(serve_inner(config, async {
+    let edge = EdgeOpts {
+        read_only: cli.read_only,
+        upstream_write_url: cli.upstream_write_url.clone(),
+    };
+    rt.block_on(serve_inner_with_edge(config, edge, async {
         let _ = tokio::signal::ctrl_c().await;
         info!("Ctrl-C received, shutting down");
     }))
@@ -543,6 +633,16 @@ fn resolve_base_path_relative_to_config(config: &mut ServerConfig, config_path: 
     config.storage.base_path = config_dir.join(&config.storage.base_path);
 }
 
+/// Read-only edge replica knobs. Plumbed through `serve_inner` so a
+/// `forge-server serve --read-only --upstream-write-url …` invocation
+/// can install the [`crate::services::edge::ReadOnlyLayer`] without
+/// touching the (already crowded) `ServerConfig` schema.
+#[derive(Debug, Clone, Default)]
+pub struct EdgeOpts {
+    pub read_only: bool,
+    pub upstream_write_url: Option<String>,
+}
+
 /// Run the gRPC server until `shutdown` resolves. Extracted from the
 /// inline body of `main` so the Windows service path
 /// (`service::run_under_scm` -> `service::run_service`) can call it with
@@ -550,6 +650,15 @@ fn resolve_base_path_relative_to_config(config: &mut ServerConfig, config_path: 
 /// `ctrl_c().await`.
 pub(crate) async fn serve_inner(
     mut config: ServerConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    serve_inner_with_edge(config, EdgeOpts::default(), shutdown).await
+}
+
+#[allow(unused_assignments)]
+pub(crate) async fn serve_inner_with_edge(
+    mut config: ServerConfig,
+    edge: EdgeOpts,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     // Take ownership of base_path early so we can rebind it after moving
@@ -870,22 +979,50 @@ pub(crate) async fn serve_inner(
         }
     }
 
-    builder
-        .add_service(tonic::service::interceptor::InterceptedService::new(
-            forge_svc,
-            interceptor.clone(),
-        ))
-        .add_service(tonic::service::interceptor::InterceptedService::new(
-            auth_svc,
-            interceptor,
-        ))
-        // AgentService carries its own per-message (agent_id, token)
-        // credentials verified against Argon2-hashed agent tokens in DB;
-        // it deliberately bypasses the user PAT interceptor so agents
-        // don't need a user account.
-        .add_service(agent_svc)
-        .serve_with_shutdown(addr, shutdown)
-        .await?;
+    // Phase 7e — read-only edge replica. The layer rejects every
+    // write RPC at the tower level before the typed handler runs,
+    // so even a malicious client can't sneak past the check by
+    // crafting a partial request body. Skipping the layer entirely
+    // on the primary keeps the single-server hot path zero-cost.
+    if edge.read_only {
+        let hint = edge
+            .upstream_write_url
+            .as_deref()
+            .unwrap_or("the primary forge-server (consult your operator)")
+            .to_string();
+        warn!(upstream = %hint, "starting in --read-only edge mode; writes will be rejected");
+        let layer = services::edge::ReadOnlyLayer::new(hint);
+        builder
+            .layer(layer)
+            .add_service(tonic::service::interceptor::InterceptedService::new(
+                forge_svc,
+                interceptor.clone(),
+            ))
+            .add_service(tonic::service::interceptor::InterceptedService::new(
+                auth_svc,
+                interceptor,
+            ))
+            .add_service(agent_svc)
+            .serve_with_shutdown(addr, shutdown)
+            .await?;
+    } else {
+        builder
+            .add_service(tonic::service::interceptor::InterceptedService::new(
+                forge_svc,
+                interceptor.clone(),
+            ))
+            .add_service(tonic::service::interceptor::InterceptedService::new(
+                auth_svc,
+                interceptor,
+            ))
+            // AgentService carries its own per-message (agent_id, token)
+            // credentials verified against Argon2-hashed agent tokens in DB;
+            // it deliberately bypasses the user PAT interceptor so agents
+            // don't need a user account.
+            .add_service(agent_svc)
+            .serve_with_shutdown(addr, shutdown)
+            .await?;
+    }
 
     info!("Forge server stopped cleanly");
     Ok(())
