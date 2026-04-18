@@ -73,7 +73,18 @@ fn clear_session(ws: &Workspace) {
 
 pub fn run(force: bool, remote_arg: Option<&str>, branch_arg: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_in(&cwd, force, remote_arg, branch_arg)
+}
+
+/// Variant that takes an explicit starting directory so the Phase-4
+/// FFI layer can push without mutating the process-wide CWD.
+pub fn run_in(
+    cwd: &std::path::Path,
+    force: bool,
+    remote_arg: Option<&str>,
+    branch_arg: Option<&str>,
+) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
     let config = ws.config()?;
 
     let server_url = config

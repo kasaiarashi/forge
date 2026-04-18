@@ -26,7 +26,13 @@ pub(super) type AuthedForgeClient =
 
 pub fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_in(&cwd)
+}
+
+/// Explicit-cwd entry used by the Phase-4 FFI layer so a concurrent
+/// caller can't race the process-wide CWD.
+pub fn run_in(cwd: &std::path::Path) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
     run_with_workspace(&ws)
 }
 

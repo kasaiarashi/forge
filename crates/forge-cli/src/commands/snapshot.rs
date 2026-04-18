@@ -11,7 +11,19 @@ use crate::credentials;
 
 pub fn run(message: Option<String>, all: bool, amend: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_in(&cwd, message, all, amend, json)
+}
+
+/// Variant that takes an explicit starting directory so the Phase-4
+/// FFI layer can drive commit without mutating the process-wide CWD.
+pub fn run_in(
+    cwd: &std::path::Path,
+    message: Option<String>,
+    all: bool,
+    amend: bool,
+    json: bool,
+) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
     let mut index = Index::load(&ws.forge_dir().join("index"))?;
 
     // If --all, auto-stage all modified/deleted files.

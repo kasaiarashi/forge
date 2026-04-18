@@ -20,7 +20,15 @@ struct CompressedChunk {
 
 pub fn run(paths: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_in(&cwd, paths)
+}
+
+/// Variant that takes an explicit starting directory. The CLI's
+/// process-wide `run()` uses `std::env::current_dir()` above; the
+/// Phase-4 FFI layer ([`crate::ops::add`]) calls this one so a
+/// concurrent caller can't race the global CWD.
+pub fn run_in(cwd: &Path, paths: Vec<String>) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
     let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
         .unwrap_or_default();
 
