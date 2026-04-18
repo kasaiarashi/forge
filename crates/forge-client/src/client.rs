@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Centralized gRPC client factory for the `forge` CLI.
 //!
@@ -53,8 +53,8 @@ fn build_endpoint(server_url: &str) -> Result<Endpoint> {
 
     // 1) FORGE_CA_CERT env var takes priority — operator override.
     if let Ok(path) = std::env::var("FORGE_CA_CERT") {
-        let pem = std::fs::read(&path)
-            .with_context(|| format!("failed to read FORGE_CA_CERT={path}"))?;
+        let pem =
+            std::fs::read(&path).with_context(|| format!("failed to read FORGE_CA_CERT={path}"))?;
         let tls = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem));
         return endpoint
             .tls_config(tls)

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! `forge-server user …` and `forge-server repo …` subcommands.
 //!
@@ -144,12 +144,7 @@ pub fn user_reset_password(
 
 // ── Repo subcommands ─────────────────────────────────────────────────────────
 
-pub fn repo_grant(
-    config: &ServerConfig,
-    repo: &str,
-    username: &str,
-    role: &str,
-) -> Result<()> {
+pub fn repo_grant(config: &ServerConfig, repo: &str, username: &str, role: &str) -> Result<()> {
     let store = open_store(config)?;
     let target = store
         .find_user_by_username(username)?
@@ -235,7 +230,10 @@ fn open_db(config: &ServerConfig) -> Result<Arc<MetadataDb>> {
 }
 
 pub fn agent_add(config: &ServerConfig, name: &str, labels: &[String]) -> Result<()> {
-    use argon2::{password_hash::{PasswordHasher, SaltString}, Argon2};
+    use argon2::{
+        password_hash::{PasswordHasher, SaltString},
+        Argon2,
+    };
     use rand::RngCore;
 
     if name.is_empty() {
@@ -273,11 +271,13 @@ pub fn agent_list(config: &ServerConfig) -> Result<()> {
         println!("No agents registered.");
         return Ok(());
     }
-    println!("{:<5} {:<24} {:<8} {:<32} {}", "ID", "NAME", "OS", "LABELS", "LAST SEEN");
+    println!(
+        "{:<5} {:<24} {:<8} {:<32} {}",
+        "ID", "NAME", "OS", "LABELS", "LAST SEEN"
+    );
     println!("{}", "-".repeat(96));
     for (id, name, labels_json, last_seen, _version, os) in &rows {
-        let labels: Vec<String> =
-            serde_json::from_str(labels_json).unwrap_or_default();
+        let labels: Vec<String> = serde_json::from_str(labels_json).unwrap_or_default();
         let when = if *last_seen == 0 {
             "never".to_string()
         } else {
@@ -362,8 +362,7 @@ pub fn migrate(config: &ServerConfig) -> Result<()> {
                     max_size: config.database.max_connections,
                     ..Default::default()
                 };
-                let backend = PgMetadataBackend::open(pg_cfg)
-                    .context("open postgres backend")?;
+                let backend = PgMetadataBackend::open(pg_cfg).context("open postgres backend")?;
                 let before = backend.current_schema_version()?;
                 // open() already applied pending migrations; re-running
                 // is a no-op and prints the idempotent status line.
@@ -546,9 +545,7 @@ pub fn gc(
         );
     }
     println!();
-    println!(
-        "Total: swept={total_swept}, bytes_freed={total_bytes}, errors={total_errors}"
-    );
+    println!("Total: swept={total_swept}, bytes_freed={total_bytes}, errors={total_errors}");
     if dry_run {
         println!("(dry run — nothing was deleted)");
     }
@@ -666,21 +663,19 @@ pub fn backup_create(config: &ServerConfig, dest: &std::path::Path) -> Result<()
         repos,
     };
     let manifest_path = dest.join("manifest.json");
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest)?,
-    )
-    .with_context(|| format!("write {}", manifest_path.display()))?;
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)
+        .with_context(|| format!("write {}", manifest_path.display()))?;
 
     let size = std::fs::metadata(&out_db).map(|m| m.len()).unwrap_or(0);
     println!("wrote {} ({} bytes)", out_db.display(), size);
     println!("wrote {}", manifest_path.display());
-    println!(
-        "\nobject store is NOT included in this snapshot — back it up separately:"
-    );
+    println!("\nobject store is NOT included in this snapshot — back it up separately:");
     match config.objects.backend.as_str() {
         "s3" => {
-            println!("  aws s3 sync s3://{}/ s3://<backup-bucket>/", config.objects.s3.bucket);
+            println!(
+                "  aws s3 sync s3://{}/ s3://<backup-bucket>/",
+                config.objects.s3.bucket
+            );
         }
         _ => {
             let repos_root = config.storage.base_path.join("repos");
@@ -799,4 +794,3 @@ fn prompt_password_with_confirm() -> Result<String> {
     }
     Ok(p1)
 }
-

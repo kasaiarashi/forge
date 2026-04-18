@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Logging setup for forge-web.
 //!
@@ -27,8 +27,8 @@ pub struct LogGuards {
 }
 
 pub fn init(logging: &LoggingConfig, log_dir: Option<&Path>) -> LogGuards {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&logging.level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&logging.level));
 
     let mut app_guard: Option<WorkerGuard> = None;
     let mut audit_guard: Option<WorkerGuard> = None;

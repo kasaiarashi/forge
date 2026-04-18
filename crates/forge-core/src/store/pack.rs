@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Packfile format for small objects (Phase 3e.1).
 //!
@@ -89,8 +89,7 @@ impl Packfile {
         // Validate the `.pack` header up-front so a mismatched magic
         // yields a clear startup error rather than a later seek-read
         // returning garbage.
-        let mut file = File::open(&pack_path)
-            .map_err(|e| ForgeError::Io(e))?;
+        let mut file = File::open(&pack_path).map_err(|e| ForgeError::Io(e))?;
         validate_header(&mut file, PACK_MAGIC)?;
         Ok(Self {
             path: pack_path,
@@ -132,8 +131,7 @@ impl Packfile {
             .get(hash)
             .ok_or_else(|| ForgeError::ObjectNotFound(hash.to_hex()))?;
         let mut file = self.file.lock().expect("pack file mutex poisoned");
-        file.seek(SeekFrom::Start(offset))
-            .map_err(ForgeError::Io)?;
+        file.seek(SeekFrom::Start(offset)).map_err(ForgeError::Io)?;
         let mut buf = vec![0u8; length as usize];
         file.read_exact(&mut buf).map_err(ForgeError::Io)?;
         Ok(buf)
@@ -447,12 +445,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let payload = b"hello-pack";
         let (hash, compressed_bytes) = compressed(payload);
-        let written = write_pack(
-            dir.path(),
-            "test",
-            vec![(hash, compressed_bytes.clone())],
-        )
-        .unwrap();
+        let written =
+            write_pack(dir.path(), "test", vec![(hash, compressed_bytes.clone())]).unwrap();
         assert_eq!(written.count, 1);
         assert!(written.pack_path.exists());
         assert!(written.idx_path.exists());
@@ -471,10 +465,10 @@ mod tests {
     #[test]
     fn pack_roundtrip_many_entries_preserves_every_hash() {
         let dir = tempfile::tempdir().unwrap();
-        let payloads: Vec<Vec<u8>> =
-            (0..128u32).map(|i| format!("payload-{i:04}").into_bytes()).collect();
-        let entries: Vec<(ForgeHash, Vec<u8>)> =
-            payloads.iter().map(|p| compressed(p)).collect();
+        let payloads: Vec<Vec<u8>> = (0..128u32)
+            .map(|i| format!("payload-{i:04}").into_bytes())
+            .collect();
+        let entries: Vec<(ForgeHash, Vec<u8>)> = payloads.iter().map(|p| compressed(p)).collect();
         let expected_hashes: Vec<ForgeHash> = entries.iter().map(|(h, _)| *h).collect();
 
         write_pack(dir.path(), "many", entries).unwrap();
@@ -493,7 +487,10 @@ mod tests {
         write_pack(dir.path(), "t", vec![(hash, compressed_bytes)]).unwrap();
         let pack = Packfile::open(dir.path().join("t.pack")).unwrap();
         let ghost = ForgeHash::from_bytes(b"absent");
-        assert!(matches!(pack.get(&ghost), Err(ForgeError::ObjectNotFound(_))));
+        assert!(matches!(
+            pack.get(&ghost),
+            Err(ForgeError::ObjectNotFound(_))
+        ));
         assert_eq!(pack.file_size(&ghost), None);
     }
 

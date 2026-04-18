@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! `forge workflow list|trigger|create|delete|enable|disable`.
 
@@ -12,9 +12,7 @@ fn remote(ws: &Workspace) -> Result<(String, String)> {
     let config = ws.config()?;
     let server_url = config
         .default_remote_url()
-        .ok_or_else(|| {
-            anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>")
-        })?
+        .ok_or_else(|| anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>"))?
         .to_string();
     let repo = if config.repo.is_empty() {
         "default".into()
@@ -52,8 +50,8 @@ pub fn list(json_out: bool) -> Result<()> {
 }
 
 pub fn create(name: &str, file: &str, json_out: bool) -> Result<()> {
-    let yaml = std::fs::read_to_string(file)
-        .with_context(|| format!("read workflow YAML from {file}"))?;
+    let yaml =
+        std::fs::read_to_string(file).with_context(|| format!("read workflow YAML from {file}"))?;
     let cwd = std::env::current_dir()?;
     let ws = Workspace::discover(&cwd)?;
     let (server_url, repo) = remote(&ws)?;
@@ -142,7 +140,11 @@ pub fn set_enabled(id: i64, enabled: bool, json_out: bool) -> Result<()> {
         if json_out {
             println!("{}", json!({ "ok": true, "id": id, "enabled": enabled }));
         } else {
-            println!("{} workflow {}", if enabled { "Enabled" } else { "Disabled" }, id);
+            println!(
+                "{} workflow {}",
+                if enabled { "Enabled" } else { "Disabled" },
+                id
+            );
         }
         Ok::<(), anyhow::Error>(())
     })

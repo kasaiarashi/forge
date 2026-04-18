@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Postgres metadata backend for the Phase-1 atomic-push surface.
 //!
@@ -30,8 +30,8 @@ use std::time::Duration;
 
 use crate::storage::backend::MetadataBackend;
 use crate::storage::db::{
-    CommitSessionOutcome, LockInfo, PendingRepoOp, RefUpdateOutcome, RefUpdateSpec,
-    RepoRecord, UploadSessionRecord,
+    CommitSessionOutcome, LockInfo, PendingRepoOp, RefUpdateOutcome, RefUpdateSpec, RepoRecord,
+    UploadSessionRecord,
 };
 
 /// Tuning knobs for the Postgres pool. Defaults match the SQLite
@@ -194,10 +194,7 @@ impl MetadataBackend for PgMetadataBackend {
 
     fn get_repo_visibility(&self, name: &str) -> Result<Option<String>> {
         let mut conn = self.conn()?;
-        let row = conn.query_opt(
-            "SELECT visibility FROM repos WHERE name = $1",
-            &[&name],
-        )?;
+        let row = conn.query_opt("SELECT visibility FROM repos WHERE name = $1", &[&name])?;
         Ok(row.map(|r| r.get(0)))
     }
 
@@ -259,8 +256,14 @@ impl MetadataBackend for PgMetadataBackend {
             &[&effective_name, &description, &name],
         )?;
         if !new_name.is_empty() && new_name != name {
-            tx.execute("UPDATE refs SET repo = $1 WHERE repo = $2", &[&new_name, &name])?;
-            tx.execute("UPDATE locks SET repo = $1 WHERE repo = $2", &[&new_name, &name])?;
+            tx.execute(
+                "UPDATE refs SET repo = $1 WHERE repo = $2",
+                &[&new_name, &name],
+            )?;
+            tx.execute(
+                "UPDATE locks SET repo = $1 WHERE repo = $2",
+                &[&new_name, &name],
+            )?;
         }
         tx.commit()?;
         Ok(true)
@@ -292,10 +295,7 @@ impl MetadataBackend for PgMetadataBackend {
 
     fn get_all_refs(&self, repo: &str) -> Result<Vec<(String, Vec<u8>)>> {
         let mut conn = self.conn()?;
-        let rows = conn.query(
-            "SELECT name, hash FROM refs WHERE repo = $1",
-            &[&repo],
-        )?;
+        let rows = conn.query("SELECT name, hash FROM refs WHERE repo = $1", &[&repo])?;
         Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
     }
 
@@ -545,10 +545,7 @@ impl MetadataBackend for PgMetadataBackend {
         }
 
         let repo: String = tx
-            .query_one(
-                "SELECT repo FROM upload_sessions WHERE id = $1",
-                &[&sid],
-            )?
+            .query_one("SELECT repo FROM upload_sessions WHERE id = $1", &[&sid])?
             .get(0);
 
         let mut ref_results = Vec::with_capacity(updates.len());
@@ -614,12 +611,7 @@ impl MetadataBackend for PgMetadataBackend {
 
     // -- Pending repo ops (Phase 3b.5) --
 
-    fn enqueue_repo_op(
-        &self,
-        op_type: &str,
-        repo: &str,
-        new_repo: Option<&str>,
-    ) -> Result<i64> {
+    fn enqueue_repo_op(&self, op_type: &str, repo: &str, new_repo: Option<&str>) -> Result<i64> {
         if op_type != "rename" && op_type != "delete" {
             anyhow::bail!("op_type must be 'rename' or 'delete', got '{op_type}'");
         }

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Cross-backend parity suite for the Phase-1 atomic-push surface.
 //!
@@ -45,9 +45,13 @@ fn exercise_atomic_push_surface<B: MetadataBackend>(backend: &B) {
 
     // -- Upload session + commit path --
     let sid = "sess-parity-1";
-    backend.create_upload_session(sid, repo, None, 3600).unwrap();
+    backend
+        .create_upload_session(sid, repo, None, 3600)
+        .unwrap();
     // Idempotent re-create.
-    backend.create_upload_session(sid, repo, None, 3600).unwrap();
+    backend
+        .create_upload_session(sid, repo, None, 3600)
+        .unwrap();
 
     let h1 = hash(0xAA);
     let h2 = hash(0xBB);
@@ -84,7 +88,10 @@ fn exercise_atomic_push_surface<B: MetadataBackend>(backend: &B) {
     }];
     let outcome = backend.commit_upload_session(sid, &updates).unwrap();
     match outcome {
-        CommitSessionOutcome::Committed { all_success, ref_results } => {
+        CommitSessionOutcome::Committed {
+            all_success,
+            ref_results,
+        } => {
             assert!(all_success, "ref create should succeed: {ref_results:?}");
         }
         other => panic!("expected Committed, got {other:?}"),
@@ -118,17 +125,24 @@ fn exercise_atomic_push_surface<B: MetadataBackend>(backend: &B) {
 
     // CAS: old mismatches, so failure.
     assert!(
-        !backend.update_ref(repo, main_ref, &h1, &hash(0xCC), false).unwrap(),
+        !backend
+            .update_ref(repo, main_ref, &h1, &hash(0xCC), false)
+            .unwrap(),
         "CAS with stale old_hash must fail",
     );
     assert_eq!(backend.get_ref(repo, main_ref).unwrap().unwrap(), h2);
 
     // Force update bypasses CAS.
     assert!(
-        backend.update_ref(repo, main_ref, &h1, &hash(0xCC), true).unwrap(),
+        backend
+            .update_ref(repo, main_ref, &h1, &hash(0xCC), true)
+            .unwrap(),
         "force update must ignore old_hash",
     );
-    assert_eq!(backend.get_ref(repo, main_ref).unwrap().unwrap(), hash(0xCC));
+    assert_eq!(
+        backend.get_ref(repo, main_ref).unwrap().unwrap(),
+        hash(0xCC)
+    );
 
     // -- Locks --
     let lock_path = "Content/Hero.uasset";
@@ -162,7 +176,9 @@ fn exercise_atomic_push_surface<B: MetadataBackend>(backend: &B) {
         "non-owner release must fail (returns false)",
     );
     // Owner release = ok.
-    assert!(backend.release_lock(repo, lock_path, "alice", false).unwrap());
+    assert!(backend
+        .release_lock(repo, lock_path, "alice", false)
+        .unwrap());
     assert!(backend.list_locks(repo, "", "").unwrap().is_empty());
 
     // -- Stale session sweep --
@@ -189,7 +205,9 @@ fn exercise_atomic_push_surface<B: MetadataBackend>(backend: &B) {
     let rename_id = backend
         .enqueue_repo_op("rename", "alice/old", Some("alice/new"))
         .unwrap();
-    let delete_id = backend.enqueue_repo_op("delete", "alice/doomed", None).unwrap();
+    let delete_id = backend
+        .enqueue_repo_op("delete", "alice/doomed", None)
+        .unwrap();
     assert_ne!(rename_id, delete_id);
 
     let listed = backend.list_pending_repo_ops().unwrap();
@@ -224,7 +242,9 @@ fn exercise_atomic_push_surface<B: MetadataBackend>(backend: &B) {
 
     // Fail the rename with a 0-second backoff so it becomes
     // immediately re-claimable. `attempts` keeps climbing.
-    backend.fail_repo_op(rename_id, "simulated failure", 0).unwrap();
+    backend
+        .fail_repo_op(rename_id, "simulated failure", 0)
+        .unwrap();
     let retried = backend
         .claim_next_repo_op(60)
         .unwrap()
@@ -244,7 +264,9 @@ fn exercise_atomic_push_surface<B: MetadataBackend>(backend: &B) {
 
     // Bad op_type is rejected at enqueue time.
     assert!(
-        backend.enqueue_repo_op("vaporize", "alice/old", None).is_err(),
+        backend
+            .enqueue_repo_op("vaporize", "alice/old", None)
+            .is_err(),
         "enqueue must validate op_type",
     );
 
@@ -324,7 +346,10 @@ mod pg {
         };
         reset(&url);
 
-        let cfg = PgPoolConfig { url, ..Default::default() };
+        let cfg = PgPoolConfig {
+            url,
+            ..Default::default()
+        };
         let b1 = PgMetadataBackend::open(cfg.clone()).unwrap();
         let v1 = b1.current_schema_version().unwrap();
         drop(b1);

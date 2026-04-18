@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! S3-compatible object backend (Phase 3b.1).
 //!
@@ -101,12 +101,13 @@ impl S3ObjectBackend {
             anyhow::bail!("s3_objects: bucket is required");
         }
 
-        let mut loader = aws_config::defaults(BehaviorVersion::latest())
-            .region(Region::new(if cfg.region.is_empty() {
+        let mut loader = aws_config::defaults(BehaviorVersion::latest()).region(Region::new(
+            if cfg.region.is_empty() {
                 "us-east-1".to_string()
             } else {
                 cfg.region.clone()
-            }));
+            },
+        ));
         if !cfg.access_key_id.is_empty() || !cfg.secret_access_key.is_empty() {
             // Static creds take precedence. Empty → default chain (env,
             // profile, ECS/EKS/IMDS). Never synthesise a partial cred.
@@ -255,11 +256,7 @@ impl S3ObjectBackend {
     /// just re-copies + re-deletes whatever is still under old. S3
     /// CopyObject is safe to retry because keys are content-addressed
     /// — a partial copy becomes a full copy, never a corruption.
-    pub async fn drain_rename_repo(
-        &self,
-        old_repo: &str,
-        new_repo: &str,
-    ) -> Result<usize> {
+    pub async fn drain_rename_repo(&self, old_repo: &str, new_repo: &str) -> Result<usize> {
         if old_repo == new_repo {
             // No-op: rename to self shouldn't have been enqueued, but
             // make sure the drain completes cleanly if it was.
@@ -300,9 +297,7 @@ impl S3ObjectBackend {
                     .copy_source(&copy_source)
                     .send()
                     .await
-                    .with_context(|| {
-                        format!("copy_object {src_key} -> {dst_key}")
-                    })?;
+                    .with_context(|| format!("copy_object {src_key} -> {dst_key}"))?;
                 to_delete.push(
                     ObjectIdentifier::builder()
                         .key(src_key)
@@ -322,9 +317,7 @@ impl S3ObjectBackend {
                     .delete(delete)
                     .send()
                     .await
-                    .with_context(|| {
-                        format!("delete_objects after copy for {old_prefix}")
-                    })?;
+                    .with_context(|| format!("delete_objects after copy for {old_prefix}"))?;
             }
             total += page_count;
 
@@ -563,7 +556,9 @@ impl ObjectBackend for S3ObjectBackend {
     }
 }
 
-fn is_not_found(err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>) -> bool {
+fn is_not_found(
+    err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>,
+) -> bool {
     matches!(
         err,
         aws_sdk_s3::error::SdkError::ServiceError(se)
@@ -630,8 +625,7 @@ mod tests {
         let bucket = env_or_skip("FORGE_S3_BUCKET")?;
         Some(S3ObjectBackendConfig {
             bucket,
-            prefix: std::env::var("FORGE_S3_PREFIX")
-                .unwrap_or_else(|_| "forge-tests/".into()),
+            prefix: std::env::var("FORGE_S3_PREFIX").unwrap_or_else(|_| "forge-tests/".into()),
             region: std::env::var("FORGE_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
             endpoint_url: std::env::var("FORGE_S3_ENDPOINT").unwrap_or_default(),
             access_key_id: std::env::var("FORGE_S3_ACCESS_KEY").unwrap_or_default(),

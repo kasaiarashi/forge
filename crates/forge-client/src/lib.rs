@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Shared Forge gRPC client surface.
 //!
@@ -22,7 +22,5 @@ pub mod credentials;
 pub mod tofu;
 pub mod url_resolver;
 
-pub use client::{
-    connect_auth, connect_auth_anonymous, connect_forge, AuthInterceptor,
-};
+pub use client::{connect_auth, connect_auth_anonymous, connect_forge, AuthInterceptor};
 pub use credentials::Credential;

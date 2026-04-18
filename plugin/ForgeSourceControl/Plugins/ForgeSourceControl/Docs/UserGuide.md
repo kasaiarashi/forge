@@ -198,4 +198,4 @@ shared branch.
 - GitHub issues: https://github.com/kasaiarashi/forge/issues
 - Fab listing: https://www.fab.com/listings/7cd90180-8c2f-4b64-a772-2f010cec0105
 
-Licensed under the MIT License. Copyright (c) 2026 Krishna Teja Mekala.
+Licensed under the BSL 1.1.. Copyright (c) 2026 Krishna Teja Mekala.

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Artifact storage backend. Pluggable: the default is a local-filesystem
 //! layout that matches the pre-Phase-1 `collect_artifact` paths; an S3

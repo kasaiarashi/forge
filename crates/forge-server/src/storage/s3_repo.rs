@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! `RepoStorageBackend` implementation that puts the LIVE object store
 //! in S3 while keeping staging on the local filesystem (Phase 3b.4).

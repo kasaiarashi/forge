@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 mod auth;
 #[cfg(windows)]
@@ -12,9 +12,9 @@ mod service;
 mod services;
 mod storage;
 mod tls_autogen;
-mod update;
 #[cfg(target_os = "linux")]
 mod uninstall;
+mod update;
 
 use std::sync::Arc;
 
@@ -311,9 +311,7 @@ fn main() -> Result<()> {
     // `/etc/forge/forge-server.toml` when it exists.
     #[cfg(target_os = "linux")]
     {
-        if cli.config == "forge-server.toml"
-            && !std::path::Path::new(&cli.config).exists()
-        {
+        if cli.config == "forge-server.toml" && !std::path::Path::new(&cli.config).exists() {
             let system = "/etc/forge/forge-server.toml";
             if std::path::Path::new(system).exists() {
                 cli.config = system.into();
@@ -356,7 +354,11 @@ fn main() -> Result<()> {
             );
             return Ok(());
         }
-        Some(Commands::Update { check, force, version }) => {
+        Some(Commands::Update {
+            check,
+            force,
+            version,
+        }) => {
             update::run(check, force, version)?;
             return Ok(());
         }
@@ -427,9 +429,7 @@ fn main() -> Result<()> {
         Some(Commands::Agent { ref action }) => {
             let config = load_config_for_admin(&cli)?;
             match action {
-                AgentAction::Add { name, labels } => {
-                    cli_admin::agent_add(&config, name, labels)?
-                }
+                AgentAction::Add { name, labels } => cli_admin::agent_add(&config, name, labels)?,
                 AgentAction::List => cli_admin::agent_list(&config)?,
                 AgentAction::Remove { name } => cli_admin::agent_remove(&config, name)?,
             }
@@ -452,12 +452,20 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Some(Commands::Gc { dry_run, grace_hours, ref repo }) => {
+        Some(Commands::Gc {
+            dry_run,
+            grace_hours,
+            ref repo,
+        }) => {
             let config = load_config_for_admin(&cli)?;
             cli_admin::gc(&config, dry_run, grace_hours, repo.as_deref())?;
             return Ok(());
         }
-        Some(Commands::Repack { dry_run, max_loose_bytes, ref repo }) => {
+        Some(Commands::Repack {
+            dry_run,
+            max_loose_bytes,
+            ref repo,
+        }) => {
             let config = load_config_for_admin(&cli)?;
             cli_admin::repack(&config, dry_run, max_loose_bytes, repo.as_deref())?;
             return Ok(());
@@ -553,10 +561,7 @@ pub(crate) async fn serve_inner(
     // path to resolve the log dir against. Guards are held until the end
     // of `serve_inner`; dropping them at the wrong moment loses the
     // final flush from the non-blocking appender.
-    let _log_guards = observability::init(
-        &config.logging,
-        config.resolved_log_dir().as_deref(),
-    );
+    let _log_guards = observability::init(&config.logging, config.resolved_log_dir().as_deref());
 
     // Metadata backend selection. Phase 2b.2 shipped the trait +
     // Postgres impl + parity tests, but the server process still
@@ -575,7 +580,9 @@ pub(crate) async fn serve_inner(
                  against a postgres URL to exercise the runner."
             );
         }
-        other => anyhow::bail!("unknown [database] backend '{other}' (expected 'sqlite' or 'postgres')"),
+        other => {
+            anyhow::bail!("unknown [database] backend '{other}' (expected 'sqlite' or 'postgres')")
+        }
     }
 
     let db_path = config.resolved_db_path();
@@ -624,9 +631,7 @@ pub(crate) async fn serve_inner(
                     );
                 }
             }
-            other => anyhow::bail!(
-                "[objects] backend = \"{other}\" — expected \"fs\" or \"s3\""
-            ),
+            other => anyhow::bail!("[objects] backend = \"{other}\" — expected \"fs\" or \"s3\""),
         };
 
     let user_store: Arc<dyn auth::UserStore> =
@@ -728,7 +733,10 @@ pub(crate) async fn serve_inner(
             Arc::clone(&secrets),
             Arc::clone(&log_hub),
         );
-        info!("Actions engine started (executor: {})", config.actions.executor);
+        info!(
+            "Actions engine started (executor: {})",
+            config.actions.executor
+        );
         Some(tx)
     } else {
         None
@@ -810,8 +818,7 @@ pub(crate) async fn serve_inner(
                     sans.push(host);
                 }
             }
-            tls_autogen::ensure(&paths, &sans)
-                .context("auto-generating TLS certificates")?;
+            tls_autogen::ensure(&paths, &sans).context("auto-generating TLS certificates")?;
         }
 
         // On Windows, push the CA into the system trust store so clients
@@ -984,10 +991,7 @@ fn handle_service_command(action: &ServiceAction) -> Result<()> {
 /// Returns `None` when the server is already initialized (users exist). The
 /// returned `Option<String>` is stashed on `ForgeAuthService` and compared
 /// against `BootstrapAdminRequest.bootstrap_token`.
-fn ensure_bootstrap_token(
-    db: Arc<MetadataDb>,
-    path: &std::path::Path,
-) -> Result<Option<String>> {
+fn ensure_bootstrap_token(db: Arc<MetadataDb>, path: &std::path::Path) -> Result<Option<String>> {
     use auth::store::UserStore as _;
     let store = auth::SqliteUserStore::new(db);
     let user_count = store.count_users().context("counting users")?;
@@ -1021,8 +1025,7 @@ fn ensure_bootstrap_token(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(path, &token)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(path, &token).with_context(|| format!("failed to write {}", path.display()))?;
 
     warn!(
         "\n*** FIRST-RUN BOOTSTRAP TOKEN ***\n\
@@ -1055,11 +1058,7 @@ fn local_non_loopback_ips() -> Vec<std::net::IpAddr> {
                 // what the operator means to expose.
                 match ip {
                     std::net::IpAddr::V4(v4) if v4.is_link_local() => None,
-                    std::net::IpAddr::V6(v6)
-                        if (v6.segments()[0] & 0xffc0) == 0xfe80 =>
-                    {
-                        None
-                    }
+                    std::net::IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => None,
                     _ => Some(ip),
                 }
             })
@@ -1074,10 +1073,7 @@ fn local_non_loopback_ips() -> Vec<std::net::IpAddr> {
 /// Resolve the cert/key paths from `[server.tls]`, falling back to the
 /// default layout under `<base_path>/certs/` when the operator left them
 /// unset (the auto-generate happy path).
-fn resolve_tls_paths(
-    tls: &config::TlsConfig,
-    base: &std::path::Path,
-) -> tls_autogen::TlsPaths {
+fn resolve_tls_paths(tls: &config::TlsConfig, base: &std::path::Path) -> tls_autogen::TlsPaths {
     let defaults = tls_autogen::TlsPaths::under(base);
     tls_autogen::TlsPaths {
         ca_cert: defaults.ca_cert.clone(),

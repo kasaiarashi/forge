@@ -101,4 +101,4 @@ Support and Documentation
 
 License
 -------
-MIT License. Copyright (c) 2026 Krishna Teja Mekala.
+BSL 1.1.. Copyright (c) 2026 Krishna Teja Mekala.

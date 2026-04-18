@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Install the auto-generated CA into the Windows trust store so TLS clients
 //! stop failing with `invalid peer certificate: BadSignature`.

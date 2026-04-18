@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::{anyhow, bail, Context, Result};
 use forge_core::object::snapshot::Author;
@@ -107,7 +107,11 @@ enum TargetState {
     ResumeExisting(Workspace),
 }
 
-fn resolve_target(target: &std::path::Path, server_url: &str, repo_name: &str) -> Result<TargetState> {
+fn resolve_target(
+    target: &std::path::Path,
+    server_url: &str,
+    repo_name: &str,
+) -> Result<TargetState> {
     if !target.exists() {
         return Ok(TargetState::FreshOrEmpty);
     }
@@ -123,15 +127,13 @@ fn resolve_target(target: &std::path::Path, server_url: &str, repo_name: &str) -
             .config()
             .with_context(|| format!("reading config for {}", target.display()))?;
 
-        let existing_remote = cfg
-            .default_remote_url()
-            .ok_or_else(|| {
-                anyhow!(
-                    "existing .forge at {} has no remote configured — delete it \
+        let existing_remote = cfg.default_remote_url().ok_or_else(|| {
+            anyhow!(
+                "existing .forge at {} has no remote configured — delete it \
                      or use a different target path",
-                    target.display()
-                )
-            })?;
+                target.display()
+            )
+        })?;
 
         if existing_remote != server_url || cfg.repo != repo_name {
             bail!(
@@ -227,10 +229,7 @@ pub(super) fn parse_clone_url(raw: &str) -> Result<(String, Option<String>)> {
     // Reject deeply-nested paths — `/owner/name` is exactly two segments.
     let segment_count = trimmed_path.split('/').filter(|s| !s.is_empty()).count();
     if segment_count != 2 {
-        bail!(
-            "expected URL path '<owner>/<name>', got '{}'",
-            trimmed_path
-        );
+        bail!("expected URL path '<owner>/<name>', got '{}'", trimmed_path);
     }
     Ok((server_url, Some(trimmed_path.to_string())))
 }

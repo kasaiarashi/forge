@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Background drain for the Phase 3b.5 pending-repo-ops queue.
 //!
@@ -98,10 +98,7 @@ pub fn spawn(db: Arc<dyn MetadataBackend>, s3: Arc<S3ObjectBackend>) {
 ///
 /// Exposed for integration tests that want to drive the drain
 /// deterministically instead of spawning the task.
-pub async fn drain_once(
-    db: &dyn MetadataBackend,
-    s3: &S3ObjectBackend,
-) -> anyhow::Result<usize> {
+pub async fn drain_once(db: &dyn MetadataBackend, s3: &S3ObjectBackend) -> anyhow::Result<usize> {
     let Some(op) = db.claim_next_repo_op(VISIBILITY_SECS)? else {
         return Ok(0);
     };

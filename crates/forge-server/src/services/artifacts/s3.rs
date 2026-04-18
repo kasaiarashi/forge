@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! S3-compatible artifact backend.
 //!
@@ -438,12 +438,7 @@ fn path_relative(prefix: &str, key: &str) -> String {
 #[cfg(not(feature = "s3-objects"))]
 #[async_trait]
 impl ArtifactStore for S3ArtifactStore {
-    async fn put(
-        &self,
-        _run_id: i64,
-        _name: &str,
-        _reader: AsyncReader,
-    ) -> Result<ArtifactHandle> {
+    async fn put(&self, _run_id: i64, _name: &str, _reader: AsyncReader) -> Result<ArtifactHandle> {
         bail!(
             "S3 artifact backend requires the `s3-objects` cargo feature. \
              Rebuild forge-server with `--features s3-objects` or set \
@@ -452,9 +447,7 @@ impl ArtifactStore for S3ArtifactStore {
     }
 
     async fn get(&self, _path: &str) -> Result<AsyncReader> {
-        bail!(
-            "S3 artifact backend requires the `s3-objects` cargo feature."
-        );
+        bail!("S3 artifact backend requires the `s3-objects` cargo feature.");
     }
 
     async fn delete_run(&self, _run_id: i64) -> Result<()> {

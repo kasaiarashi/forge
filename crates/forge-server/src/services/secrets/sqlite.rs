@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! SQLite-backed secret store. Ciphertext is AES-256-GCM with a fresh 12-byte
 //! nonce per put; the master key lives outside the DB (see [`master_key`]).

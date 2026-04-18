@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::{bail, Result};
 use forge_core::workspace::Workspace;
@@ -25,7 +25,11 @@ pub fn run(path: String, reason: Option<String>, json: bool) -> Result<()> {
 
         let resp = client
             .acquire_lock(LockRequest {
-                repo: if config.repo.is_empty() { "default".into() } else { config.repo.clone() },
+                repo: if config.repo.is_empty() {
+                    "default".into()
+                } else {
+                    config.repo.clone()
+                },
                 path: rel_path.clone(),
                 owner: config.user.name.clone(),
                 workspace_id: config.workspace_id.clone(),
@@ -36,23 +40,29 @@ pub fn run(path: String, reason: Option<String>, json: bool) -> Result<()> {
 
         if resp.granted {
             if json {
-                println!("{}", serde_json::to_string_pretty(&json!({
-                    "ok": true,
-                    "path": rel_path,
-                    "owner": config.user.name,
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": true,
+                        "path": rel_path,
+                        "owner": config.user.name,
+                    }))?
+                );
             } else {
                 println!("\x1b[32mLocked:\x1b[0m {}", rel_path);
             }
         } else if let Some(lock) = resp.existing_lock {
             if json {
-                println!("{}", serde_json::to_string_pretty(&json!({
-                    "ok": false,
-                    "error": format!("already locked by '{}'", lock.owner),
-                    "path": rel_path,
-                    "owner": lock.owner,
-                    "created_at": lock.created_at,
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": false,
+                        "error": format!("already locked by '{}'", lock.owner),
+                        "path": rel_path,
+                        "owner": lock.owner,
+                        "created_at": lock.created_at,
+                    }))?
+                );
             } else {
                 bail!(
                     "File '{}' is already locked by '{}' (since {})",
@@ -65,13 +75,19 @@ pub fn run(path: String, reason: Option<String>, json: bool) -> Result<()> {
             }
         } else {
             if json {
-                println!("{}", serde_json::to_string_pretty(&json!({
-                    "ok": false,
-                    "error": "server denied without details",
-                    "path": rel_path,
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": false,
+                        "error": "server denied without details",
+                        "path": rel_path,
+                    }))?
+                );
             } else {
-                bail!("Failed to acquire lock on '{}': server denied without details", rel_path);
+                bail!(
+                    "Failed to acquire lock on '{}': server denied without details",
+                    rel_path
+                );
             }
         }
 

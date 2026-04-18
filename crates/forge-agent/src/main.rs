@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! `forge-agent` — distributed CI runner.
 //!
@@ -128,7 +128,10 @@ fn register(
         perms.set_mode(0o600);
         let _ = std::fs::set_permissions(&config_path, perms);
     }
-    println!("Wrote {}. Start the agent with: forge-agent run", config_path.display());
+    println!(
+        "Wrote {}. Start the agent with: forge-agent run",
+        config_path.display()
+    );
     Ok(())
 }
 
@@ -223,8 +226,7 @@ async fn run_agent(config_path: PathBuf) -> Result<()> {
                 }
                 info!(run_id = resp.run_id, "claimed run");
                 if let Err(e) =
-                    runner::execute_run(&mut client.clone(), Arc::clone(&cfg), agent_id, resp)
-                        .await
+                    runner::execute_run(&mut client.clone(), Arc::clone(&cfg), agent_id, resp).await
                 {
                     error!(error = %e, "run execution failed");
                 }

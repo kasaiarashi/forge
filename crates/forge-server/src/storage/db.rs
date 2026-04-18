@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::{Context, Result};
 use r2d2::Pool;
@@ -108,9 +108,7 @@ impl MetadataDb {
             // after a DB file replace) doesn't poison a handler.
             .test_on_check_out(true)
             .build(manager)
-            .with_context(|| {
-                format!("Failed to build metadata pool for {}", path.display())
-            })?;
+            .with_context(|| format!("Failed to build metadata pool for {}", path.display()))?;
 
         // Schema setup runs on a freshly pooled connection. The pragmas
         // above have already been applied via `with_init`.
@@ -240,10 +238,19 @@ impl MetadataDb {
         )?;
 
         // Migrate: add assignee column if missing
-        let _ = conn.execute("ALTER TABLE issues ADD COLUMN assignee TEXT NOT NULL DEFAULT ''", []);
-        let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN assignee TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute(
+            "ALTER TABLE issues ADD COLUMN assignee TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE pull_requests ADD COLUMN assignee TEXT NOT NULL DEFAULT ''",
+            [],
+        );
         // Migrate: add default_branch column if missing
-        let _ = conn.execute("ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute(
+            "ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''",
+            [],
+        );
 
         // Release the initial connection back to the pool so subsequent
         // setup calls don't deadlock when the pool is small.
@@ -279,10 +286,7 @@ impl MetadataDb {
             crate::storage::migrations::SQLITE_MIGRATIONS,
         )?;
         if applied == 0 {
-            tracing::debug!(
-                current_version = current,
-                "no pending migrations"
-            );
+            tracing::debug!(current_version = current, "no pending migrations");
         }
         Ok(())
     }
@@ -435,8 +439,7 @@ impl MetadataDb {
 
     pub fn list_session_object_hashes(&self, sid: &str) -> Result<Vec<Vec<u8>>> {
         let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("SELECT hash FROM session_objects WHERE session_id = ?1")?;
+        let mut stmt = conn.prepare("SELECT hash FROM session_objects WHERE session_id = ?1")?;
         let rows = stmt.query_map([sid], |r| r.get::<_, Vec<u8>>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
@@ -449,9 +452,8 @@ impl MetadataDb {
     /// question separately.
     pub fn list_session_objects_with_sizes(&self, sid: &str) -> Result<Vec<(Vec<u8>, i64)>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT hash, size FROM session_objects WHERE session_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT hash, size FROM session_objects WHERE session_id = ?1")?;
         let rows = stmt.query_map([sid], |r| {
             Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
         })?;
@@ -491,9 +493,7 @@ impl MetadataDb {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         let session: Option<(String, Option<String>)> = tx
-            .prepare(
-                "SELECT state, result_json FROM upload_sessions WHERE id = ?1",
-            )?
+            .prepare("SELECT state, result_json FROM upload_sessions WHERE id = ?1")?
             .query_row([sid], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
             })
@@ -629,10 +629,7 @@ impl MetadataDb {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn claim_next_repo_op(
-        &self,
-        visibility_secs: i64,
-    ) -> Result<Option<PendingRepoOp>> {
+    pub fn claim_next_repo_op(&self, visibility_secs: i64) -> Result<Option<PendingRepoOp>> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let next_visible = now + visibility_secs;
@@ -667,12 +664,7 @@ impl MetadataDb {
         Ok(())
     }
 
-    pub fn fail_repo_op(
-        &self,
-        id: i64,
-        error: &str,
-        retry_delay_secs: i64,
-    ) -> Result<()> {
+    pub fn fail_repo_op(&self, id: i64, error: &str, retry_delay_secs: i64) -> Result<()> {
         let conn = self.conn()?;
         let retry_at = chrono::Utc::now().timestamp() + retry_delay_secs;
         conn.execute(
@@ -737,9 +729,7 @@ impl MetadataDb {
     /// 503 on `/readyz` instead of silently serving traffic.
     pub fn ping(&self) -> Result<()> {
         let conn = self.conn()?;
-        let _: i64 = conn
-            .prepare("SELECT 1")?
-            .query_row([], |r| r.get(0))?;
+        let _: i64 = conn.prepare("SELECT 1")?.query_row([], |r| r.get(0))?;
         Ok(())
     }
 
@@ -797,15 +787,10 @@ impl MetadataDb {
         Ok(id)
     }
 
-    pub fn get_agent_by_name(
-        &self,
-        name: &str,
-    ) -> Result<Option<(i64, String, String)>> {
+    pub fn get_agent_by_name(&self, name: &str) -> Result<Option<(i64, String, String)>> {
         let conn = self.conn()?;
         let result = conn
-            .prepare(
-                "SELECT id, token_hash, labels_json FROM agents WHERE name = ?1",
-            )?
+            .prepare("SELECT id, token_hash, labels_json FROM agents WHERE name = ?1")?
             .query_row([name], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -817,15 +802,10 @@ impl MetadataDb {
         Ok(result)
     }
 
-    pub fn get_agent_by_id(
-        &self,
-        id: i64,
-    ) -> Result<Option<(String, String, String)>> {
+    pub fn get_agent_by_id(&self, id: i64) -> Result<Option<(String, String, String)>> {
         let conn = self.conn()?;
         let result = conn
-            .prepare(
-                "SELECT name, token_hash, labels_json FROM agents WHERE id = ?1",
-            )?
+            .prepare("SELECT name, token_hash, labels_json FROM agents WHERE id = ?1")?
             .query_row([id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -846,9 +826,7 @@ impl MetadataDb {
         Ok(())
     }
 
-    pub fn list_agents(
-        &self,
-    ) -> Result<Vec<(i64, String, String, i64, String, String)>> {
+    pub fn list_agents(&self) -> Result<Vec<(i64, String, String, i64, String, String)>> {
         // (id, name, labels_json, last_seen, version, os)
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -878,11 +856,7 @@ impl MetadataDb {
     /// Atomically claim the oldest queued run whose workflow doesn't
     /// require labels the agent is missing. Returns (run_id) on success
     /// or None when no work is available.
-    pub fn claim_next_run(
-        &self,
-        agent_id: i64,
-        _agent_labels: &[String],
-    ) -> Result<Option<i64>> {
+    pub fn claim_next_run(&self, agent_id: i64, _agent_labels: &[String]) -> Result<Option<i64>> {
         // v1 label routing is permissive: if the run has no claim yet and
         // is queued, any agent can take it. Full label matching lands when
         // runs-on is parsed out of the workflow YAML in Phase 3.
@@ -1052,8 +1026,9 @@ impl MetadataDb {
 
     pub fn list_repos(&self) -> Result<Vec<RepoRecord>> {
         let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("SELECT name, description, created_at, visibility, default_branch FROM repos")?;
+        let mut stmt = conn.prepare(
+            "SELECT name, description, created_at, visibility, default_branch FROM repos",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok(RepoRecord {
                 name: row.get(0)?,
@@ -1076,9 +1051,7 @@ impl MetadataDb {
     pub fn get_repo_visibility(&self, name: &str) -> Result<Option<String>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT visibility FROM repos WHERE name = ?1")?;
-        let result = stmt
-            .query_row([name], |row| row.get::<_, String>(0))
-            .ok();
+        let result = stmt.query_row([name], |row| row.get::<_, String>(0)).ok();
         Ok(result)
     }
 
@@ -1087,7 +1060,10 @@ impl MetadataDb {
     /// exist — the latter is fine because the read handler will fail later
     /// with NotFound.
     pub fn is_repo_public(&self, name: &str) -> bool {
-        matches!(self.get_repo_visibility(name).ok().flatten().as_deref(), Some("public"))
+        matches!(
+            self.get_repo_visibility(name).ok().flatten().as_deref(),
+            Some("public")
+        )
     }
 
     /// Set the visibility of a repo. Returns true on success, false if the
@@ -1178,7 +1154,9 @@ impl MetadataDb {
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT hash FROM refs WHERE repo = ?1 AND name = ?2")?;
         let result = stmt
-            .query_row(rusqlite::params![repo, name], |row| row.get::<_, Vec<u8>>(0))
+            .query_row(rusqlite::params![repo, name], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
             .ok();
         Ok(result)
     }
@@ -1291,7 +1269,10 @@ impl MetadataDb {
     pub fn release_lock(&self, repo: &str, path: &str, owner: &str, force: bool) -> Result<bool> {
         let conn = self.conn()?;
         let affected = if force {
-            conn.execute("DELETE FROM locks WHERE repo = ?1 AND path = ?2", rusqlite::params![repo, path])?
+            conn.execute(
+                "DELETE FROM locks WHERE repo = ?1 AND path = ?2",
+                rusqlite::params![repo, path],
+            )?
         } else {
             conn.execute(
                 "DELETE FROM locks WHERE repo = ?1 AND path = ?2 AND owner = ?3",
@@ -1301,7 +1282,12 @@ impl MetadataDb {
         Ok(affected > 0)
     }
 
-    pub fn list_locks(&self, repo: &str, path_prefix: &str, owner_filter: &str) -> Result<Vec<LockInfo>> {
+    pub fn list_locks(
+        &self,
+        repo: &str,
+        path_prefix: &str,
+        owner_filter: &str,
+    ) -> Result<Vec<LockInfo>> {
         let conn = self.conn()?;
         let mut locks = Vec::new();
 
@@ -1320,15 +1306,18 @@ impl MetadataDb {
             "SELECT path, owner, workspace_id, created_at, reason FROM locks WHERE repo = ?1 AND path LIKE ?2 AND owner LIKE ?3 LIMIT 10000"
         )?;
 
-        let rows = stmt.query_map(rusqlite::params![repo, prefix_pattern, owner_pattern], |row| {
-            Ok(LockInfo {
-                path: row.get(0)?,
-                owner: row.get(1)?,
-                workspace_id: row.get(2)?,
-                created_at: row.get(3)?,
-                reason: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![repo, prefix_pattern, owner_pattern],
+            |row| {
+                Ok(LockInfo {
+                    path: row.get(0)?,
+                    owner: row.get(1)?,
+                    workspace_id: row.get(2)?,
+                    created_at: row.get(3)?,
+                    reason: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                })
+            },
+        )?;
 
         for row in rows {
             locks.push(row?);
@@ -1339,7 +1328,13 @@ impl MetadataDb {
 
     // -- Issues --
 
-    pub fn list_issues(&self, repo: &str, status: &str, limit: i32, offset: i32) -> Result<(Vec<IssueRecord>, i32, i32, i32)> {
+    pub fn list_issues(
+        &self,
+        repo: &str,
+        status: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<(Vec<IssueRecord>, i32, i32, i32)> {
         let conn = self.conn()?;
         let lim = if limit <= 0 { 50 } else { limit };
 
@@ -1363,14 +1358,24 @@ impl MetadataDb {
             stmt.query_map(rusqlite::params![repo, lim, offset], Self::map_issue)?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map(rusqlite::params![repo, lim, offset, status], Self::map_issue)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
+            stmt.query_map(
+                rusqlite::params![repo, lim, offset, status],
+                Self::map_issue,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?
         };
 
         Ok((rows, total, open_count, closed_count))
     }
 
-    pub fn create_issue(&self, repo: &str, title: &str, body: &str, author: &str, labels: &str) -> Result<i64> {
+    pub fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        author: &str,
+        labels: &str,
+    ) -> Result<i64> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -1391,7 +1396,15 @@ impl MetadataDb {
     }
 
     /// Partial update: empty strings mean "keep current value".
-    pub fn update_issue(&self, id: i64, title: &str, body: &str, status: &str, labels: &str, assignee: &str) -> Result<bool> {
+    pub fn update_issue(
+        &self,
+        id: i64,
+        title: &str,
+        body: &str,
+        status: &str,
+        labels: &str,
+        assignee: &str,
+    ) -> Result<bool> {
         let current = self.get_issue(id)?;
         let current = match current {
             Some(c) => c,
@@ -1400,11 +1413,27 @@ impl MetadataDb {
 
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
-        let new_title = if title.is_empty() { &current.title } else { title };
+        let new_title = if title.is_empty() {
+            &current.title
+        } else {
+            title
+        };
         let new_body = if body.is_empty() { &current.body } else { body };
-        let new_status = if status.is_empty() { &current.status } else { status };
-        let new_labels = if labels.is_empty() { &current.labels } else { labels };
-        let new_assignee = if assignee.is_empty() { &current.assignee } else { assignee };
+        let new_status = if status.is_empty() {
+            &current.status
+        } else {
+            status
+        };
+        let new_labels = if labels.is_empty() {
+            &current.labels
+        } else {
+            labels
+        };
+        let new_assignee = if assignee.is_empty() {
+            &current.assignee
+        } else {
+            assignee
+        };
 
         let affected = conn.execute(
             "UPDATE issues SET title = ?1, body = ?2, status = ?3, labels = ?4, assignee = ?5, updated_at = ?6 WHERE id = ?7",
@@ -1431,7 +1460,13 @@ impl MetadataDb {
 
     // -- Pull Requests --
 
-    pub fn list_pull_requests(&self, repo: &str, status: &str, limit: i32, offset: i32) -> Result<(Vec<PullRequestRecord>, i32, i32, i32)> {
+    pub fn list_pull_requests(
+        &self,
+        repo: &str,
+        status: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<(Vec<PullRequestRecord>, i32, i32, i32)> {
         let conn = self.conn()?;
         let lim = if limit <= 0 { 50 } else { limit };
 
@@ -1462,7 +1497,16 @@ impl MetadataDb {
         Ok((rows, total, open_count, closed_count))
     }
 
-    pub fn create_pull_request(&self, repo: &str, title: &str, body: &str, author: &str, source_branch: &str, target_branch: &str, labels: &str) -> Result<i64> {
+    pub fn create_pull_request(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        author: &str,
+        source_branch: &str,
+        target_branch: &str,
+        labels: &str,
+    ) -> Result<i64> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -1483,7 +1527,15 @@ impl MetadataDb {
     }
 
     /// Partial update: empty strings mean "keep current value".
-    pub fn update_pull_request(&self, id: i64, title: &str, body: &str, status: &str, labels: &str, assignee: &str) -> Result<bool> {
+    pub fn update_pull_request(
+        &self,
+        id: i64,
+        title: &str,
+        body: &str,
+        status: &str,
+        labels: &str,
+        assignee: &str,
+    ) -> Result<bool> {
         let current = self.get_pull_request(id)?;
         let current = match current {
             Some(c) => c,
@@ -1492,11 +1544,27 @@ impl MetadataDb {
 
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
-        let new_title = if title.is_empty() { &current.title } else { title };
+        let new_title = if title.is_empty() {
+            &current.title
+        } else {
+            title
+        };
         let new_body = if body.is_empty() { &current.body } else { body };
-        let new_status = if status.is_empty() { &current.status } else { status };
-        let new_labels = if labels.is_empty() { &current.labels } else { labels };
-        let new_assignee = if assignee.is_empty() { &current.assignee } else { assignee };
+        let new_status = if status.is_empty() {
+            &current.status
+        } else {
+            status
+        };
+        let new_labels = if labels.is_empty() {
+            &current.labels
+        } else {
+            labels
+        };
+        let new_assignee = if assignee.is_empty() {
+            &current.assignee
+        } else {
+            assignee
+        };
 
         let affected = conn.execute(
             "UPDATE pull_requests SET title = ?1, body = ?2, status = ?3, labels = ?4, assignee = ?5, updated_at = ?6 WHERE id = ?7",
@@ -1528,7 +1596,12 @@ impl MetadataDb {
 
     // -- Comments --
 
-    pub fn list_comments(&self, repo: &str, issue_id: i64, kind: &str) -> Result<Vec<CommentRecord>> {
+    pub fn list_comments(
+        &self,
+        repo: &str,
+        issue_id: i64,
+        kind: &str,
+    ) -> Result<Vec<CommentRecord>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, issue_id, kind, author, body, created_at, updated_at
@@ -1550,7 +1623,14 @@ impl MetadataDb {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn create_comment(&self, repo: &str, issue_id: i64, kind: &str, author: &str, body: &str) -> Result<i64> {
+    pub fn create_comment(
+        &self,
+        repo: &str,
+        issue_id: i64,
+        kind: &str,
+        author: &str,
+        body: &str,
+    ) -> Result<i64> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -1559,7 +1639,11 @@ impl MetadataDb {
         )?;
         let id = conn.last_insert_rowid();
         // Increment comment_count on the parent
-        let table = if kind == "pull_request" { "pull_requests" } else { "issues" };
+        let table = if kind == "pull_request" {
+            "pull_requests"
+        } else {
+            "issues"
+        };
         conn.execute(
             &format!("UPDATE {table} SET comment_count = comment_count + 1 WHERE id = ?1"),
             [issue_id],
@@ -1587,7 +1671,11 @@ impl MetadataDb {
         let n = conn.execute("DELETE FROM comments WHERE id = ?1", [id])?;
         if n > 0 {
             if let Some((_repo, issue_id, kind)) = comment {
-                let table = if kind == "pull_request" { "pull_requests" } else { "issues" };
+                let table = if kind == "pull_request" {
+                    "pull_requests"
+                } else {
+                    "issues"
+                };
                 conn.execute(
                     &format!("UPDATE {table} SET comment_count = CASE WHEN comment_count > 0 THEN comment_count - 1 ELSE 0 END WHERE id = ?1"),
                     [issue_id],
@@ -1755,10 +1843,7 @@ pub enum CommitSessionOutcome {
     /// Retry against a session that was already failed. Client surfaces
     /// the prior outcome to the user (the session cannot be revived —
     /// start a new push).
-    TerminallyFailed {
-        reason: String,
-        result_json: String,
-    },
+    TerminallyFailed { reason: String, result_json: String },
 }
 
 /// Apply one ref update using the same semantics as [`MetadataDb::update_ref`]
@@ -1916,12 +2001,7 @@ impl crate::storage::backend::MetadataBackend for MetadataDb {
         MetadataDb::delete_upload_session(self, sid)
     }
 
-    fn enqueue_repo_op(
-        &self,
-        op_type: &str,
-        repo: &str,
-        new_repo: Option<&str>,
-    ) -> Result<i64> {
+    fn enqueue_repo_op(&self, op_type: &str, repo: &str, new_repo: Option<&str>) -> Result<i64> {
         MetadataDb::enqueue_repo_op(self, op_type, repo, new_repo)
     }
     fn claim_next_repo_op(&self, visibility_secs: i64) -> Result<Option<PendingRepoOp>> {
@@ -2001,7 +2081,9 @@ mod tests {
         assert!(!ok);
         // The original hash is preserved.
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xAA)
         );
     }
@@ -2013,11 +2095,19 @@ mod tests {
             .unwrap();
         // CAS update with the right old_hash succeeds.
         let ok = db
-            .update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xBB), false)
+            .update_ref(
+                "alice/forcetest",
+                "refs/heads/main",
+                &h(0xAA),
+                &h(0xBB),
+                false,
+            )
             .unwrap();
         assert!(ok);
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xBB)
         );
     }
@@ -2028,16 +2118,30 @@ mod tests {
         db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
             .unwrap();
         // Someone else moved the ref to 0xBB
-        db.update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xBB), false)
-            .unwrap();
+        db.update_ref(
+            "alice/forcetest",
+            "refs/heads/main",
+            &h(0xAA),
+            &h(0xBB),
+            false,
+        )
+        .unwrap();
         // We try to update assuming it's still 0xAA — must fail.
         let ok = db
-            .update_ref("alice/forcetest", "refs/heads/main", &h(0xAA), &h(0xCC), false)
+            .update_ref(
+                "alice/forcetest",
+                "refs/heads/main",
+                &h(0xAA),
+                &h(0xCC),
+                false,
+            )
             .unwrap();
         assert!(!ok);
         // And the existing ref is untouched.
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xBB)
         );
     }
@@ -2050,11 +2154,19 @@ mod tests {
         // Force-push to a totally unrelated hash, with a stale old_hash to
         // prove force bypasses the CAS check.
         let ok = db
-            .update_ref("alice/forcetest", "refs/heads/main", &h(0xDE), &h(0xCC), true)
+            .update_ref(
+                "alice/forcetest",
+                "refs/heads/main",
+                &h(0xDE),
+                &h(0xCC),
+                true,
+            )
             .unwrap();
         assert!(ok);
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xCC)
         );
     }
@@ -2068,7 +2180,9 @@ mod tests {
             .unwrap();
         assert!(ok);
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/dev").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/dev")
+                .unwrap()
+                .unwrap(),
             h(0xEE)
         );
     }
@@ -2085,7 +2199,9 @@ mod tests {
             .unwrap();
         assert!(ok);
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xAA)
         );
     }
@@ -2096,9 +2212,11 @@ mod tests {
     fn session_create_is_idempotent() {
         let (_tmp, db) = fresh_db();
         // First create — inserts.
-        db.create_upload_session("sid-1", "alice/forcetest", Some(42), 60).unwrap();
+        db.create_upload_session("sid-1", "alice/forcetest", Some(42), 60)
+            .unwrap();
         // Second call is a silent no-op via INSERT OR IGNORE.
-        db.create_upload_session("sid-1", "alice/forcetest", Some(99), 60).unwrap();
+        db.create_upload_session("sid-1", "alice/forcetest", Some(99), 60)
+            .unwrap();
 
         let rec = db.get_upload_session("sid-1").unwrap().unwrap();
         assert_eq!(rec.id, "sid-1");
@@ -2110,7 +2228,8 @@ mod tests {
     #[test]
     fn session_objects_dedup() {
         let (_tmp, db) = fresh_db();
-        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
         db.record_session_object("sid-1", &h(0x11), 100).unwrap();
         // Duplicate hash must not blow up; INSERT OR IGNORE handles it.
         db.record_session_object("sid-1", &h(0x11), 100).unwrap();
@@ -2125,7 +2244,8 @@ mod tests {
     #[test]
     fn commit_session_applies_ref_and_marks_committed() {
         let (_tmp, db) = fresh_db();
-        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
 
         let update = RefUpdateSpec {
             ref_name: "refs/heads/main",
@@ -2147,7 +2267,9 @@ mod tests {
         }
         // Ref is in place.
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xAA)
         );
         // Session marked committed.
@@ -2159,7 +2281,8 @@ mod tests {
     #[test]
     fn commit_session_is_idempotent_on_retry() {
         let (_tmp, db) = fresh_db();
-        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
 
         let update = RefUpdateSpec {
             ref_name: "refs/heads/main",
@@ -2169,7 +2292,9 @@ mod tests {
         };
 
         // First commit moves the ref and marks session committed.
-        let first = db.commit_upload_session("sid-1", &[update.clone()]).unwrap();
+        let first = db
+            .commit_upload_session("sid-1", &[update.clone()])
+            .unwrap();
         assert!(matches!(first, CommitSessionOutcome::Committed { .. }));
 
         // Retry against the same session returns AlreadyCommitted WITHOUT
@@ -2192,7 +2317,8 @@ mod tests {
         db.update_ref("alice/forcetest", "refs/heads/main", &ZERO, &h(0xAA), false)
             .unwrap();
 
-        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
 
         // Our push thinks main was at zero — a stale view.
         let stale = RefUpdateSpec {
@@ -2221,7 +2347,9 @@ mod tests {
 
         // Ref is unchanged.
         assert_eq!(
-            db.get_ref("alice/forcetest", "refs/heads/main").unwrap().unwrap(),
+            db.get_ref("alice/forcetest", "refs/heads/main")
+                .unwrap()
+                .unwrap(),
             h(0xAA)
         );
     }
@@ -2235,15 +2363,19 @@ mod tests {
             new_hash: &h(0xAA),
             force: false,
         };
-        let outcome = db.commit_upload_session("does-not-exist", &[update]).unwrap();
+        let outcome = db
+            .commit_upload_session("does-not-exist", &[update])
+            .unwrap();
         assert!(matches!(outcome, CommitSessionOutcome::Unknown));
     }
 
     #[test]
     fn commit_session_surfaces_prior_failure() {
         let (_tmp, db) = fresh_db();
-        db.create_upload_session("sid-1", "alice/forcetest", None, 60).unwrap();
-        db.fail_upload_session("sid-1", "lock_conflict", "[]").unwrap();
+        db.create_upload_session("sid-1", "alice/forcetest", None, 60)
+            .unwrap();
+        db.fail_upload_session("sid-1", "lock_conflict", "[]")
+            .unwrap();
 
         let update = RefUpdateSpec {
             ref_name: "refs/heads/main",
@@ -2370,15 +2502,9 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for j in 0..25 {
                     let path = format!("Content/path_{i}_{j}.uasset");
-                    db.acquire_lock(
-                        "alice/pool",
-                        &path,
-                        &format!("writer-{i}"),
-                        "ws",
-                        "",
-                    )
-                    .unwrap()
-                    .unwrap_or_else(|_| panic!("lock conflict unexpected in disjoint paths"));
+                    db.acquire_lock("alice/pool", &path, &format!("writer-{i}"), "ws", "")
+                        .unwrap()
+                        .unwrap_or_else(|_| panic!("lock conflict unexpected in disjoint paths"));
                 }
             }));
         }
@@ -2408,7 +2534,8 @@ mod tests {
         let (_tmp, db) = fresh_db();
         // Short TTL so the session is immediately stale in wall-clock
         // terms once we query with a future cutoff.
-        db.create_upload_session("sid-stale", "alice/forcetest", None, 60).unwrap();
+        db.create_upload_session("sid-stale", "alice/forcetest", None, 60)
+            .unwrap();
         let now = chrono::Utc::now().timestamp();
         // Pretend 24h have passed.
         let list = db.list_stale_upload_sessions(now + 24 * 3600).unwrap();

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Numbered schema migrations.
 //!
@@ -101,11 +101,7 @@ pub const POSTGRES_MIGRATIONS: &[Migration] = &[
     },
 ];
 
-pub fn apply_pending(
-    conn: &mut Connection,
-    current: i64,
-    list: &[Migration],
-) -> Result<usize> {
+pub fn apply_pending(conn: &mut Connection, current: i64, list: &[Migration]) -> Result<usize> {
     let mut applied = 0usize;
     // Callers pass lists in ascending order (enforced in debug builds),
     // but double-check here so a future maintainer can't silently

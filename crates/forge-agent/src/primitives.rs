@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Builtin primitive dispatcher. Keyed on the `uses: @builtin/<name>`
 //! string, each primitive takes a `with:` map and produces a shell command
@@ -80,16 +80,13 @@ fn ue_discover(with: &IndexMap<String, String>) -> Result<PrimitiveOutcome> {
         )));
     }
 
-    let engine_root = candidates
-        .into_iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| {
-            anyhow!(
-                "no UE {} found on this agent; install it or set UE_ROOT_{}",
-                version,
-                version.replace('.', "_")
-            )
-        })?;
+    let engine_root = candidates.into_iter().find(|p| p.exists()).ok_or_else(|| {
+        anyhow!(
+            "no UE {} found on this agent; install it or set UE_ROOT_{}",
+            version,
+            version.replace('.', "_")
+        )
+    })?;
 
     let mut outputs = HashMap::new();
     outputs.insert(
@@ -140,10 +137,7 @@ fn run_uat(with: &IndexMap<String, String>) -> Result<PrimitiveOutcome> {
     let uat = with
         .get("uat")
         .ok_or_else(|| anyhow!("run-uat needs 'uat' input (path to RunUAT.bat/.sh)"))?;
-    let args = with
-        .get("args")
-        .cloned()
-        .unwrap_or_default();
+    let args = with.get("args").cloned().unwrap_or_default();
     // UAT on Windows needs the .bat invoked via cmd /C inside the shell
     // command we generate; on Linux it's a plain shell script. Either
     // way the outer run loop already wraps in `sh -c` / `cmd /C`.

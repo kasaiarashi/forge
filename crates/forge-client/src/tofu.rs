@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Trust-on-first-use infrastructure shared between `forge login` and
 //! `forge trust`.
@@ -89,11 +89,7 @@ pub async fn ensure_trusted(server_url: &str, auto_yes: bool) -> Result<()> {
     let parsed = parse_url(server_url).ok_or_else(|| anyhow!("unparseable URL"))?;
     let chain = fetch_peer_chain(&parsed.host, parsed.port)
         .await
-        .with_context(|| {
-            format!(
-                "could not reach {server_url} to inspect its TLS certificate"
-            )
-        })?;
+        .with_context(|| format!("could not reach {server_url} to inspect its TLS certificate"))?;
     if chain.is_empty() {
         bail!("server at {server_url} presented no certificates");
     }
@@ -183,9 +179,7 @@ fn print_cert_details(url: &str, leaf: &[u8], anchor: &[u8]) {
     let anchor_fp = sha256_fingerprint(anchor);
 
     println!();
-    println!(
-        "This is the first time connecting to {url} and the server's"
-    );
+    println!("This is the first time connecting to {url} and the server's");
     println!("certificate isn't in your system trust store.");
     println!();
 
@@ -209,9 +203,7 @@ fn print_cert_details(url: &str, leaf: &[u8], anchor: &[u8]) {
         println!();
     }
 
-    println!(
-        "Compare the CA SHA-256 above against the fingerprint the server operator"
-    );
+    println!("Compare the CA SHA-256 above against the fingerprint the server operator");
     println!("printed on startup (look for 'TLS CA fingerprint' in the forge-server logs)");
     println!("before accepting.");
     println!();
@@ -435,8 +427,7 @@ fn has_pin(server_url: &str) -> bool {
 }
 
 fn pin_path(server_url: &str) -> Result<PathBuf> {
-    let parsed =
-        parse_url(server_url).ok_or_else(|| anyhow!("unparseable URL: {server_url}"))?;
+    let parsed = parse_url(server_url).ok_or_else(|| anyhow!("unparseable URL: {server_url}"))?;
     let sanitized: String = parsed
         .host
         .chars()
@@ -473,11 +464,7 @@ async fn strict_handshake_ok(server_url: &str) -> bool {
         None => return false,
     };
     let mut roots = rustls::RootCertStore::empty();
-    roots.extend(
-        webpki_roots::TLS_SERVER_ROOTS
-            .iter()
-            .cloned(),
-    );
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let cfg = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -577,17 +564,11 @@ async fn pinned_handshake_ok(server_url: &str) -> bool {
 /// call because `load_pinned_trust` re-reads the file.
 pub async fn reverify_after_cert_mismatch(server_url: &str) -> Result<()> {
     eprintln!();
-    eprintln!(
-        "The server's TLS certificate does not match the stored pin for"
-    );
+    eprintln!("The server's TLS certificate does not match the stored pin for");
     eprintln!("{server_url}.");
     eprintln!();
-    eprintln!(
-        "This usually means forge-server regenerated its self-signed CA"
-    );
-    eprintln!(
-        "(the data directory was wiped, or the server was reinstalled)."
-    );
+    eprintln!("This usually means forge-server regenerated its self-signed CA");
+    eprintln!("(the data directory was wiped, or the server was reinstalled).");
     eprintln!();
     eprintln!("Re-verifying trust...");
     eprintln!();
@@ -712,14 +693,11 @@ fn der_to_pem(der: &[u8]) -> String {
 }
 
 fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
-        let n = ((input[i] as u32) << 16)
-            | ((input[i + 1] as u32) << 8)
-            | (input[i + 2] as u32);
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
         out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
         out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
         out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);

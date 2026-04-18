@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Short-lived signed artifact URLs. Used by the web UI so a browser can
 //! download an artifact through an HTTP handler without re-doing gRPC auth.

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::Result;
 use forge_core::diff::flatten_tree;
@@ -93,7 +93,13 @@ async fn pull_async(ws: &Workspace, server_url: &str, repo_name: &str) -> Result
     // Fast-forward local branch.
     let old_tip = local_tip.short();
     ws.set_branch_tip(&branch, &remote_tip)?;
-    println!("   {}..{} {} -> {}", old_tip, remote_tip.short(), branch, branch);
+    println!(
+        "   {}..{} {} -> {}",
+        old_tip,
+        remote_tip.short(),
+        branch,
+        branch
+    );
 
     // Checkout working tree from the new tip.
     checkout_tree(ws, &remote_tip)?;
@@ -300,7 +306,7 @@ pub(super) async fn fetch_objects_to_tip(
                         .object_store
                         .chunks
                         .local_root()
-            .expect("workspace backend must be FS-backed")
+                        .expect("workspace backend must be FS-backed")
                         .join(&hash_hex[..2])
                         .join(&hash_hex[2..]);
                     let partial_path = current_partial_path
@@ -352,7 +358,7 @@ pub(super) async fn fetch_objects_to_tip(
                                 .object_store
                                 .chunks
                                 .local_root()
-            .expect("workspace backend must be FS-backed")
+                                .expect("workspace backend must be FS-backed")
                                 .join(&stem[..2])
                                 .join(&stem[2..]);
                             if final_path.exists() {
@@ -400,7 +406,8 @@ fn walk_children_from_data(data: &[u8], want: &mut Vec<Vec<u8>>) {
             }
         }
     } else if tag == ObjectType::ChunkedBlob as u8 {
-        if let Ok(chunked) = bincode::deserialize::<forge_core::object::blob::ChunkedBlob>(payload) {
+        if let Ok(chunked) = bincode::deserialize::<forge_core::object::blob::ChunkedBlob>(payload)
+        {
             for chunk_ref in &chunked.chunks {
                 want.push(chunk_ref.hash.as_bytes().to_vec());
             }
@@ -431,7 +438,9 @@ fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
     let old_paths: Vec<String> = index.entries.keys().cloned().collect();
     for path in &old_paths {
         if !file_map.contains_key(path) {
-            let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let abs_path = ws
+                .root
+                .join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if abs_path.exists() {
                 let _ = std::fs::remove_file(&abs_path);
             }
@@ -466,7 +475,9 @@ fn checkout_tree(ws: &Workspace, commit_hash: &ForgeHash) -> Result<()> {
     // Sequential write to disk + index update.
     for result in read_results {
         let (path, content, obj_hash, size) = result?;
-        let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let abs_path = ws
+            .root
+            .join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = abs_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

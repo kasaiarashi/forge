@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! `/metrics` + `/healthz` + `/readyz` endpoints (Phase 7).
 //!
@@ -27,12 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::{
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
+use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
 use tracing::{info, warn};
 
 use crate::storage::db::MetadataDb;
@@ -123,7 +118,9 @@ async fn metrics(
             // DB error — still emit build_info + uptime + a gauge for
             // the failure so operators see it on the dashboard.
             let mut s = render_header(start.elapsed().as_secs_f64(), version);
-            s.push_str("# HELP forge_server_metrics_error 1 when the last scrape failed to query the DB\n");
+            s.push_str(
+                "# HELP forge_server_metrics_error 1 when the last scrape failed to query the DB\n",
+            );
             s.push_str("# TYPE forge_server_metrics_error gauge\n");
             s.push_str(&format!("forge_server_metrics_error 1 # {e}\n"));
             s
@@ -137,7 +134,10 @@ async fn metrics(
 
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         body,
     )
 }
@@ -148,7 +148,9 @@ fn render_header(uptime_secs: f64, version: &str) -> String {
     let mut s = String::with_capacity(1024);
     s.push_str("# HELP forge_server_build_info Build info; label set carries the version.\n");
     s.push_str("# TYPE forge_server_build_info gauge\n");
-    s.push_str(&format!("forge_server_build_info{{version=\"{version}\"}} 1\n"));
+    s.push_str(&format!(
+        "forge_server_build_info{{version=\"{version}\"}} 1\n"
+    ));
 
     s.push_str("# HELP forge_server_uptime_seconds Seconds since process start.\n");
     s.push_str("# TYPE forge_server_uptime_seconds gauge\n");
@@ -221,10 +223,7 @@ mod tests {
             "forge_server_metrics_error 0",
         ];
         for want in required {
-            assert!(
-                out.contains(want),
-                "output missing `{want}`; got:\n{out}",
-            );
+            assert!(out.contains(want), "output missing `{want}`; got:\n{out}",);
         }
     }
 

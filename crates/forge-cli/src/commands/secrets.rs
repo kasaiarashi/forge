@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! `forge secrets set|delete|list`.
 //!
@@ -17,9 +17,7 @@ fn remote(ws: &Workspace) -> Result<(String, String)> {
     let config = ws.config()?;
     let server_url = config
         .default_remote_url()
-        .ok_or_else(|| {
-            anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>")
-        })?
+        .ok_or_else(|| anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>"))?
         .to_string();
     let repo = if config.repo.is_empty() {
         "default".into()
@@ -85,7 +83,14 @@ pub fn delete(key: &str, json_out: bool) -> Result<()> {
             .await?
             .into_inner();
         if !resp.success {
-            bail!("{}", if resp.error.is_empty() { "delete failed".into() } else { resp.error });
+            bail!(
+                "{}",
+                if resp.error.is_empty() {
+                    "delete failed".into()
+                } else {
+                    resp.error
+                }
+            );
         }
         if json_out {
             println!("{}", json!({ "ok": true, "key": key }));

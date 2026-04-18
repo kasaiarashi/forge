@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use forge_core::hash::ForgeHash;
 use forge_core::store::chunk_store::ChunkStore;

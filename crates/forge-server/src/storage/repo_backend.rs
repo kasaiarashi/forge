@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Server-side repo-storage abstraction (Phase 3b.2).
 //!
@@ -184,7 +184,8 @@ impl StagingBackend for StagingStore {
                 stats.deduped += 1;
                 continue;
             }
-            live.put_raw(hash, &raw).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            live.put_raw(hash, &raw)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             let _ = std::fs::remove_file(&src);
             stats.promoted += 1;
         }
@@ -250,11 +251,8 @@ mod tests {
             Arc::new(FsStorage::new(dir.path().to_path_buf(), Default::default()));
         // Create some staging + live state …
         let live = fs.repo_object_backend("alice/game");
-        live.put(
-            &ForgeHash::from_bytes(b"live-obj"),
-            b"live-obj",
-        )
-        .unwrap();
+        live.put(&ForgeHash::from_bytes(b"live-obj"), b"live-obj")
+            .unwrap();
         let staging = fs.session_staging("alice/game", "sid-x");
         staging.ensure_shard_dirs().unwrap();
 

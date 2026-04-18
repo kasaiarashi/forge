@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Three-tier credential storage for the `forge` CLI.
 //!
@@ -193,8 +193,7 @@ fn load_from_file(server_url: &str) -> Result<Option<Credential>> {
     if !path.exists() {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     if raw.trim().is_empty() {
         return Ok(None);
     }

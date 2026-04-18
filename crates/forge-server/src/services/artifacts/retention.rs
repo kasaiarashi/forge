@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Artifact retention sweeper.
 //!
@@ -24,11 +24,7 @@ use crate::storage::db::MetadataDb;
 
 use super::ArtifactStore;
 
-pub fn spawn(
-    db: Arc<MetadataDb>,
-    store: Arc<dyn ArtifactStore>,
-    policy: ArtifactsRetention,
-) {
+pub fn spawn(db: Arc<MetadataDb>, store: Arc<dyn ArtifactStore>, policy: ArtifactsRetention) {
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(3600));
         // Skip the immediate first tick: startup shouldn't kick off disk
@@ -51,10 +47,7 @@ async fn sweep_once(
     let now = chrono::Utc::now().timestamp();
     let cutoff_age = now - (policy.max_days as i64) * 86400;
 
-    let candidates = db.retention_candidates(
-        cutoff_age,
-        policy.max_runs_per_workflow as i64,
-    )?;
+    let candidates = db.retention_candidates(cutoff_age, policy.max_runs_per_workflow as i64)?;
 
     if candidates.is_empty() {
         debug!("retention sweep: nothing eligible");

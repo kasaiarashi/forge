@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Push trigger integration — checks workflows on ref updates.
 
@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use crate::storage::db::MetadataDb;
 use super::yaml::WorkflowDef;
+use crate::storage::db::MetadataDb;
 
 /// Check if any enabled workflows should trigger on a push to the given ref.
 /// If so, create runs and queue them for execution.
@@ -39,7 +39,10 @@ pub fn check_push_triggers(
             continue;
         }
 
-        info!("Push trigger matched workflow '{}' for {} on {}", workflow.name, repo, ref_name);
+        info!(
+            "Push trigger matched workflow '{}' for {} on {}",
+            workflow.name, repo, ref_name
+        );
 
         match db.create_run(repo, workflow.id, "push", ref_name, &commit_hash, "system") {
             Ok(run_id) => {

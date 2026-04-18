@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Metadata backend trait.
 //!
@@ -21,8 +21,7 @@
 use anyhow::Result;
 
 use crate::storage::db::{
-    CommitSessionOutcome, LockInfo, PendingRepoOp, RefUpdateSpec, RepoRecord,
-    UploadSessionRecord,
+    CommitSessionOutcome, LockInfo, PendingRepoOp, RefUpdateSpec, RepoRecord, UploadSessionRecord,
 };
 
 /// Storage-backend abstraction for the Phase-1 atomic-push surface.
@@ -103,12 +102,7 @@ pub trait MetadataBackend: Send + Sync {
     /// Enqueue a durable repo-lifecycle op. `op_type` must be
     /// `"rename"` or `"delete"`; `new_repo` is the destination name
     /// for rename and ignored for delete. Returns the row id.
-    fn enqueue_repo_op(
-        &self,
-        op_type: &str,
-        repo: &str,
-        new_repo: Option<&str>,
-    ) -> Result<i64>;
+    fn enqueue_repo_op(&self, op_type: &str, repo: &str, new_repo: Option<&str>) -> Result<i64>;
 
     /// Claim the oldest eligible op. "Eligible" means `not_before <=
     /// now`; claiming bumps `not_before` to `now + visibility_secs`

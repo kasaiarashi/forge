@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Windows service integration for forge-web.
 //!
@@ -19,8 +19,8 @@ use std::time::Duration;
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl,
-        ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
     },
     service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle},
     service_dispatcher,
@@ -31,8 +31,7 @@ use crate::config::Config;
 
 pub const SERVICE_NAME: &str = "ForgeWeb";
 pub const DISPLAY_NAME: &str = "Forge VCS Web UI";
-pub const DESCRIPTION: &str =
-    "Forge VCS web UI — browser frontend for the gRPC server.";
+pub const DESCRIPTION: &str = "Forge VCS web UI — browser frontend for the gRPC server.";
 
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
@@ -204,9 +203,7 @@ pub fn uninstall() -> Result<()> {
         ServiceAccess::DELETE | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
     ) {
         Ok(s) => s,
-        Err(windows_service::Error::Winapi(io_err))
-            if io_err.raw_os_error() == Some(1060) =>
-        {
+        Err(windows_service::Error::Winapi(io_err)) if io_err.raw_os_error() == Some(1060) => {
             return Ok(());
         }
         Err(e) => return Err(anyhow!("open service: {e}")),
@@ -232,7 +229,10 @@ pub fn stop() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("connect to service manager")?;
     let service = manager
-        .open_service(SERVICE_NAME, ServiceAccess::STOP | ServiceAccess::QUERY_STATUS)
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+        )
         .context("open service")?;
     let _ = service.stop();
     Ok(())

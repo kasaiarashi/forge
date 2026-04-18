@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Garbage collection — mark-and-sweep over the per-repo object store.
 //!
@@ -306,14 +306,10 @@ where
 
 /// Fetch `hash` and return its outgoing edges. `kind` disambiguates
 /// typed (snapshot/tree) from mixed (file content) objects.
-fn walk_object(
-    store: &ChunkStore,
-    hash: &ForgeHash,
-    kind: Kind,
-) -> Result<Vec<(ForgeHash, Kind)>> {
-    let bytes = store.get(hash).with_context(|| {
-        format!("read object {} during mark", hash.short())
-    })?;
+fn walk_object(store: &ChunkStore, hash: &ForgeHash, kind: Kind) -> Result<Vec<(ForgeHash, Kind)>> {
+    let bytes = store
+        .get(hash)
+        .with_context(|| format!("read object {} during mark", hash.short()))?;
     match kind {
         Kind::Snapshot => {
             let payload = skip_type_byte(&bytes, ObjectType::Snapshot)?;

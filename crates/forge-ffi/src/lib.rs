@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Forge C ABI (Phase 4a scaffold).
 //!
@@ -182,7 +182,9 @@ mod session {
         /// config and defaults to "default" when empty (mirrors the
         /// CLI's behaviour).
         pub fn remote(&self) -> Result<(String, String), anyhow::Error> {
-            let cfg = self.workspace.config()
+            let cfg = self
+                .workspace
+                .config()
                 .map_err(|e| anyhow::anyhow!("load workspace config: {e}"))?;
             let url = cfg
                 .default_remote_url()
@@ -248,13 +250,21 @@ pub unsafe extern "C" fn forge_session_open(
                 Box::into_raw(Box::new(sess)) as *mut forge_session_t
             }
             Err(e) => {
-                set_error(out_err, forge_status_t::FORGE_ERR_NOT_A_WORKSPACE, &e.to_string());
+                set_error(
+                    out_err,
+                    forge_status_t::FORGE_ERR_NOT_A_WORKSPACE,
+                    &e.to_string(),
+                );
                 ptr::null_mut()
             }
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_session_open");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_session_open",
+        );
         ptr::null_mut()
     })
 }
@@ -424,7 +434,11 @@ pub unsafe extern "C" fn forge_workspace_info_json(
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_workspace_info_json");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_workspace_info_json",
+        );
         ptr::null_mut()
     })
 }
@@ -465,7 +479,11 @@ pub unsafe extern "C" fn forge_current_branch(
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_current_branch");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_current_branch",
+        );
         ptr::null_mut()
     })
 }
@@ -489,8 +507,7 @@ fn build_workspace_info_json(sess: &Session) -> Result<String, anyhow::Error> {
     };
 
     let remote_url = cfg.default_remote_url().map(str::to_string);
-    let workflow = serde_json::to_value(&cfg.workflow)
-        .unwrap_or_else(|_| serde_json::Value::Null);
+    let workflow = serde_json::to_value(&cfg.workflow).unwrap_or_else(|_| serde_json::Value::Null);
 
     Ok(json!({
         "workspace_root": sess.workspace.root.display().to_string(),
@@ -560,7 +577,11 @@ pub unsafe extern "C" fn forge_add_paths(
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_add_paths");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_add_paths",
+        );
         1
     })
 }
@@ -595,7 +616,11 @@ pub unsafe extern "C" fn forge_commit(
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_commit");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_commit",
+        );
         1
     })
 }
@@ -627,7 +652,11 @@ pub unsafe extern "C" fn forge_push(
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_push");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_push",
+        );
         1
     })
 }
@@ -658,7 +687,11 @@ pub unsafe extern "C" fn forge_pull(
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_pull");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_pull",
+        );
         1
     })
 }
@@ -866,7 +899,11 @@ pub unsafe extern "C" fn forge_lock_list_json(
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_lock_list_json");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_lock_list_json",
+        );
         ptr::null_mut()
     })
 }
@@ -907,17 +944,17 @@ pub unsafe extern "C" fn forge_lock_acquire(
                 0
             }
             Err(e) => {
-                set_error(
-                    out_err,
-                    classify_lock_error(&e),
-                    &e.to_string(),
-                );
+                set_error(out_err, classify_lock_error(&e), &e.to_string());
                 1
             }
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_lock_acquire");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_lock_acquire",
+        );
         1
     })
 }
@@ -952,7 +989,11 @@ pub unsafe extern "C" fn forge_lock_release(
         }
     }))
     .unwrap_or_else(|_| {
-        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_lock_release");
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_lock_release",
+        );
         1
     })
 }
@@ -1366,11 +1407,11 @@ mod tests {
             assert!(!sess.is_null());
 
             let ptr = unsafe { forge_workspace_info_json(sess, &mut err) };
-            assert!(!ptr.is_null(), "workspace_info must succeed on a fresh init");
-            let json = unsafe { CStr::from_ptr(ptr) }
-                .to_str()
-                .unwrap()
-                .to_string();
+            assert!(
+                !ptr.is_null(),
+                "workspace_info must succeed on a fresh init"
+            );
+            let json = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
             unsafe {
                 forge_string_free(ptr);
                 forge_session_close(sess);

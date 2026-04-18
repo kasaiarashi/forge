@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Generate `include/forge_ffi.h` from the Rust public signatures so
 //! the UE plugin can `#include <forge_ffi.h>` without us hand-writing
@@ -16,8 +16,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
-    let crate_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR unset");
+    let crate_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR unset");
     let header = std::path::PathBuf::from(&crate_dir)
         .join("include")
         .join("forge_ffi.h");
@@ -25,9 +24,10 @@ fn main() {
 
     let Ok(builder) = cbindgen::Builder::new()
         .with_crate(&crate_dir)
-        .with_config(cbindgen::Config::from_file(
-            std::path::PathBuf::from(&crate_dir).join("cbindgen.toml"),
-        ).unwrap_or_default())
+        .with_config(
+            cbindgen::Config::from_file(std::path::PathBuf::from(&crate_dir).join("cbindgen.toml"))
+                .unwrap_or_default(),
+        )
         .generate()
     else {
         // Don't fail the build if cbindgen can't expand syn — the

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 use anyhow::{bail, Result};
 use forge_core::workspace::Workspace;
@@ -24,7 +24,11 @@ pub fn run(path: String, force: bool, json: bool) -> Result<()> {
 
         let resp = client
             .release_lock(UnlockRequest {
-                repo: if config.repo.is_empty() { "default".into() } else { config.repo.clone() },
+                repo: if config.repo.is_empty() {
+                    "default".into()
+                } else {
+                    config.repo.clone()
+                },
                 path: rel_path.clone(),
                 owner: config.user.name.clone(),
                 force,
@@ -34,10 +38,13 @@ pub fn run(path: String, force: bool, json: bool) -> Result<()> {
 
         if resp.success {
             if json {
-                println!("{}", serde_json::to_string_pretty(&json!({
-                    "ok": true,
-                    "path": rel_path,
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": true,
+                        "path": rel_path,
+                    }))?
+                );
             } else {
                 println!("\x1b[32mUnlocked:\x1b[0m {}", rel_path);
             }
@@ -48,11 +55,14 @@ pub fn run(path: String, force: bool, json: bool) -> Result<()> {
                 resp.error
             };
             if json {
-                println!("{}", serde_json::to_string_pretty(&json!({
-                    "ok": false,
-                    "error": msg,
-                    "path": rel_path,
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": false,
+                        "error": msg,
+                        "path": rel_path,
+                    }))?
+                );
             } else {
                 bail!("Failed to unlock '{}': {}", rel_path, msg);
             }

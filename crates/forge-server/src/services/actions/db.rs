@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! SQLite queries for workflows, runs, steps, artifacts, and releases.
 
-use anyhow::Result;
 use crate::storage::db::MetadataDb;
+use anyhow::Result;
 
 // ── Record types ──
 
@@ -182,7 +182,8 @@ impl MetadataDb {
                 updated_at: row.get(6)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn get_workflow(&self, id: i64) -> Result<Option<WorkflowRecord>> {
@@ -220,7 +221,8 @@ impl MetadataDb {
                 updated_at: row.get(6)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     // ── Runs ──
@@ -269,14 +271,26 @@ impl MetadataDb {
         Ok(())
     }
 
-    pub fn list_runs(&self, repo: &str, workflow_id: i64, limit: i32, offset: i32) -> Result<(Vec<RunRecord>, i32)> {
+    pub fn list_runs(
+        &self,
+        repo: &str,
+        workflow_id: i64,
+        limit: i32,
+        offset: i32,
+    ) -> Result<(Vec<RunRecord>, i32)> {
         let conn = self.conn()?;
 
         let (where_clause, total) = if workflow_id > 0 {
             let count: i32 = conn
                 .prepare("SELECT COUNT(*) FROM workflow_runs WHERE repo = ?1 AND workflow_id = ?2")?
-                .query_row(rusqlite::params![repo, workflow_id], |row: &rusqlite::Row| row.get(0))?;
-            ("WHERE r.repo = ?1 AND r.workflow_id = ?2".to_string(), count)
+                .query_row(
+                    rusqlite::params![repo, workflow_id],
+                    |row: &rusqlite::Row| row.get(0),
+                )?;
+            (
+                "WHERE r.repo = ?1 AND r.workflow_id = ?2".to_string(),
+                count,
+            )
         } else {
             let count: i32 = conn
                 .prepare("SELECT COUNT(*) FROM workflow_runs WHERE repo = ?1")?
@@ -294,7 +308,10 @@ impl MetadataDb {
         let limit = if limit <= 0 { 50 } else { limit };
         let mut stmt = conn.prepare(&sql)?;
         let rows = if workflow_id > 0 {
-            stmt.query_map(rusqlite::params![repo, workflow_id, limit, offset], Self::map_run)?
+            stmt.query_map(
+                rusqlite::params![repo, workflow_id, limit, offset],
+                Self::map_run,
+            )?
         } else {
             stmt.query_map(rusqlite::params![repo, 0, limit, offset], Self::map_run)?
         };
@@ -349,7 +366,13 @@ impl MetadataDb {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn update_step(&self, step_id: i64, status: &str, exit_code: Option<i32>, log: &str) -> Result<()> {
+    pub fn update_step(
+        &self,
+        step_id: i64,
+        status: &str,
+        exit_code: Option<i32>,
+        log: &str,
+    ) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         match status {
@@ -387,12 +410,19 @@ impl MetadataDb {
                 finished_at: row.get(8)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     // ── Artifacts ──
 
-    pub fn create_artifact(&self, run_id: i64, name: &str, path: &str, size_bytes: i64) -> Result<i64> {
+    pub fn create_artifact(
+        &self,
+        run_id: i64,
+        name: &str,
+        path: &str,
+        size_bytes: i64,
+    ) -> Result<i64> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -416,13 +446,16 @@ impl MetadataDb {
                 created_at: row.get(4)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn get_artifact(&self, artifact_id: i64) -> Result<Option<ArtifactRecord>> {
         let conn = self.conn()?;
         let result = conn
-            .prepare("SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE id = ?1")?
+            .prepare(
+                "SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE id = ?1",
+            )?
             .query_row([artifact_id], |row: &rusqlite::Row| {
                 Ok(ArtifactRecord {
                     id: row.get(0)?,
@@ -442,9 +475,7 @@ impl MetadataDb {
     pub fn get_artifact_path(&self, artifact_id: i64) -> Result<Option<(i64, String, String)>> {
         let conn = self.conn()?;
         let result = conn
-            .prepare(
-                "SELECT a.run_id, a.name, a.path FROM artifacts a WHERE a.id = ?1",
-            )?
+            .prepare("SELECT a.run_id, a.name, a.path FROM artifacts a WHERE a.id = ?1")?
             .query_row([artifact_id], |row: &rusqlite::Row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -465,11 +496,7 @@ impl MetadataDb {
     /// Release-pinned artifacts are skipped at the caller-level
     /// (delete_run_artifacts refuses to drop pinned rows), so it's safe to
     /// over-report candidates here.
-    pub fn retention_candidates(
-        &self,
-        cutoff_ts: i64,
-        keep_per_workflow: i64,
-    ) -> Result<Vec<i64>> {
+    pub fn retention_candidates(&self, cutoff_ts: i64, keep_per_workflow: i64) -> Result<Vec<i64>> {
         let conn = self.conn()?;
 
         let mut out = std::collections::BTreeSet::new();
@@ -495,7 +522,9 @@ impl MetadataDb {
              JOIN artifacts a ON a.run_id = r.id
              WHERE r.rn > ?1",
         )?;
-        let rows = stmt.query_map([keep_per_workflow], |row: &rusqlite::Row| row.get::<_, i64>(0))?;
+        let rows = stmt.query_map([keep_per_workflow], |row: &rusqlite::Row| {
+            row.get::<_, i64>(0)
+        })?;
         for id in rows {
             out.insert(id?);
         }
@@ -517,7 +546,14 @@ impl MetadataDb {
 
     // ── Releases ──
 
-    pub fn create_release(&self, repo: &str, run_id: Option<i64>, tag: &str, name: &str, artifact_ids: &[i64]) -> Result<i64> {
+    pub fn create_release(
+        &self,
+        repo: &str,
+        run_id: Option<i64>,
+        tag: &str,
+        name: &str,
+        artifact_ids: &[i64],
+    ) -> Result<i64> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -550,7 +586,8 @@ impl MetadataDb {
                 created_at: row.get(5)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn get_release(&self, release_id: i64) -> Result<Option<ReleaseRecord>> {
@@ -573,10 +610,10 @@ impl MetadataDb {
 
     pub fn get_release_artifact_ids(&self, release_id: i64) -> Result<Vec<i64>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT artifact_id FROM release_artifacts WHERE release_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT artifact_id FROM release_artifacts WHERE release_id = ?1")?;
         let rows = stmt.query_map([release_id], |row: &rusqlite::Row| row.get(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 }

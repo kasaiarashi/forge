@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Step executor. Handles `run:` steps directly, `uses: @builtin/*` via
 //! the primitive dispatcher, and `uses: <owner>/<name>@<version>` by
@@ -109,10 +109,7 @@ pub async fn execute_run(
     Ok(())
 }
 
-fn merged_env(
-    def: &WorkflowDef,
-    job: &ClaimJobResponse,
-) -> HashMap<String, String> {
+fn merged_env(def: &WorkflowDef, job: &ClaimJobResponse) -> HashMap<String, String> {
     let mut out = def.env.clone();
     for (k, v) in &job.env {
         out.insert(k.clone(), v.clone());
@@ -316,7 +313,10 @@ async fn execute_step(
     if let Some(id) = &step.id {
         let mut exported: HashMap<String, String> = HashMap::new();
         for (k, raw_expr) in &action.outputs {
-            exported.insert(k.clone(), expand_expr(raw_expr, &action_inputs, &composite_outputs));
+            exported.insert(
+                k.clone(),
+                expand_expr(raw_expr, &action_inputs, &composite_outputs),
+            );
         }
         step_outputs.insert(id.clone(), exported);
     }
@@ -385,8 +385,7 @@ async fn run_shell(
         })
     };
 
-    let tail: Arc<tokio::sync::Mutex<String>> =
-        Arc::new(tokio::sync::Mutex::new(String::new()));
+    let tail: Arc<tokio::sync::Mutex<String>> = Arc::new(tokio::sync::Mutex::new(String::new()));
 
     let token1 = cfg.token.clone();
     let tx1 = tx.clone();
@@ -466,7 +465,11 @@ async fn run_shell(
             job_name: job_name.to_string(),
             step_index: *step_counter,
             name: step_name.to_string(),
-            status: if ok { "success".into() } else { "failure".into() },
+            status: if ok {
+                "success".into()
+            } else {
+                "failure".into()
+            },
             exit_code,
             log_tail: log_tail.clone(),
         })

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Workflow YAML definition structs.
 
@@ -86,9 +86,7 @@ impl WorkflowDef {
     /// Check if this workflow should trigger on a push to the given branch.
     pub fn matches_push(&self, ref_name: &str) -> bool {
         if let Some(push) = &self.on.push {
-            let branch = ref_name
-                .strip_prefix("refs/heads/")
-                .unwrap_or(ref_name);
+            let branch = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
             if push.branches.is_empty() {
                 return true; // no filter = match all
             }

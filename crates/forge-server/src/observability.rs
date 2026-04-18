@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Logging, audit, and request-tracing wiring.
 //!
@@ -42,8 +42,8 @@ pub struct LogGuards {
 /// second call `try_init` fails softly and we return empty guards, which
 /// is useful for tests that spin up the server in-process.
 pub fn init(logging: &LoggingSection, log_dir: Option<&Path>) -> LogGuards {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&logging.level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&logging.level));
 
     let mut app_guard: Option<WorkerGuard> = None;
     let mut audit_guard: Option<WorkerGuard> = None;
@@ -86,12 +86,20 @@ pub fn init(logging: &LoggingSection, log_dir: Option<&Path>) -> LogGuards {
                     "json" => fmt::layer()
                         .json()
                         .with_writer(nb)
-                        .with_filter(Targets::new().with_target("audit", tracing::Level::ERROR).with_default(tracing::Level::TRACE))
+                        .with_filter(
+                            Targets::new()
+                                .with_target("audit", tracing::Level::ERROR)
+                                .with_default(tracing::Level::TRACE),
+                        )
                         .boxed(),
                     _ => fmt::layer()
                         .with_ansi(false)
                         .with_writer(nb)
-                        .with_filter(Targets::new().with_target("audit", tracing::Level::ERROR).with_default(tracing::Level::TRACE))
+                        .with_filter(
+                            Targets::new()
+                                .with_target("audit", tracing::Level::ERROR)
+                                .with_default(tracing::Level::TRACE),
+                        )
                         .boxed(),
                 };
                 Some(layer)

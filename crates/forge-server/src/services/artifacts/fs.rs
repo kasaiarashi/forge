@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
-// Licensed under the MIT License.
+// Licensed under the BSL 1.1..
 
 //! Local-filesystem artifact store. Mirrors the pre-Phase-1 directory
 //! layout: `<root>/<run_id>/<name>` with a single file per artifact. Upload
