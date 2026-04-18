@@ -668,11 +668,24 @@ impl ForgeService for ForgeGrpcService {
                 ));
             }
             None => {
-                // The client advertises a session we never observed. This
-                // can happen if the push stream never reached the server
-                // (network blip), or if the client is buggy. Either way,
-                // we refuse to commit — there are no staged objects.
-                return Err(Status::not_found("upload session not found"));
+                // Zero-object push: client had nothing missing so it
+                // never opened a PushObjects stream, which is where
+                // session rows are lazily created. Create the row here
+                // so the ref update still goes through. Create is
+                // idempotent; if a racing caller created it first we
+                // pick it up on the re-query.
+                self.db
+                    .create_upload_session(
+                        &req.upload_session_id,
+                        repo,
+                        caller.user_id(),
+                        self.limits.upload_session_ttl_seconds,
+                    )
+                    .map_err(|e| internal_err("create upload session", e))?;
+                self.db
+                    .get_upload_session(&req.upload_session_id)
+                    .map_err(|e| internal_err("get upload session", e))?
+                    .ok_or_else(|| Status::internal("upload session vanished after create"))?
             }
         };
 

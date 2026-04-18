@@ -11,6 +11,15 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # sccache caches rustc invocations in the GitHub Actions cache and
+  # hits across refs — which the per-target-dir actions/cache layer
+  # below does not, because tag-triggered runs create caches scoped to
+  # the tag ref and can't fall back to each other. Windows server
+  # builds went from ~3 min (v0.1.0) to ~15 min (v0.2.3) after the
+  # postgres + s3-objects feature set landed; sccache trims the cold-
+  # rustc cost of that dep graph on every tag.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   # ─── Build React UI (platform-independent) ───
@@ -93,6 +102,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: actions/cache@v4
         with:
@@ -195,6 +206,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: actions/cache@v4
         with:
