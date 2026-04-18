@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "ForgeSourceControlModule.h"
+#include "ForgeFFIBridge.h"
 #include "ForgeSourceControlProvider.h"
 #include "ForgeSourceControlWorkers.h"
 #include "Features/IModularFeatures.h"
@@ -11,6 +12,12 @@
 
 void FForgeSourceControlModule::StartupModule()
 {
+	// Phase 4c.1 — load the Rust FFI library ONCE per editor session.
+	// Workers will prefer it over the CLI subprocess path when
+	// available; if it fails to load, everything keeps working via
+	// the legacy code.
+	FForgeFFI::Initialize();
+
 	Provider = new FForgeSourceControlProvider();
 
 	// Register workers for each supported operation.
@@ -39,6 +46,8 @@ void FForgeSourceControlModule::ShutdownModule()
 	IModularFeatures::Get().UnregisterModularFeature("SourceControl", Provider);
 	delete Provider;
 	Provider = nullptr;
+
+	FForgeFFI::Shutdown();
 }
 
 #undef LOCTEXT_NAMESPACE
