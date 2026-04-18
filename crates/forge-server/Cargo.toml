@@ -52,6 +52,10 @@ async-stream = "0.3"
 
 postgres = { workspace = true, optional = true }
 r2d2_postgres = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-smithy-types = { workspace = true, optional = true }
+aws-credential-types = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
@@ -68,6 +72,15 @@ postgres = ["dep:postgres", "dep:r2d2_postgres"]
 # Runs the cross-backend integration tests against a live Postgres
 # reachable via `DATABASE_URL`. CI-only; leave off for local dev.
 postgres-tests = ["postgres"]
+# Enables the S3 object backend (Phase 3b). Adds the aws-sdk-s3 stack
+# — ~50 transitive deps — so it's opt-in per build. MinIO / Ceph RGW
+# clusters are reachable by setting a custom endpoint URL via the
+# config, no code changes needed.
+s3-objects = ["dep:aws-config", "dep:aws-sdk-s3", "dep:aws-smithy-types", "dep:aws-credential-types"]
+# Runs the cross-backend integration tests against a live S3 endpoint
+# (usually a MinIO container) specified via FORGE_S3_ENDPOINT +
+# FORGE_S3_BUCKET env vars. CI-only.
+s3-objects-tests = ["s3-objects"]
 
 [dev-dependencies]
 tempfile.workspace = true

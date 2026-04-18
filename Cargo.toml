@@ -61,6 +61,12 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.25"
 postgres = { version = "0.19", features = ["with-chrono-0_4"] }
 r2d2_postgres = "0.18"
+# S3 object backend (Phase 3b). Pulls in the full AWS SDK stack —
+# only built when the `s3-objects` feature is enabled on forge-server.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+aws-smithy-types = "1"
+aws-credential-types = "1"
 # Internal
 forge-core = { path = "crates/forge-core" }
 forge-diff = { path = "crates/forge-diff" }
