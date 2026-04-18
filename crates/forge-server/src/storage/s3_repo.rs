@@ -29,6 +29,15 @@
 //! arc-backed. `scoped(prefix)` clones the client (cheap) and the
 //! `String` prefix (cheap) — repeat calls to
 //! `repo_object_backend(repo)` don't open a new TCP / HTTPS session.
+//!
+//! ## Rename / delete (Phase 3b.5)
+//!
+//! S3 lacks an atomic "move prefix" primitive. `rename_repo` and
+//! `delete_repo` enqueue a durable work item in `pending_repo_ops`
+//! (via [`MetadataBackend::enqueue_repo_op`]) and return immediately;
+//! a background drain task walks the bucket keyspace with CopyObject
+//! + batched DeleteObjects out-of-band. A server restart mid-drain
+//! resumes the op from the DB row — no lost work, no stranded keys.
 
 #![cfg(feature = "s3-objects")]
 
@@ -37,6 +46,7 @@ use std::sync::Arc;
 
 use forge_core::store::backend::ObjectBackend;
 
+use crate::storage::backend::MetadataBackend;
 use crate::storage::fs::FsStorage;
 use crate::storage::repo_backend::{RepoStorageBackend, StagingBackend};
 use crate::storage::s3_objects::S3ObjectBackend;
@@ -55,11 +65,39 @@ pub struct S3RepoStorage {
     /// unchanged; the promote walk reads each staged file and uploads
     /// via the S3 live backend's `put_raw`.
     pub fs: Arc<FsStorage>,
+    /// Durable drain queue for rename/delete. When `Some`, the
+    /// lifecycle RPCs enqueue a work item and return immediately;
+    /// when `None` (unit tests that don't care about S3 cleanup),
+    /// they log a warning and skip the S3 side. Production construction
+    /// always sets this.
+    pub queue: Option<Arc<dyn MetadataBackend>>,
 }
 
 impl S3RepoStorage {
+    /// Construct without a drain queue. Suitable only for code paths
+    /// that never rename/delete repos (admin tooling probes, tests).
+    /// Production code must go through [`Self::with_queue`].
     pub fn new(base: Arc<S3ObjectBackend>, fs: Arc<FsStorage>) -> Self {
-        Self { base, fs }
+        Self {
+            base,
+            fs,
+            queue: None,
+        }
+    }
+
+    /// Construct with a drain queue. `serve_inner` calls this so
+    /// `rename_repo` / `delete_repo` durably enqueue their S3-side
+    /// work instead of silently warning.
+    pub fn with_queue(
+        base: Arc<S3ObjectBackend>,
+        fs: Arc<FsStorage>,
+        queue: Arc<dyn MetadataBackend>,
+    ) -> Self {
+        Self {
+            base,
+            fs,
+            queue: Some(queue),
+        }
     }
 }
 
@@ -85,35 +123,46 @@ impl RepoStorageBackend for S3RepoStorage {
     }
 
     fn rename_repo(&self, old_name: &str, new_name: &str) -> io::Result<()> {
-        // FS side always renames its local staging tree. S3 side
-        // would need a full-prefix CopyObject + DeleteObjects pass,
-        // which isn't atomic and can take minutes on large repos.
-        // Surface as a warning; operators who rename repos on an S3
-        // deployment should do the S3-side move manually for now.
+        // FS side always renames local staging. S3 side goes on the
+        // durable drain queue — rename of a 1 TB repo can take many
+        // minutes of CopyObject+DeleteObject work, we're not holding
+        // the RPC open for that.
         FsStorage::rename_repo(&self.fs, old_name, new_name)?;
-        tracing::warn!(
-            old = old_name,
-            new = new_name,
-            "S3RepoStorage::rename_repo moved the local staging tree but \
-             did NOT rename the S3 prefix. Run the equivalent `aws s3 mv` \
-             (or `mc mv` for MinIO) by hand."
-        );
+        if let Some(q) = self.queue.as_ref() {
+            q.enqueue_repo_op("rename", old_name, Some(new_name))
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            tracing::info!(
+                old = old_name,
+                new = new_name,
+                "S3RepoStorage::rename_repo queued S3 prefix move; drain will relocate live objects"
+            );
+        } else {
+            tracing::warn!(
+                old = old_name,
+                new = new_name,
+                "S3RepoStorage::rename_repo has no drain queue — S3 prefix \
+                 not moved. Wire with_queue() in production construction."
+            );
+        }
         Ok(())
     }
 
     fn delete_repo(&self, name: &str) -> io::Result<()> {
-        // Same story as rename: FS side always cleans up; S3 side
-        // would require list_objects_v2 + batched delete_objects
-        // over potentially millions of keys. Punt to operator
-        // tooling for 3b.4 — Phase 3b.5 wires a background drain.
         FsStorage::delete_repo(&self.fs, name)?;
-        tracing::warn!(
-            repo = name,
-            "S3RepoStorage::delete_repo removed the local staging tree \
-             but did NOT delete S3-resident live objects. Run `aws s3 rm \
-             --recursive` (or `mc rm --recursive`) to reclaim the bucket \
-             prefix."
-        );
+        if let Some(q) = self.queue.as_ref() {
+            q.enqueue_repo_op("delete", name, None)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            tracing::info!(
+                repo = name,
+                "S3RepoStorage::delete_repo queued S3 prefix wipe; drain will reclaim bucket keys"
+            );
+        } else {
+            tracing::warn!(
+                repo = name,
+                "S3RepoStorage::delete_repo has no drain queue — S3 prefix \
+                 not deleted. Wire with_queue() in production construction."
+            );
+        }
         Ok(())
     }
 

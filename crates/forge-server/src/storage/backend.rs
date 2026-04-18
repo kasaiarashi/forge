@@ -21,7 +21,8 @@
 use anyhow::Result;
 
 use crate::storage::db::{
-    CommitSessionOutcome, LockInfo, RefUpdateSpec, RepoRecord, UploadSessionRecord,
+    CommitSessionOutcome, LockInfo, PendingRepoOp, RefUpdateSpec, RepoRecord,
+    UploadSessionRecord,
 };
 
 /// Storage-backend abstraction for the Phase-1 atomic-push surface.
@@ -96,6 +97,35 @@ pub trait MetadataBackend: Send + Sync {
     ) -> Result<CommitSessionOutcome>;
     fn list_stale_upload_sessions(&self, cutoff_ts: i64) -> Result<Vec<(String, String)>>;
     fn delete_upload_session(&self, sid: &str) -> Result<()>;
+
+    // -- Pending repo ops (Phase 3b.5 S3 drain queue) --
+
+    /// Enqueue a durable repo-lifecycle op. `op_type` must be
+    /// `"rename"` or `"delete"`; `new_repo` is the destination name
+    /// for rename and ignored for delete. Returns the row id.
+    fn enqueue_repo_op(
+        &self,
+        op_type: &str,
+        repo: &str,
+        new_repo: Option<&str>,
+    ) -> Result<i64>;
+
+    /// Claim the oldest eligible op. "Eligible" means `not_before <=
+    /// now`; claiming bumps `not_before` to `now + visibility_secs`
+    /// so a crashed worker's op becomes reclaimable after that
+    /// window. Returns `None` when the queue is empty.
+    fn claim_next_repo_op(&self, visibility_secs: i64) -> Result<Option<PendingRepoOp>>;
+
+    /// Mark a claimed op complete — deletes the row.
+    fn complete_repo_op(&self, id: i64) -> Result<()>;
+
+    /// Mark a claimed op failed. Records `error` in `last_error` and
+    /// pushes `not_before` out by `retry_delay_secs` so the drain
+    /// backs off before retrying.
+    fn fail_repo_op(&self, id: i64, error: &str, retry_delay_secs: i64) -> Result<()>;
+
+    /// Snapshot every queued op for admin / debug tooling.
+    fn list_pending_repo_ops(&self) -> Result<Vec<PendingRepoOp>>;
 
     // -- Schema versioning / migrations --
 

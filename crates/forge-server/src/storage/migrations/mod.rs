@@ -63,6 +63,12 @@ pub const SQLITE_MIGRATIONS: &[Migration] = &[
         name: "runner_bootstrap_check",
         sql: include_str!("sqlite/0002_runner_bootstrap_check.sql"),
     },
+    // Phase 3b.5 — durable drain queue for S3-backed repo lifecycle.
+    Migration {
+        version: 3,
+        name: "pending_repo_ops",
+        sql: include_str!("sqlite/0003_pending_repo_ops.sql"),
+    },
 ];
 
 /// Apply every migration in `list` whose version is strictly greater
@@ -86,6 +92,12 @@ pub const POSTGRES_MIGRATIONS: &[Migration] = &[
         version: 1,
         name: "baseline",
         sql: include_str!("postgres/0001_baseline.sql"),
+    },
+    // Phase 3b.5 — durable drain queue for S3-backed repo lifecycle.
+    Migration {
+        version: 2,
+        name: "pending_repo_ops",
+        sql: include_str!("postgres/0002_pending_repo_ops.sql"),
     },
 ];
 

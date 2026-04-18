@@ -17,3 +17,5 @@ pub mod session_sweeper;
 pub mod gc;
 pub mod repack;
 pub mod lock_events;
+#[cfg(feature = "s3-objects")]
+pub mod repo_ops_drain;

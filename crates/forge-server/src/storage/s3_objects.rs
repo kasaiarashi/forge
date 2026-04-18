@@ -173,6 +173,173 @@ impl S3ObjectBackend {
         format!("{}{}/{}", self.prefix, &hex[..2], &hex[2..])
     }
 
+    /// Compose the fully-qualified S3 key prefix for a repo's live
+    /// objects. Centralised here so the Phase 3b.5 drain workers and
+    /// [`Self::scoped`] share a single source of truth for the layout.
+    fn repo_objects_prefix(&self, repo: &str) -> String {
+        // Same shape `scoped(&format!("{repo}/objects"))` produces, minus
+        // the trailing slash — `list_objects_v2` treats `/` as a literal,
+        // so we always append it at the call site.
+        format!("{}{}/objects/", self.prefix, repo)
+    }
+
+    /// Delete every object under the repo's live-object prefix. Used
+    /// by the Phase 3b.5 drain task to finish a queued `delete_repo`
+    /// op. Paginates `list_objects_v2` at 1000 keys per page (S3 cap)
+    /// and batches `delete_objects` at the same 1000-key cap. Returns
+    /// the total deleted key count so the drain can report progress.
+    pub async fn drain_delete_repo(&self, repo: &str) -> Result<usize> {
+        let prefix = self.repo_objects_prefix(repo);
+        let mut total = 0usize;
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix);
+            if let Some(ct) = continuation.take() {
+                req = req.continuation_token(ct);
+            }
+            let resp = req
+                .send()
+                .await
+                .with_context(|| format!("list_objects_v2 {}", prefix))?;
+
+            // Collect this page's keys into one DeleteObjects call.
+            let keys: Vec<ObjectIdentifier> = resp
+                .contents()
+                .iter()
+                .filter_map(|o| o.key())
+                .map(|k| {
+                    ObjectIdentifier::builder()
+                        .key(k)
+                        .build()
+                        .expect("ObjectIdentifier build")
+                })
+                .collect();
+            let page_count = keys.len();
+            if !keys.is_empty() {
+                let delete = Delete::builder()
+                    .set_objects(Some(keys))
+                    .build()
+                    .context("build Delete for drain")?;
+                self.client
+                    .delete_objects()
+                    .bucket(&self.bucket)
+                    .delete(delete)
+                    .send()
+                    .await
+                    .with_context(|| format!("delete_objects batch for {}", prefix))?;
+            }
+            total += page_count;
+
+            if resp.is_truncated().unwrap_or(false) {
+                continuation = resp.next_continuation_token().map(str::to_string);
+                if continuation.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Copy every object under `old_repo`'s live-object prefix to
+    /// `new_repo`'s prefix, then delete the originals. Same pagination
+    /// + batched-delete shape as [`Self::drain_delete_repo`].
+    ///
+    /// Idempotent on resume: if a crash leaves some keys under the
+    /// new prefix AND some still under the old, re-running the drain
+    /// just re-copies + re-deletes whatever is still under old. S3
+    /// CopyObject is safe to retry because keys are content-addressed
+    /// — a partial copy becomes a full copy, never a corruption.
+    pub async fn drain_rename_repo(
+        &self,
+        old_repo: &str,
+        new_repo: &str,
+    ) -> Result<usize> {
+        if old_repo == new_repo {
+            // No-op: rename to self shouldn't have been enqueued, but
+            // make sure the drain completes cleanly if it was.
+            return Ok(0);
+        }
+        let old_prefix = self.repo_objects_prefix(old_repo);
+        let new_prefix = self.repo_objects_prefix(new_repo);
+        let mut total = 0usize;
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&old_prefix);
+            if let Some(ct) = continuation.take() {
+                req = req.continuation_token(ct);
+            }
+            let resp = req
+                .send()
+                .await
+                .with_context(|| format!("list_objects_v2 {}", old_prefix))?;
+
+            let mut to_delete: Vec<ObjectIdentifier> = Vec::new();
+            for obj in resp.contents() {
+                let Some(src_key) = obj.key() else { continue };
+                let Some(tail) = src_key.strip_prefix(&old_prefix) else {
+                    continue;
+                };
+                let dst_key = format!("{}{}", new_prefix, tail);
+                // CopyObject's `CopySource` is `{bucket}/{key}`; SDK
+                // percent-encodes when we pass a raw string.
+                let copy_source = format!("{}/{}", self.bucket, src_key);
+                self.client
+                    .copy_object()
+                    .bucket(&self.bucket)
+                    .key(&dst_key)
+                    .copy_source(&copy_source)
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!("copy_object {src_key} -> {dst_key}")
+                    })?;
+                to_delete.push(
+                    ObjectIdentifier::builder()
+                        .key(src_key)
+                        .build()
+                        .expect("ObjectIdentifier build"),
+                );
+            }
+            let page_count = to_delete.len();
+            if !to_delete.is_empty() {
+                let delete = Delete::builder()
+                    .set_objects(Some(to_delete))
+                    .build()
+                    .context("build Delete for rename drain")?;
+                self.client
+                    .delete_objects()
+                    .bucket(&self.bucket)
+                    .delete(delete)
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!("delete_objects after copy for {old_prefix}")
+                    })?;
+            }
+            total += page_count;
+
+            if resp.is_truncated().unwrap_or(false) {
+                continuation = resp.next_continuation_token().map(str::to_string);
+                if continuation.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
     /// Bridge: run `fut` to completion regardless of whether we're
     /// already inside a tokio runtime. Inside one, we `block_in_place`
     /// so the current worker hands off; outside, we use the owned

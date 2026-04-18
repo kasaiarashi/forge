@@ -567,7 +567,15 @@ pub(crate) async fn serve_inner(
             "s3" => {
                 #[cfg(feature = "s3-objects")]
                 {
-                    build_s3_repo_storage(&config.objects.s3, Arc::clone(&fs)).await?
+                    // Pass the DB so S3RepoStorage's rename/delete
+                    // paths enqueue durable drain ops, and so we can
+                    // hand the same handle to the drain task below.
+                    build_s3_repo_storage(
+                        &config.objects.s3,
+                        Arc::clone(&fs),
+                        Arc::clone(&db) as Arc<dyn storage::backend::MetadataBackend>,
+                    )
+                    .await?
                 }
                 #[cfg(not(feature = "s3-objects"))]
                 {
@@ -836,6 +844,7 @@ pub(crate) async fn serve_inner(
 async fn build_s3_repo_storage(
     cfg: &config::ObjectsS3,
     fs: Arc<FsStorage>,
+    queue: Arc<dyn storage::backend::MetadataBackend>,
 ) -> Result<Arc<dyn storage::repo_backend::RepoStorageBackend>> {
     use storage::s3_objects::{S3ObjectBackend, S3ObjectBackendConfig};
     use storage::s3_repo::S3RepoStorage;
@@ -871,7 +880,12 @@ async fn build_s3_repo_storage(
         "objects backend: S3 (live in bucket, staging on local disk)"
     );
 
-    Ok(Arc::new(S3RepoStorage::new(base, fs)))
+    // Spawn the Phase 3b.5 drain. Consumes rename/delete ops queued
+    // by S3RepoStorage. Safe to spawn unconditionally — a drain with
+    // an empty queue just polls the DB every 30s doing nothing.
+    services::repo_ops_drain::spawn(Arc::clone(&queue), Arc::clone(&base));
+
+    Ok(Arc::new(S3RepoStorage::with_queue(base, fs, queue)))
 }
 
 /// `forge-server service install/uninstall/start/stop` dispatcher.

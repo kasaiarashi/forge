@@ -30,8 +30,8 @@ use std::time::Duration;
 
 use crate::storage::backend::MetadataBackend;
 use crate::storage::db::{
-    CommitSessionOutcome, LockInfo, RefUpdateOutcome, RefUpdateSpec, RepoRecord,
-    UploadSessionRecord,
+    CommitSessionOutcome, LockInfo, PendingRepoOp, RefUpdateOutcome, RefUpdateSpec,
+    RepoRecord, UploadSessionRecord,
 };
 
 /// Tuning knobs for the Postgres pool. Defaults match the SQLite
@@ -610,6 +610,95 @@ impl MetadataBackend for PgMetadataBackend {
         let mut conn = self.conn()?;
         conn.execute("DELETE FROM upload_sessions WHERE id = $1", &[&sid])?;
         Ok(())
+    }
+
+    // -- Pending repo ops (Phase 3b.5) --
+
+    fn enqueue_repo_op(
+        &self,
+        op_type: &str,
+        repo: &str,
+        new_repo: Option<&str>,
+    ) -> Result<i64> {
+        if op_type != "rename" && op_type != "delete" {
+            anyhow::bail!("op_type must be 'rename' or 'delete', got '{op_type}'");
+        }
+        let mut conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        let row = conn.query_one(
+            "INSERT INTO pending_repo_ops
+                (op_type, repo, new_repo, created_at, not_before, attempts)
+             VALUES ($1, $2, $3, $4, 0, 0)
+             RETURNING id",
+            &[&op_type, &repo, &new_repo, &now],
+        )?;
+        Ok(row.get(0))
+    }
+
+    fn claim_next_repo_op(&self, visibility_secs: i64) -> Result<Option<PendingRepoOp>> {
+        let mut conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        let next_visible = now + visibility_secs;
+        // SKIP LOCKED lets multiple drain workers dequeue concurrently
+        // without starving each other on the same row.
+        let row = conn.query_opt(
+            "UPDATE pending_repo_ops
+             SET not_before = $1, attempts = attempts + 1
+             WHERE id = (
+                 SELECT id FROM pending_repo_ops
+                 WHERE not_before <= $2
+                 ORDER BY created_at
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT 1
+             )
+             RETURNING id, op_type, repo, new_repo, attempts",
+            &[&next_visible, &now],
+        )?;
+        Ok(row.map(|r| PendingRepoOp {
+            id: r.get(0),
+            op_type: r.get(1),
+            repo: r.get(2),
+            new_repo: r.get(3),
+            attempts: r.get(4),
+        }))
+    }
+
+    fn complete_repo_op(&self, id: i64) -> Result<()> {
+        let mut conn = self.conn()?;
+        conn.execute("DELETE FROM pending_repo_ops WHERE id = $1", &[&id])?;
+        Ok(())
+    }
+
+    fn fail_repo_op(&self, id: i64, error: &str, retry_delay_secs: i64) -> Result<()> {
+        let mut conn = self.conn()?;
+        let retry_at = chrono::Utc::now().timestamp() + retry_delay_secs;
+        conn.execute(
+            "UPDATE pending_repo_ops
+             SET last_error = $2, not_before = $3
+             WHERE id = $1",
+            &[&id, &error, &retry_at],
+        )?;
+        Ok(())
+    }
+
+    fn list_pending_repo_ops(&self) -> Result<Vec<PendingRepoOp>> {
+        let mut conn = self.conn()?;
+        let rows = conn.query(
+            "SELECT id, op_type, repo, new_repo, attempts
+             FROM pending_repo_ops
+             ORDER BY created_at",
+            &[],
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| PendingRepoOp {
+                id: r.get(0),
+                op_type: r.get(1),
+                repo: r.get(2),
+                new_repo: r.get(3),
+                attempts: r.get(4),
+            })
+            .collect())
     }
 
     // -- Schema versioning --

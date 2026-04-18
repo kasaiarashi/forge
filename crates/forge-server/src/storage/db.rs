@@ -600,6 +600,110 @@ impl MetadataDb {
         Ok(())
     }
 
+    // -- Pending repo ops (Phase 3b.5 durable drain queue) --
+    //
+    // S3 `rename_repo` / `delete_repo` can't be done atomically — they
+    // walk the bucket keyspace with CopyObject + DeleteObjects. The
+    // table persists the work item so a server restart mid-drain just
+    // picks it up on next boot. Claims use a visibility-timeout pattern
+    // (`not_before` bumped on claim, reset on completion/backoff) so a
+    // crashed worker doesn't wedge the op.
+
+    pub fn enqueue_repo_op(
+        &self,
+        op_type: &str,
+        repo: &str,
+        new_repo: Option<&str>,
+    ) -> Result<i64> {
+        if op_type != "rename" && op_type != "delete" {
+            anyhow::bail!("op_type must be 'rename' or 'delete', got '{op_type}'");
+        }
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO pending_repo_ops
+                (op_type, repo, new_repo, created_at, not_before, attempts)
+             VALUES (?1, ?2, ?3, ?4, 0, 0)",
+            rusqlite::params![op_type, repo, new_repo, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn claim_next_repo_op(
+        &self,
+        visibility_secs: i64,
+    ) -> Result<Option<PendingRepoOp>> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().timestamp();
+        let next_visible = now + visibility_secs;
+        let mut stmt = conn.prepare(
+            "UPDATE pending_repo_ops
+             SET not_before = ?1, attempts = attempts + 1
+             WHERE id = (
+                 SELECT id FROM pending_repo_ops
+                 WHERE not_before <= ?2
+                 ORDER BY created_at
+                 LIMIT 1
+             )
+             RETURNING id, op_type, repo, new_repo, attempts",
+        )?;
+        let row = stmt
+            .query_row(rusqlite::params![next_visible, now], |r| {
+                Ok(PendingRepoOp {
+                    id: r.get(0)?,
+                    op_type: r.get(1)?,
+                    repo: r.get(2)?,
+                    new_repo: r.get(3)?,
+                    attempts: r.get(4)?,
+                })
+            })
+            .ok();
+        Ok(row)
+    }
+
+    pub fn complete_repo_op(&self, id: i64) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM pending_repo_ops WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn fail_repo_op(
+        &self,
+        id: i64,
+        error: &str,
+        retry_delay_secs: i64,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        let retry_at = chrono::Utc::now().timestamp() + retry_delay_secs;
+        conn.execute(
+            "UPDATE pending_repo_ops
+             SET last_error = ?2, not_before = ?3
+             WHERE id = ?1",
+            rusqlite::params![id, error, retry_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_pending_repo_ops(&self) -> Result<Vec<PendingRepoOp>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, op_type, repo, new_repo, attempts
+             FROM pending_repo_ops
+             ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PendingRepoOp {
+                id: r.get(0)?,
+                op_type: r.get(1)?,
+                repo: r.get(2)?,
+                new_repo: r.get(3)?,
+                attempts: r.get(4)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     // -- Agents (Phase 2 distributed runners) --
 
     pub fn create_agent_tables(&self) -> Result<()> {
@@ -1549,6 +1653,22 @@ pub struct UploadSessionRecord {
     pub failure: Option<String>,
 }
 
+/// Row shape for the Phase 3b.5 durable-drain queue.
+///
+/// Rows sit in `pending_repo_ops` until a drain worker claims, executes,
+/// and deletes them. `op_type` is `"rename"` (needs `new_repo`) or
+/// `"delete"` (leaves `new_repo` null). `attempts` counts how many
+/// times this row has been claimed — a climbing value indicates a
+/// persistently-failing op that operators should investigate.
+#[derive(Debug, Clone)]
+pub struct PendingRepoOp {
+    pub id: i64,
+    pub op_type: String,
+    pub repo: String,
+    pub new_repo: Option<String>,
+    pub attempts: i32,
+}
+
 /// One ref update inside an atomic CommitPush. Borrowed to avoid cloning
 /// hash buffers on the hot path.
 #[derive(Debug, Clone)]
@@ -1745,6 +1865,27 @@ impl crate::storage::backend::MetadataBackend for MetadataDb {
     }
     fn delete_upload_session(&self, sid: &str) -> Result<()> {
         MetadataDb::delete_upload_session(self, sid)
+    }
+
+    fn enqueue_repo_op(
+        &self,
+        op_type: &str,
+        repo: &str,
+        new_repo: Option<&str>,
+    ) -> Result<i64> {
+        MetadataDb::enqueue_repo_op(self, op_type, repo, new_repo)
+    }
+    fn claim_next_repo_op(&self, visibility_secs: i64) -> Result<Option<PendingRepoOp>> {
+        MetadataDb::claim_next_repo_op(self, visibility_secs)
+    }
+    fn complete_repo_op(&self, id: i64) -> Result<()> {
+        MetadataDb::complete_repo_op(self, id)
+    }
+    fn fail_repo_op(&self, id: i64, error: &str, retry_delay_secs: i64) -> Result<()> {
+        MetadataDb::fail_repo_op(self, id, error, retry_delay_secs)
+    }
+    fn list_pending_repo_ops(&self) -> Result<Vec<PendingRepoOp>> {
+        MetadataDb::list_pending_repo_ops(self)
     }
 
     fn current_schema_version(&self) -> Result<i64> {

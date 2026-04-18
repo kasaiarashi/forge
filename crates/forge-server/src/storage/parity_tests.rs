@@ -176,6 +176,78 @@ fn exercise_atomic_push_surface<B: MetadataBackend>(backend: &B) {
     backend.delete_upload_session(sid).unwrap();
     assert!(backend.get_upload_session(sid).unwrap().is_none());
 
+    // -- Pending repo ops (Phase 3b.5 drain queue) --
+    //
+    // Verifies the claim / complete / fail / backoff contract that
+    // `services::repo_ops_drain` relies on. Both backends must
+    // deliver identical semantics here — rename/delete queued on a
+    // SQLite deployment must drain the same way it would on Postgres.
+
+    let initial = backend.list_pending_repo_ops().unwrap();
+    let initial_len = initial.len();
+
+    let rename_id = backend
+        .enqueue_repo_op("rename", "alice/old", Some("alice/new"))
+        .unwrap();
+    let delete_id = backend.enqueue_repo_op("delete", "alice/doomed", None).unwrap();
+    assert_ne!(rename_id, delete_id);
+
+    let listed = backend.list_pending_repo_ops().unwrap();
+    assert_eq!(listed.len(), initial_len + 2);
+
+    // Claim: oldest-first, so we get the rename first.
+    let first = backend
+        .claim_next_repo_op(60)
+        .unwrap()
+        .expect("queue has pending ops");
+    assert_eq!(first.id, rename_id);
+    assert_eq!(first.op_type, "rename");
+    assert_eq!(first.repo, "alice/old");
+    assert_eq!(first.new_repo.as_deref(), Some("alice/new"));
+    assert_eq!(first.attempts, 1, "claim must bump attempts to 1");
+
+    // A second claim skips the one we just claimed (hidden by
+    // visibility timeout) and returns the delete op instead.
+    let second = backend
+        .claim_next_repo_op(60)
+        .unwrap()
+        .expect("delete op still queued");
+    assert_eq!(second.id, delete_id);
+    assert_eq!(second.op_type, "delete");
+    assert!(second.new_repo.is_none());
+
+    // With both claimed + hidden, the queue looks empty.
+    assert!(
+        backend.claim_next_repo_op(60).unwrap().is_none(),
+        "all ops are inside their visibility window",
+    );
+
+    // Fail the rename with a 0-second backoff so it becomes
+    // immediately re-claimable. `attempts` keeps climbing.
+    backend.fail_repo_op(rename_id, "simulated failure", 0).unwrap();
+    let retried = backend
+        .claim_next_repo_op(60)
+        .unwrap()
+        .expect("failed op becomes eligible after its retry delay");
+    assert_eq!(retried.id, rename_id);
+    assert_eq!(retried.attempts, 2, "retry must bump attempts again");
+
+    // Complete both. list_pending_repo_ops drops to the pre-test
+    // baseline.
+    backend.complete_repo_op(rename_id).unwrap();
+    backend.complete_repo_op(delete_id).unwrap();
+    assert_eq!(
+        backend.list_pending_repo_ops().unwrap().len(),
+        initial_len,
+        "complete_repo_op must delete the row",
+    );
+
+    // Bad op_type is rejected at enqueue time.
+    assert!(
+        backend.enqueue_repo_op("vaporize", "alice/old", None).is_err(),
+        "enqueue must validate op_type",
+    );
+
     // -- Cleanup (schema_version survives; repo + children gone) --
     assert!(backend.delete_repo(repo).unwrap());
     assert!(backend.list_repos().unwrap().iter().all(|r| r.name != repo));
@@ -213,7 +285,8 @@ mod pg {
             .expect("connect to DATABASE_URL for reset");
         client
             .batch_execute(
-                "DROP TABLE IF EXISTS session_objects CASCADE;
+                "DROP TABLE IF EXISTS pending_repo_ops CASCADE;
+                 DROP TABLE IF EXISTS session_objects CASCADE;
                  DROP TABLE IF EXISTS upload_sessions CASCADE;
                  DROP TABLE IF EXISTS locks CASCADE;
                  DROP TABLE IF EXISTS refs CASCADE;
