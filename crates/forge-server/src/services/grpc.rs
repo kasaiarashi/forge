@@ -716,6 +716,81 @@ impl ForgeService for ForgeGrpcService {
         }
     }
 
+    async fn query_upload_session(
+        &self,
+        request: Request<QueryUploadSessionRequest>,
+    ) -> Result<Response<QueryUploadSessionResponse>, Status> {
+        let caller = caller_of(&request);
+        let req = request.into_inner();
+        let repo_full = resolve_repo(&req.repo, &caller)?;
+        let repo = repo_full.as_str();
+        require_repo_write(&caller, &self.user_store, repo)?;
+
+        if req.upload_session_id.is_empty() {
+            return Err(Status::invalid_argument("upload_session_id is required"));
+        }
+        validate_session_id(&req.upload_session_id)?;
+
+        let session = self
+            .db
+            .get_upload_session(&req.upload_session_id)
+            .map_err(|e| internal_err("get upload session", e))?;
+
+        // Unknown-session response — empty state string signals the
+        // client to allocate a fresh session. Cheaper than returning
+        // a NotFound status because the client-side retry loop can
+        // branch on the body instead of mapping error codes.
+        let Some(session) = session else {
+            return Ok(Response::new(QueryUploadSessionResponse {
+                state: String::new(),
+                result_json: String::new(),
+                objects: Vec::new(),
+            }));
+        };
+
+        if session.repo != repo {
+            return Err(Status::permission_denied(
+                "upload session belongs to a different repo",
+            ));
+        }
+
+        let declared = self
+            .db
+            .list_session_objects_with_sizes(&req.upload_session_id)
+            .map_err(|e| internal_err("list session objects", e))?;
+
+        // Staging FS holds the "received_bytes" side of the join —
+        // we stat each staged object and report its on-disk length.
+        // Missing in staging = 0 bytes received (even if recorded in
+        // the DB, which happens when the client declared the object
+        // but the stream dropped before the first chunk landed).
+        let staging = self.fs.session_staging_store(repo, &req.upload_session_id);
+        let objects: Vec<UploadObjectProgress> = declared
+            .into_iter()
+            .map(|(hash_bytes, declared_size)| {
+                // Best-effort: hex-decode to a ForgeHash so we can
+                // ask the staging store for the file size. Corrupted
+                // hash rows (shouldn't exist, but cheap insurance)
+                // fall back to zero rather than failing the whole query.
+                let received = ForgeHash::from_hex(&hex::encode(&hash_bytes))
+                    .ok()
+                    .and_then(|h| staging.file_size(&h))
+                    .unwrap_or(0);
+                UploadObjectProgress {
+                    hash: hash_bytes,
+                    received_bytes: received,
+                    declared_size: declared_size.max(0) as u64,
+                }
+            })
+            .collect();
+
+        Ok(Response::new(QueryUploadSessionResponse {
+            state: session.state,
+            result_json: session.result_json.unwrap_or_default(),
+            objects,
+        }))
+    }
+
     async fn pull_objects(
         &self,
         request: Request<PullRequest>,

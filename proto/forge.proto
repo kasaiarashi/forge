@@ -297,6 +297,12 @@ service ForgeService {
     // returns the prior result.
     rpc CommitPush(CommitPushRequest) returns (CommitPushResponse);
 
+    // Resume support: query which bytes of which objects the server
+    // already has for a given session. Client uses this before resuming
+    // an interrupted push so it can skip fully-received objects and
+    // resume partial ones from the right offset. Idempotent read-only.
+    rpc QueryUploadSession(QueryUploadSessionRequest) returns (QueryUploadSessionResponse);
+
     // References (scoped to repo)
     rpc GetRefs(GetRefsRequest) returns (GetRefsResponse);
     rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
@@ -547,6 +553,54 @@ message CommitPushResponse {
     repeated RefUpdateResult ref_results = 4;
 
     reserved 5 to 15;
+}
+
+// Resume query: ask the server which bytes of which objects it
+// already has for a session. The server answers with its view of the
+// per-session staging directory — a client that crashed mid-push can
+// re-open the session, diff this response against what it intended to
+// upload, and resend only the missing tails.
+message QueryUploadSessionRequest {
+    string repo = 1;
+    string upload_session_id = 2;
+
+    reserved 3 to 15;
+}
+
+// Per-object state inside an upload session. `declared_size` is the
+// total size the client announced (via `record_session_object` when
+// the first chunk landed); `received_bytes` is what's currently on
+// disk in staging. When they match, the object is complete.
+//
+// `declared_size = 0` when the server doesn't yet know the object's
+// final size (e.g. a chunk stream started but its `total_size` field
+// was missing). In that case the client treats the object as fully
+// unknown and re-uploads it from offset 0.
+message UploadObjectProgress {
+    bytes hash = 1;
+    uint64 received_bytes = 2;
+    uint64 declared_size = 3;
+
+    reserved 4 to 15;
+}
+
+message QueryUploadSessionResponse {
+    // Current session state. Mirrors the server-side DB column:
+    // one of "uploading", "committed", "failed", "abandoned". An
+    // unknown session id returns an empty string so callers can
+    // cheaply detect a TTL-expired session and create a fresh one.
+    string state = 1;
+    // When `state` is terminal, the server's cached CommitPush result
+    // JSON is replayed here so the client can surface the prior
+    // outcome without re-running the push.
+    string result_json = 2;
+    // Per-object progress, one entry per object the server knows
+    // about in this session. Objects the server has never heard of
+    // are simply absent from this list — the client must still
+    // upload them.
+    repeated UploadObjectProgress objects = 3;
+
+    reserved 4 to 15;
 }
 
 // ============================================================
