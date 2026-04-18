@@ -205,8 +205,21 @@ jobs:
           key: ${{ matrix.os }}-${{ matrix.target }}-cargo-server-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.os }}-${{ matrix.target }}-cargo-server-
 
-      - name: Build server binaries
-        run: cargo build --release --target ${{ matrix.target }} --bin forge-server --bin forge-web
+      # Ship forge-server with Postgres + S3 features enabled so
+      # operators can pick either backend via config without needing
+      # to rebuild. The features expand the dep graph but are zero-
+      # cost when the corresponding `[database]` / `[objects]` block
+      # selects the default (sqlite / fs). Without `--features
+      # postgres` the binary hard-fails at startup for any operator
+      # who sets `backend = "postgres"` — the bug that killed the
+      # first v0.2.1 deploy. Features are package-scoped so cargo
+      # rejects `--features X` without `-p`; we build the two bins
+      # as separate invocations.
+      - name: Build forge-server
+        run: cargo build --release --target ${{ matrix.target }} -p forge-server --features "postgres s3-objects" --bin forge-server
+
+      - name: Build forge-web
+        run: cargo build --release --target ${{ matrix.target }} -p forge-web --bin forge-web
 
       - uses: actions/upload-artifact@v4
         with:
