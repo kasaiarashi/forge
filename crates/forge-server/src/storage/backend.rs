@@ -13,10 +13,24 @@
 //! satisfy the same integration test suite so a regression in one
 //! backend can't silently slip past the other.
 //!
-//! The trait is deliberately sync. rusqlite is sync; the `postgres`
-//! crate is sync; most call-sites are sync. Async-ifying the surface
-//! would touch ~400 LOC across `services/*` with no measured benefit
-//! until Postgres starves the tokio thread pool under real load.
+//! ## Sync trait with pooled off-runtime dispatch
+//!
+//! The trait stays **sync** deliberately. Making it async would
+//! ripple through ~75+ call sites (grpc handlers, services, sweepers,
+//! benches, parity tests, CLI admin, inline tests) and force every
+//! sync caller to adopt `Runtime::block_on`. Measured overhead of the
+//! existing dispatch today is **one channel round-trip** — the
+//! `block_pg` helper used to spawn a fresh OS thread per call
+//! (`std::thread::scope`, ~50-100 µs on Windows) but now submits
+//! closures to a long-lived worker pool (see `block_pg` in
+//! `storage::db`), so the marginal cost per call is a sync-channel
+//! send + wake + receive (low single-digit µs).
+//!
+//! Full async conversion (trait + impls + call sites + tests) is
+//! parked as a future refactor under the header "when HA deployment
+//! forces it" — specifically, when measurable thread-pool starvation
+//! shows up under real Postgres load. Until then, the pooled
+//! dispatcher drops the only perf regression block_pg had.
 
 use anyhow::Result;
 

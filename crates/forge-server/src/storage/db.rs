@@ -56,32 +56,56 @@ macro_rules! dispatch_pg_inherent {
 /// Run `f` on a thread that is NOT a tokio runtime worker. The
 /// `postgres` crate (sync facade over `tokio_postgres`) builds its
 /// own runtime per call and panics if it sees an existing one in
-/// scope. `std::thread::scope` spawns a fresh OS thread, runs the
-/// closure, and joins — no tokio context inherited. Costs a thread
-/// spawn per query (~50µs Linux, ~100µs Windows); good enough for
-/// v1 Postgres while we wait on a real async refactor.
+/// scope, so every dispatch has to leave the caller's runtime
+/// environment before touching a Postgres client.
+///
+/// Implemented on top of a **persistent rayon pool** (lazy-initialised
+/// on first use, sized from `FORGE_PG_WORKERS` with a default of 16
+/// plus a hard minimum of 4). Each worker thread is a plain OS thread
+/// with no inherited tokio runtime in its thread-local, which is
+/// exactly the property the postgres crate needs, and `install`
+/// blocks the caller until the closure completes so the closure's
+/// borrows stay valid without a `'static` bound. That means every
+/// existing call site (`dispatch_pg!` / `dispatch_pg_inherent!`)
+/// keeps working verbatim.
+///
+/// Previously this helper used `std::thread::scope`, which spawned a
+/// fresh OS thread per query (~50 µs Linux, ~100 µs Windows). With
+/// the pool, per-call overhead is an mpsc send + wake + receive on a
+/// warm worker — low single-digit µs — so an HA Postgres-backed
+/// server no longer pays thread-spawn cost on every metadata op.
+///
+/// Sizing rationale: the pool bounds concurrent Postgres work at N
+/// threads, which doubles as a crude backpressure mechanism. The
+/// default (16) matches the default `[database] max_connections`
+/// ceiling; `FORGE_PG_WORKERS` is provided as an escape hatch for
+/// operators who tune one without the other.
 #[cfg(feature = "postgres")]
 pub(crate) fn block_pg<F, R>(f: F) -> R
 where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    let result = std::thread::scope(|s| s.spawn(f).join());
-    match result {
-        Ok(r) => r,
-        Err(panic) => {
-            // Surface the panic message instead of "Any { .. }".
-            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "<unknown panic payload>".to_string()
-            };
-            tracing::error!(panic = %msg, "block_pg dispatch thread panicked");
-            std::panic::resume_unwind(panic)
-        }
-    }
+    pg_worker_pool().install(f)
+}
+
+#[cfg(feature = "postgres")]
+fn pg_worker_pool() -> &'static rayon::ThreadPool {
+    use std::sync::OnceLock;
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let n = std::env::var("FORGE_PG_WORKERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(16)
+            .max(4);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .thread_name(|i| format!("forge-pg-{i}"))
+            .build()
+            .expect("build forge-pg thread pool")
+    })
 }
 
 /// Pooled connection handle returned by [`MetadataDb::conn`].
