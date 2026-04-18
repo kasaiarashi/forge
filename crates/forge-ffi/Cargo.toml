@@ -19,10 +19,17 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 forge-core.workspace = true
 forge-ignore.workspace = true
+forge-client.workspace = true
+forge-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+tonic.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[build-dependencies]
+cbindgen = "0.28"

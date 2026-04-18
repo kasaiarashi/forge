@@ -1,9 +1,12 @@
-mod client;
 mod commands;
-mod credentials;
 mod pager;
-mod tofu;
-mod url_resolver;
+
+// Client, credential, URL-resolver, and TOFU logic moved to the
+// shared `forge-client` crate in Phase 4b so forge-ffi (and any
+// future in-process consumer) can open the same authenticated
+// channel without re-implementing TLS + pinned-trust + credential
+// resolution.
+pub(crate) use forge_client::{client, credentials, tofu, url_resolver};
 
 use clap::{Parser, Subcommand};
 use std::cell::RefCell;

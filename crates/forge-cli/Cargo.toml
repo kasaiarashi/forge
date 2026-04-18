@@ -13,6 +13,7 @@ forge-core.workspace = true
 forge-diff.workspace = true
 forge-proto.workspace = true
 forge-ignore.workspace = true
+forge-client.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 bincode.workspace = true

@@ -104,18 +104,69 @@ pub struct forge_session_t {
 
 mod session {
     use super::*;
+    use std::sync::{Arc, OnceLock};
 
     /// The real struct behind [`super::forge_session_t`]. Only
     /// reachable inside this crate; C sees the opaque tag.
+    ///
+    /// Owns a tokio runtime lazily so a workspace that never makes
+    /// a remote call (pure local status, say) doesn't pay the
+    /// worker-thread cost. Once constructed, the same runtime
+    /// services every remote op for the session's lifetime — the
+    /// UE editor keeps one session open across its whole run, so
+    /// amortising the startup cost matters.
     pub struct Session {
         pub workspace: Workspace,
+        runtime: OnceLock<Arc<tokio::runtime::Runtime>>,
     }
 
     impl Session {
         pub fn open(workspace_path: PathBuf) -> Result<Self, anyhow::Error> {
             let workspace = Workspace::discover(&workspace_path)
                 .map_err(|e| anyhow::anyhow!("workspace discover: {e}"))?;
-            Ok(Self { workspace })
+            Ok(Self {
+                workspace,
+                runtime: OnceLock::new(),
+            })
+        }
+
+        /// Get (or lazily construct) the tokio runtime. 2 worker
+        /// threads is plenty for the editor — push/pull saturate a
+        /// link on the server CPU, not the client.
+        pub fn runtime(&self) -> Result<&tokio::runtime::Runtime, anyhow::Error> {
+            let rt = self.runtime.get_or_init(|| {
+                let built = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .thread_name("forge-ffi")
+                    .build()
+                    .expect("build tokio runtime for forge-ffi session");
+                Arc::new(built)
+            });
+            Ok(rt.as_ref())
+        }
+
+        /// Resolve the server URL for this workspace's default remote
+        /// and return `(url, repo)`.  `repo` comes from the workspace
+        /// config and defaults to "default" when empty (mirrors the
+        /// CLI's behaviour).
+        pub fn remote(&self) -> Result<(String, String), anyhow::Error> {
+            let cfg = self.workspace.config()
+                .map_err(|e| anyhow::anyhow!("load workspace config: {e}"))?;
+            let url = cfg
+                .default_remote_url()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no remote configured — set one with `forge remote add origin <url>`"
+                    )
+                })?
+                .to_string();
+            let repo = if cfg.repo.is_empty() {
+                "default".into()
+            } else {
+                cfg.repo.clone()
+            };
+            Ok((url, repo))
         }
     }
 }
@@ -292,6 +343,248 @@ pub unsafe extern "C" fn forge_status_json(
     })
 }
 
+// ── Remote-backed ops ───────────────────────────────────────────────────────
+
+/// List the active locks on this workspace's default remote as a
+/// JSON array. Each element is `{"path":..., "owner":..., "created_at":...}`.
+///
+/// Returns null on error; populates `*out_err`. Success values must
+/// be released via [`forge_string_free`].
+///
+/// # Safety
+/// - `session` must be non-null.
+/// - `out_err`, when non-null, must point to a writable struct.
+#[no_mangle]
+pub unsafe extern "C" fn forge_lock_list_json(
+    session: *mut forge_session_t,
+    out_err: *mut forge_error_t,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return ptr::null_mut();
+        };
+        match run_lock_list(sess) {
+            Ok(json) => {
+                clear_error(out_err);
+                string_to_raw(json, out_err)
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                ptr::null_mut()
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_lock_list_json");
+        ptr::null_mut()
+    })
+}
+
+/// Acquire a lock on `path` for the current workspace user.
+///
+/// `reason` may be NULL for no reason. Returns 0 on success, non-zero
+/// on failure (check `*out_err` for detail).
+///
+/// # Safety
+/// `session` non-null, `path` non-null UTF-8 C string, `reason`
+/// nullable UTF-8 C string, `out_err` nullable writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn forge_lock_acquire(
+    session: *mut forge_session_t,
+    path: *const c_char,
+    reason: *const c_char,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        let Some(path_str) = cstr_to_str(path, "path", out_err) else {
+            return 1;
+        };
+        let reason_str = if reason.is_null() {
+            String::new()
+        } else {
+            match cstr_to_str(reason, "reason", out_err) {
+                Some(s) => s.to_string(),
+                None => return 1,
+            }
+        };
+        match run_lock_acquire(sess, path_str, &reason_str) {
+            Ok(()) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                set_error(
+                    out_err,
+                    classify_lock_error(&e),
+                    &e.to_string(),
+                );
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_lock_acquire");
+        1
+    })
+}
+
+/// Release the caller's lock on `path`. No-op if no lock is held.
+/// Returns 0 on success, non-zero on failure.
+///
+/// # Safety
+/// Same rules as [`forge_lock_acquire`] minus the `reason` arg.
+#[no_mangle]
+pub unsafe extern "C" fn forge_lock_release(
+    session: *mut forge_session_t,
+    path: *const c_char,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        let Some(path_str) = cstr_to_str(path, "path", out_err) else {
+            return 1;
+        };
+        match run_lock_release(sess, path_str) {
+            Ok(()) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_lock_release");
+        1
+    })
+}
+
+fn run_lock_list(sess: &Session) -> Result<String, anyhow::Error> {
+    use forge_proto::forge::ListLocksRequest;
+    use serde_json::json;
+
+    let (url, repo) = sess.remote()?;
+    let rt = sess.runtime()?;
+    let resp = rt.block_on(async {
+        let mut client = forge_client::connect_forge(&url).await?;
+        Ok::<_, anyhow::Error>(
+            client
+                .list_locks(ListLocksRequest {
+                    repo,
+                    path_prefix: String::new(),
+                    owner: String::new(),
+                })
+                .await?
+                .into_inner(),
+        )
+    })?;
+
+    let arr: Vec<_> = resp
+        .locks
+        .iter()
+        .map(|lock| {
+            json!({
+                "path": lock.path,
+                "owner": lock.owner,
+                "workspace_id": lock.workspace_id,
+                "reason": lock.reason,
+                "created_at": lock.created_at,
+            })
+        })
+        .collect();
+    Ok(serde_json::Value::Array(arr).to_string())
+}
+
+fn run_lock_acquire(sess: &Session, path: &str, reason: &str) -> Result<(), anyhow::Error> {
+    use forge_proto::forge::LockRequest;
+
+    let (url, repo) = sess.remote()?;
+    let cfg = sess.workspace.config()?;
+    let owner = cfg.user.name.clone();
+    let rt = sess.runtime()?;
+    rt.block_on(async {
+        let mut client = forge_client::connect_forge(&url).await?;
+        let resp = client
+            .acquire_lock(LockRequest {
+                repo,
+                path: path.to_string(),
+                owner,
+                workspace_id: cfg.workspace_id.clone(),
+                reason: reason.to_string(),
+            })
+            .await?
+            .into_inner();
+        if resp.granted {
+            Ok(())
+        } else {
+            // Server-side rejection carries the current lock record.
+            // Bubble it up with enough context that the plugin can
+            // surface "held by alice since 10:42" to the user.
+            let msg = if let Some(existing) = resp.existing_lock.as_ref() {
+                format!(
+                    "locked by {} (workspace {}, since ts {})",
+                    existing.owner, existing.workspace_id, existing.created_at
+                )
+            } else {
+                "lock acquire rejected by server".to_string()
+            };
+            Err(anyhow::anyhow!(msg))
+        }
+    })
+}
+
+fn run_lock_release(sess: &Session, path: &str) -> Result<(), anyhow::Error> {
+    use forge_proto::forge::UnlockRequest;
+
+    let (url, repo) = sess.remote()?;
+    let cfg = sess.workspace.config()?;
+    let owner = cfg.user.name.clone();
+    let rt = sess.runtime()?;
+    rt.block_on(async {
+        let mut client = forge_client::connect_forge(&url).await?;
+        let resp = client
+            .release_lock(UnlockRequest {
+                repo,
+                path: path.to_string(),
+                owner,
+                force: false,
+            })
+            .await?
+            .into_inner();
+        if resp.success {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "{}",
+                if resp.error.is_empty() {
+                    "release_lock rejected".to_string()
+                } else {
+                    resp.error
+                }
+            ))
+        }
+    })
+}
+
+fn classify_lock_error(e: &anyhow::Error) -> forge_status_t {
+    // Server "locked by other" maps to CONFLICT so the plugin can
+    // branch on that specifically for a "someone else holds this"
+    // toast.
+    let msg = e.to_string();
+    if msg.contains("locked by ") {
+        forge_status_t::FORGE_ERR_CONFLICT
+    } else {
+        forge_status_t::FORGE_ERR_IO
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn build_status_json(sess: &Session) -> Result<String, anyhow::Error> {
@@ -326,6 +619,31 @@ fn read_head_json(ws: &Workspace) -> Result<serde_json::Value, anyhow::Error> {
         Ok(json!({"kind": "ref", "name": rest}))
     } else {
         Ok(json!({"kind": "detached", "hash": trimmed}))
+    }
+}
+
+unsafe fn session_ref<'a>(
+    session: *mut forge_session_t,
+    out_err: *mut forge_error_t,
+) -> Option<&'a Session> {
+    if session.is_null() {
+        set_error(out_err, forge_status_t::FORGE_ERR_ARG, "session is null");
+        return None;
+    }
+    Some(&*(session as *const Session))
+}
+
+unsafe fn string_to_raw(s: String, out_err: *mut forge_error_t) -> *mut c_char {
+    match CString::new(s) {
+        Ok(c) => c.into_raw(),
+        Err(_) => {
+            set_error(
+                out_err,
+                forge_status_t::FORGE_ERR_INTERNAL,
+                "returned JSON contained interior NUL",
+            );
+            ptr::null_mut()
+        }
     }
 }
 

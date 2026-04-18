@@ -10,6 +10,7 @@ members = [
     "crates/forge-unreal",
     "crates/forge-agent",
     "crates/forge-ffi",
+    "crates/forge-client",
 ]
 resolver = "2"
 
@@ -73,6 +74,7 @@ forge-core = { path = "crates/forge-core" }
 forge-diff = { path = "crates/forge-diff" }
 forge-proto = { path = "crates/forge-proto" }
 forge-ignore = { path = "crates/forge-ignore" }
+forge-client = { path = "crates/forge-client" }
 tempfile = "3"
 similar = "2"
 indicatif = "0.17"

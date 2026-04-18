@@ -1,0 +1,23 @@
+[package]
+name = "forge-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Shared Forge gRPC client: endpoint + TLS + pinned-trust + credential lookup. Consumed by forge-cli and forge-ffi."
+
+[dependencies]
+forge-proto.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+webpki-roots = "0.26"
+sha2 = "0.10"
+dirs = "5"
+x509-parser = "0.16"
+keyring = "2"
