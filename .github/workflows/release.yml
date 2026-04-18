@@ -42,10 +42,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: '27.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # Install protoc by hand rather than arduino/setup-protoc — the
+      # action only retries the GitHub-release download twice before
+      # giving up, which took down the v0.2.0 release build when the
+      # CDN returned a transient 504. curl's --retry with
+      # --retry-all-errors backs off through 5xx responses with
+      # exponential wait, which is what we actually want on flaky
+      # transport. Pinned to v27.5 to match what `tonic-build` expects
+      # downstream.
+      - name: Install protoc (curl with retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROTOC_VERSION=27.5
+          case "${{ runner.os }}" in
+            Linux)   ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;;
+            macOS)   ZIP="protoc-${PROTOC_VERSION}-osx-universal_binary.zip" ;;
+            Windows) ZIP="protoc-${PROTOC_VERSION}-win64.zip" ;;
+            *) echo "Unsupported runner: ${{ runner.os }}" >&2; exit 1 ;;
+          esac
+          URL="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${ZIP}"
+          echo "Fetching $URL"
+          curl --fail --show-error --location \
+               --retry 8 --retry-delay 15 --retry-max-time 300 --retry-all-errors \
+               -o protoc.zip "$URL"
+          mkdir -p "$HOME/protoc"
+          unzip -q -o protoc.zip -d "$HOME/protoc"
+          echo "$HOME/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/protoc/bin/protoc" --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -101,10 +125,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: '27.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # Install protoc by hand rather than arduino/setup-protoc — the
+      # action only retries the GitHub-release download twice before
+      # giving up, which took down the v0.2.0 release build when the
+      # CDN returned a transient 504. curl's --retry with
+      # --retry-all-errors backs off through 5xx responses with
+      # exponential wait, which is what we actually want on flaky
+      # transport. Pinned to v27.5 to match what `tonic-build` expects
+      # downstream.
+      - name: Install protoc (curl with retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROTOC_VERSION=27.5
+          case "${{ runner.os }}" in
+            Linux)   ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;;
+            macOS)   ZIP="protoc-${PROTOC_VERSION}-osx-universal_binary.zip" ;;
+            Windows) ZIP="protoc-${PROTOC_VERSION}-win64.zip" ;;
+            *) echo "Unsupported runner: ${{ runner.os }}" >&2; exit 1 ;;
+          esac
+          URL="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${ZIP}"
+          echo "Fetching $URL"
+          curl --fail --show-error --location \
+               --retry 8 --retry-delay 15 --retry-max-time 300 --retry-all-errors \
+               -o protoc.zip "$URL"
+          mkdir -p "$HOME/protoc"
+          unzip -q -o protoc.zip -d "$HOME/protoc"
+          echo "$HOME/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/protoc/bin/protoc" --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:
