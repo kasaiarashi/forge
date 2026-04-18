@@ -388,6 +388,98 @@ pub fn migrate(config: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+// ── GC subcommand ────────────────────────────────────────────────────────────
+
+/// `forge-server gc`: run a mark-and-sweep pass over every repo (or a
+/// single repo via `--repo`). Intended for operators who want an
+/// explicit reclaim window in addition to the scheduled sweep.
+///
+/// Refuses `postgres` backend for now — GC reads the metadata via
+/// `MetadataDb` directly since the trait-covered surface is enough for
+/// the push path but the CLI path also touches concrete helpers.
+pub fn gc(
+    config: &ServerConfig,
+    dry_run: bool,
+    grace_hours: i64,
+    repo: Option<&str>,
+) -> Result<()> {
+    use crate::services::gc;
+    use crate::storage::fs::FsStorage;
+
+    if config.database.backend.as_str() != "sqlite" {
+        bail!(
+            "forge-server gc currently supports only the sqlite backend \
+             ([database] backend = \"sqlite\"). Postgres GC lands in a \
+             later phase once the server fully runs on the trait."
+        );
+    }
+
+    let base = config.storage.base_path.clone();
+    std::fs::create_dir_all(base.join("repos")).ok();
+    let db = open_db(config)?;
+    let repo_overrides: std::collections::HashMap<String, std::path::PathBuf> = config
+        .repos
+        .iter()
+        .filter_map(|(name, rc)| rc.path.as_ref().map(|p| (name.clone(), p.clone())))
+        .collect();
+    let fs = FsStorage::new(base.join("repos"), repo_overrides);
+
+    let grace_secs = grace_hours * 3600;
+
+    let reports = if let Some(name) = repo {
+        vec![gc::run_one(&db, &fs, name, grace_secs, dry_run)?]
+    } else {
+        gc::run(&db, &fs, grace_secs, dry_run)?
+    };
+
+    let mut total_swept = 0u64;
+    let mut total_bytes = 0u64;
+    let mut total_errors = 0u64;
+    println!(
+        "{:<32} {:>9} {:>9} {:>9} {:>9} {:>14} {:>7}",
+        "REPO", "SCANNED", "MARKED", "SWEPT", "YOUNG", "BYTES", "ERRORS"
+    );
+    println!("{}", "-".repeat(96));
+    for r in &reports {
+        total_swept += r.swept;
+        total_bytes += r.bytes_freed;
+        total_errors += r.errors;
+        println!(
+            "{:<32} {:>9} {:>9} {:>9} {:>9} {:>14} {:>7}",
+            truncate(&r.repo, 32),
+            r.scanned,
+            r.marked,
+            r.swept,
+            r.skipped_young,
+            r.bytes_freed,
+            r.errors,
+        );
+    }
+    println!();
+    println!(
+        "Total: swept={total_swept}, bytes_freed={total_bytes}, errors={total_errors}"
+    );
+    if dry_run {
+        println!("(dry run — nothing was deleted)");
+    }
+    if total_errors > 0 {
+        println!(
+            "Non-fatal errors occurred during GC; inspect the server log \
+             for detail. Rerun after resolving before relying on disk \
+             accounting."
+        );
+    }
+    Ok(())
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n.saturating_sub(1)])
+    }
+}
+
 #[cfg(feature = "postgres")]
 fn mask_url_password(url: &str) -> String {
     // Avoid leaking a libpq password to operator logs. Splits on `:` +

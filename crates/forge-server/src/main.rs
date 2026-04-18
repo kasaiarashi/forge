@@ -99,6 +99,25 @@ enum Commands {
     /// the current schema version. Picks the backend out of the
     /// `[database]` config block — same knob the server uses.
     Migrate,
+    /// Run garbage collection and exit. Mark-and-sweep over every
+    /// repo's object store; unreachable objects older than the grace
+    /// window are deleted. Safe to invoke against a running server
+    /// (filesystem deletes race only with staging uploads, which live
+    /// under `_staging/` and are skipped).
+    Gc {
+        /// Scan and report what would be swept without deleting.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Grace window in hours. Objects modified more recently are
+        /// always kept regardless of reachability. Default 24.
+        #[arg(long, default_value_t = 24)]
+        grace_hours: i64,
+
+        /// Restrict to a single repo. Omit to sweep every repo.
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// Check for updates and self-update the server
     Update {
         /// Only check for updates without installing
@@ -373,6 +392,11 @@ fn main() -> Result<()> {
             cli_admin::migrate(&config)?;
             return Ok(());
         }
+        Some(Commands::Gc { dry_run, grace_hours, ref repo }) => {
+            let config = load_config_for_admin(&cli)?;
+            cli_admin::gc(&config, dry_run, grace_hours, repo.as_deref())?;
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -553,6 +577,7 @@ pub(crate) async fn serve_inner(
     // silent so a crashed worker can't hold a claim forever.
     services::agent_sweeper::spawn(Arc::clone(&db));
     services::session_sweeper::spawn(Arc::clone(&db), Arc::clone(&fs));
+    services::gc::spawn(Arc::clone(&db), Arc::clone(&fs));
 
     // Live step-log broadcast hub. Engine + (future) agents publish;
     // StreamStepLogs readers subscribe.
