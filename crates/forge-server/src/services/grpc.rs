@@ -22,6 +22,72 @@ use crate::config::LimitsSection;
 use crate::storage::db::{CommitSessionOutcome, MetadataDb, RefUpdateSpec};
 use crate::storage::fs::FsStorage;
 
+/// Slice `compressed` from `start_offset` forwards into a sequence
+/// of [`ObjectChunk`]s whose aggregate reproduces the tail-slice the
+/// client still needs. Extracted from [`ForgeGrpcService::pull_objects`]
+/// so Phase 3e.3's resume path is unit-testable without spinning up
+/// a gRPC server.
+///
+/// A `start_offset` past the end of `compressed` is clamped and the
+/// function emits a single empty-payload `is_last = true` chunk so
+/// the client's state machine can finalise the object (rename its
+/// `.partial` into place) without special-casing "zero bytes
+/// remaining".
+fn build_pull_chunks(
+    hash_bytes: Vec<u8>,
+    start_offset: u64,
+    compressed: &[u8],
+    chunk_size: usize,
+) -> Vec<ObjectChunk> {
+    debug_assert!(chunk_size > 0);
+    let total = compressed.len() as u64;
+    let start = start_offset.min(total);
+    let remainder = &compressed[start as usize..];
+
+    if remainder.is_empty() {
+        return vec![ObjectChunk {
+            hash: hash_bytes,
+            object_type: 1,
+            total_size: total,
+            offset: start,
+            data: Vec::new(),
+            is_last: true,
+            repo: String::new(),
+            upload_session_id: String::new(),
+        }];
+    }
+
+    if remainder.len() <= chunk_size {
+        return vec![ObjectChunk {
+            hash: hash_bytes,
+            object_type: 1,
+            total_size: total,
+            offset: start,
+            data: remainder.to_vec(),
+            is_last: true,
+            repo: String::new(),
+            upload_session_id: String::new(),
+        }];
+    }
+
+    let mut out = Vec::with_capacity(remainder.len().div_ceil(chunk_size));
+    for (i, slice) in remainder.chunks(chunk_size).enumerate() {
+        let off = start + (i * chunk_size) as u64;
+        let is_last = off + slice.len() as u64 == total;
+        out.push(ObjectChunk {
+            hash: hash_bytes.clone(),
+            object_type: 1,
+            total_size: total,
+            offset: off,
+            data: slice.to_vec(),
+            is_last,
+            repo: String::new(),
+            upload_session_id: String::new(),
+        });
+    }
+    out
+}
+
 /// Log the raw error server-side and return a generic `Status::internal`.
 /// Used to avoid leaking internal error messages (SQL schema, filesystem
 /// paths, etc) to remote callers. The `label` is a short static string so
@@ -810,23 +876,49 @@ impl ForgeService for ForgeGrpcService {
 
         let store = self.fs.repo_store(&repo);
 
+        // Normalise the two wire formats into a single (hash_bytes,
+        // start_offset) list so the stage-1/stage-2 pipeline below
+        // doesn't need to know which field the client used. If both
+        // `want_objects` and `want_hashes` are set, `want_objects`
+        // wins — we explicitly tell operators so a migrated client
+        // that accidentally populates both doesn't silently fall
+        // through to the legacy path.
+        let wants: Vec<(Vec<u8>, u64)> = if !req.want_objects.is_empty() {
+            if !req.want_hashes.is_empty() {
+                tracing::warn!(
+                    "pull_objects: both want_hashes and want_objects \
+                     populated; using want_objects (resume-aware path)"
+                );
+            }
+            req.want_objects
+                .into_iter()
+                .map(|w| (w.hash, w.start_offset))
+                .collect()
+        } else {
+            req.want_hashes
+                .into_iter()
+                .map(|h| (h, 0u64))
+                .collect()
+        };
+
         // Two-stage pipeline (same idea as push):
         //   Stage 1: rayon reads compressed objects from disk in parallel
         //   Stage 2: single thread chunks and sends to gRPC stream
+        // The stage-1 payload carries the per-object start_offset so
+        // stage 2 can slice without re-reading.
         let (read_tx, read_rx) =
-            crossbeam_channel::bounded::<(Vec<u8>, Vec<u8>)>(8);
+            crossbeam_channel::bounded::<(Vec<u8>, u64, Vec<u8>)>(8);
         // Holds ≤4 MiB ObjectChunks, so 64 slots = 256 MiB max.
         let (tx, rx) = tokio::sync::mpsc::channel(64);
 
         // Stage 1: parallel disk reads on OS threads.
-        let hashes = req.want_hashes;
         std::thread::spawn(move || {
             use rayon::prelude::*;
-            hashes.par_iter().for_each(|hash_bytes| {
+            wants.par_iter().for_each(|(hash_bytes, start_offset)| {
                 let hash_hex = hex::encode(hash_bytes);
                 if let Ok(fh) = ForgeHash::from_hex(&hash_hex) {
                     if let Ok(data) = store.get_raw(&fh) {
-                        let _ = read_tx.send((hash_bytes.clone(), data));
+                        let _ = read_tx.send((hash_bytes.clone(), *start_offset, data));
                     }
                 }
             });
@@ -835,39 +927,10 @@ impl ForgeService for ForgeGrpcService {
         // Stage 2: single thread chunks and sends (preserves per-object ordering).
         std::thread::spawn(move || {
             const CHUNK_SIZE: usize = 4 * 1024 * 1024;
-            while let Ok((hash_bytes, compressed)) = read_rx.recv() {
-                let total = compressed.len() as u64;
-                if compressed.len() <= CHUNK_SIZE {
-                    let msg = ObjectChunk {
-                        hash: hash_bytes,
-                        object_type: 1, // pre-compressed
-                        total_size: total,
-                        offset: 0,
-                        data: compressed,
-                        is_last: true,
-                        repo: String::new(),
-                        upload_session_id: String::new(),
-                    };
+            while let Ok((hash_bytes, start_offset, compressed)) = read_rx.recv() {
+                for msg in build_pull_chunks(hash_bytes, start_offset, &compressed, CHUNK_SIZE) {
                     if tx.blocking_send(Ok(msg)).is_err() {
                         return;
-                    }
-                } else {
-                    for (i, slice) in compressed.chunks(CHUNK_SIZE).enumerate() {
-                        let off = (i * CHUNK_SIZE) as u64;
-                        let is_last = off + slice.len() as u64 == total;
-                        let msg = ObjectChunk {
-                            hash: hash_bytes.clone(),
-                            object_type: 1,
-                            total_size: total,
-                            offset: off,
-                            data: slice.to_vec(),
-                            is_last,
-                            repo: String::new(),
-                            upload_session_id: String::new(),
-                        };
-                        if tx.blocking_send(Ok(msg)).is_err() {
-                            return;
-                        }
                     }
                 }
             }
@@ -2739,5 +2802,104 @@ impl ForgeService for ForgeGrpcService {
             })
             .collect();
         Ok(Response::new(ListSecretKeysResponse { secrets }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_pull_chunks_from_zero_offset_single_chunk() {
+        // Compressed fits in one chunk — single is_last = true message.
+        let payload = vec![0xABu8; 100];
+        let chunks = build_pull_chunks(vec![0xDE; 32], 0, &payload, 4 * 1024 * 1024);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_last);
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].total_size, 100);
+        assert_eq!(chunks[0].data, payload);
+    }
+
+    #[test]
+    fn build_pull_chunks_from_zero_offset_multi_chunk_has_correct_boundaries() {
+        let payload: Vec<u8> = (0..30u32).flat_map(|i| i.to_le_bytes()).collect();
+        assert_eq!(payload.len(), 120);
+        // Small chunk_size so we exercise the multi-chunk path with a
+        // deterministic expected split.
+        let chunks = build_pull_chunks(vec![0xCA; 32], 0, &payload, 50);
+        // 120 bytes / 50 = 3 chunks: 50, 50, 20.
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].data.len(), 50);
+        assert!(!chunks[0].is_last);
+        assert_eq!(chunks[1].offset, 50);
+        assert_eq!(chunks[1].data.len(), 50);
+        assert!(!chunks[1].is_last);
+        assert_eq!(chunks[2].offset, 100);
+        assert_eq!(chunks[2].data.len(), 20);
+        assert!(chunks[2].is_last);
+        assert_eq!(chunks[2].total_size, 120);
+    }
+
+    #[test]
+    fn build_pull_chunks_respects_nonzero_start_offset() {
+        // Simulates a client that already has bytes 0..50 on disk;
+        // server must ship only bytes 50.. onwards, with `offset`
+        // values continuing from 50.
+        let payload: Vec<u8> = (0..12u32).flat_map(|i| i.to_le_bytes()).collect();
+        // 48 bytes total. Start at 20 — 28 remaining.
+        let chunks = build_pull_chunks(vec![0x01; 32], 20, &payload, 10);
+        // 28 bytes / 10 = 3 chunks: 10, 10, 8.
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].offset, 20);
+        assert_eq!(chunks[0].total_size, 48);
+        assert_eq!(chunks[0].data, payload[20..30]);
+        assert_eq!(chunks[1].offset, 30);
+        assert_eq!(chunks[1].data, payload[30..40]);
+        assert_eq!(chunks[2].offset, 40);
+        assert_eq!(chunks[2].data, payload[40..48]);
+        assert!(chunks[2].is_last);
+    }
+
+    #[test]
+    fn build_pull_chunks_start_offset_equal_to_total_emits_terminator() {
+        // Client claims to already have the whole object. Server must
+        // still send one is_last = true message so the client can
+        // finalise its .partial file.
+        let payload = vec![0x11u8; 64];
+        let chunks = build_pull_chunks(vec![0xAA; 32], 64, &payload, 1024);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_last);
+        assert_eq!(chunks[0].offset, 64);
+        assert!(chunks[0].data.is_empty());
+        assert_eq!(chunks[0].total_size, 64);
+    }
+
+    #[test]
+    fn build_pull_chunks_clamps_start_offset_past_end() {
+        // Lying / confused client sends a start_offset past EOF. We
+        // clamp so arithmetic never underflows and respond with the
+        // same empty-is_last terminator.
+        let payload = vec![0x22u8; 10];
+        let chunks = build_pull_chunks(vec![0xBB; 32], 99, &payload, 128);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_last);
+        assert_eq!(chunks[0].offset, 10, "clamped to total");
+        assert!(chunks[0].data.is_empty());
+    }
+
+    #[test]
+    fn build_pull_chunks_mid_boundary_start_aligns_with_chunk_size() {
+        // start_offset lands exactly on a chunk boundary relative to
+        // zero — output should be two clean halves, not off-by-one.
+        let payload = vec![0x33u8; 200];
+        let chunks = build_pull_chunks(vec![0xCC; 32], 50, &payload, 50);
+        // Remaining 150 / 50 = 3 chunks: 50, 50, 50.
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].offset, 50);
+        assert_eq!(chunks[1].offset, 100);
+        assert_eq!(chunks[2].offset, 150);
+        assert!(chunks[2].is_last);
     }
 }

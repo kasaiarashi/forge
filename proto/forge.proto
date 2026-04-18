@@ -484,11 +484,35 @@ message PushResponse {
     reserved 4 to 15;
 }
 
-message PullRequest {
-    repeated bytes want_hashes = 1;
-    string repo = 2;
+// A single object the client wants in a PullObjects stream, plus the
+// byte offset the server should start streaming from. Introduced in
+// Phase 3e.3 so a client that crashed mid-pull can re-attach to the
+// already-received prefix of a big object instead of restarting from
+// zero.
+//
+// start_offset is expressed in the same coordinate space as
+// ObjectChunk.offset (i.e. bytes into the compressed payload). Zero
+// = start from the beginning, identical to the legacy `want_hashes`
+// path.
+message WantObject {
+    bytes hash = 1;
+    uint64 start_offset = 2;
 
     reserved 3 to 15;
+}
+
+message PullRequest {
+    // Legacy hash list. Backward-compatible with pre-3e.3 clients —
+    // the server derives an implicit start_offset of 0 for each hash.
+    repeated bytes want_hashes = 1;
+    string repo = 2;
+    // Resume-aware pull. When non-empty, supersedes `want_hashes`
+    // entirely — servers that see both pick this list and log a
+    // warning. Clients that don't need resume should keep using
+    // `want_hashes`; the wire overhead of the empty field is trivial.
+    repeated WantObject want_objects = 3;
+
+    reserved 4 to 15;
 }
 
 message HasObjectsRequest {

@@ -209,6 +209,12 @@ pub(super) async fn fetch_objects_to_tip(
                 .pull_objects(PullRequest {
                     want_hashes: batch_bytes,
                     repo: repo_name.to_string(),
+                    // Phase 3e.3 adds the resume-aware `want_objects`
+                    // field. Leaving it empty means the server derives
+                    // start_offset = 0 for every hash (legacy path).
+                    // Client-side partial-file persistence that would
+                    // populate this field is Phase 3e.3b.
+                    want_objects: Vec::new(),
                 })
                 .await?
                 .into_inner();
