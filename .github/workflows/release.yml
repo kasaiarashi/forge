@@ -117,10 +117,21 @@ jobs:
       - name: Build forge CLI
         run: cargo build --release --bin forge
 
+      # Rust cdylib consumed by the UE plugin as an in-process fast
+      # path (FFI) in place of shelling out to `forge.exe` per op.
+      # Shipped alongside forge.exe in the client installer — Fab's
+      # marketplace rejects binary payloads inside code plugins, so
+      # the DLL has to live outside the .uplugin and be discovered
+      # at load time by the plugin.
+      - name: Build forge-ffi (cdylib)
+        run: cargo build --release -p forge-ffi
+
       - uses: actions/upload-artifact@v4
         with:
           name: forge-windows-client
-          path: target/release/forge.exe
+          path: |
+            target/release/forge.exe
+            target/release/forge_ffi.dll
 
   # ─── Build server binaries (all platforms) ───
   build-server:
@@ -381,6 +392,7 @@ jobs:
         run: |
           # Client binaries
           cp artifacts/forge-windows-client/forge.exe forge-windows-x64.exe
+          cp artifacts/forge-windows-client/forge_ffi.dll forge_ffi-windows-x64.dll
 
           # Server + Web binaries (Windows)
           cp artifacts/forge-server-windows/forge-server.exe forge-server-windows-x64.exe
@@ -418,6 +430,7 @@ jobs:
             ForgeSourceControl-UE5.7-${{ github.ref_name }}.zip
             ForgeSourceControl-${{ github.ref_name }}.zip
             forge-windows-x64.exe
+            forge_ffi-windows-x64.dll
             forge-server-windows-x64.exe
             forge-web-windows-x64.exe
             forge-server-linux-x64

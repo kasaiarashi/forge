@@ -4,9 +4,16 @@
 #include "ForgeFFIBridge.h"
 
 #include "HAL/PlatformProcess.h"
+#include "HAL/PlatformMisc.h"
 #include "Misc/Paths.h"
 #include "Interfaces/IPluginManager.h"
 #include "ISourceControlModule.h"
+
+#if PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <windows.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#endif
 
 #define LOCTEXT_NAMESPACE "ForgeSourceControl"
 
@@ -67,25 +74,170 @@ namespace
 	// later call.
 	constexpr int32 kMinSupportedAbi = 4;
 
-	/** Resolve the expected location of `forge_ffi.dll` next to the
-	 *  plugin's Binaries/ dir so the user doesn't need to PATH-install. */
-	FString ResolveDllPath()
+	/** Platform-specific library filename the FFI loader is after. */
+	const TCHAR* FfiLibraryFilename()
 	{
-		TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("ForgeSourceControl"));
-		if (!Plugin.IsValid())
+	#if PLATFORM_WINDOWS
+		return TEXT("forge_ffi.dll");
+	#elif PLATFORM_MAC
+		return TEXT("libforge_ffi.dylib");
+	#elif PLATFORM_LINUX
+		return TEXT("libforge_ffi.so");
+	#else
+		return TEXT("forge_ffi");
+	#endif
+	}
+
+	/** Filename of the `forge` CLI binary; used as an anchor when we
+	 *  scan `PATH` looking for the sibling FFI library. */
+	const TCHAR* ForgeCliFilename()
+	{
+	#if PLATFORM_WINDOWS
+		return TEXT("forge.exe");
+	#else
+		return TEXT("forge");
+	#endif
+	}
+
+	/** Scan `PATH` for `forge` and, if found, check for the FFI
+	 *  library next to it. This is the production-install discovery
+	 *  path — the Windows installer lays down both files in the same
+	 *  directory and adds it to `PATH`. */
+	FString FindFfiNextToForgeOnPath()
+	{
+		FString PathEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("PATH"));
+		if (PathEnv.IsEmpty())
 		{
 			return FString();
 		}
-		const FString Base = Plugin->GetBaseDir();
 	#if PLATFORM_WINDOWS
-		return FPaths::Combine(Base, TEXT("Binaries"), TEXT("Win64"), TEXT("forge_ffi.dll"));
-	#elif PLATFORM_MAC
-		return FPaths::Combine(Base, TEXT("Binaries"), TEXT("Mac"), TEXT("libforge_ffi.dylib"));
-	#elif PLATFORM_LINUX
-		return FPaths::Combine(Base, TEXT("Binaries"), TEXT("Linux"), TEXT("libforge_ffi.so"));
+		const TCHAR PathSep = TEXT(';');
 	#else
-		return FString();
+		const TCHAR PathSep = TEXT(':');
 	#endif
+		TArray<FString> Dirs;
+		PathEnv.ParseIntoArray(Dirs, &PathSep, true);
+		const FString Cli = ForgeCliFilename();
+		const FString Lib = FfiLibraryFilename();
+		for (const FString& Dir : Dirs)
+		{
+			if (Dir.IsEmpty())
+			{
+				continue;
+			}
+			if (FPaths::FileExists(FPaths::Combine(Dir, *Cli)))
+			{
+				const FString Candidate = FPaths::Combine(Dir, *Lib);
+				if (FPaths::FileExists(Candidate))
+				{
+					return Candidate;
+				}
+			}
+		}
+		return FString();
+	}
+
+#if PLATFORM_WINDOWS
+	/** Read the install directory written by the Inno installer. Set
+	 *  under `HKLM\SOFTWARE\ForgeVCS\InstallDir` so a fresh editor
+	 *  process finds the FFI library even before the user has
+	 *  re-logged-in to pick up the installer's PATH edit. */
+	FString ReadFfiFromInstallRegistry()
+	{
+		HKEY Key = nullptr;
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ForgeVCS", 0, KEY_READ, &Key) != ERROR_SUCCESS)
+		{
+			return FString();
+		}
+		wchar_t Buf[MAX_PATH] = {};
+		DWORD Size = sizeof(Buf);
+		DWORD Type = 0;
+		LONG Result = RegQueryValueExW(Key, L"InstallDir", nullptr, &Type,
+			reinterpret_cast<LPBYTE>(Buf), &Size);
+		RegCloseKey(Key);
+		if (Result != ERROR_SUCCESS || (Type != REG_SZ && Type != REG_EXPAND_SZ))
+		{
+			return FString();
+		}
+		const FString InstallDir(Buf);
+		if (InstallDir.IsEmpty())
+		{
+			return FString();
+		}
+		const FString Candidate = FPaths::Combine(InstallDir, FfiLibraryFilename());
+		return FPaths::FileExists(Candidate) ? Candidate : FString();
+	}
+#endif
+
+	/** Resolve the FFI library location.
+	 *
+	 *  Priority:
+	 *    1. `FORGE_FFI_PATH` env var — explicit override for dev and
+	 *       weird deployments.
+	 *    2. Plugin-local `<Plugin>/Binaries/<Platform>/` — developer
+	 *       builds + the general-download zip.
+	 *    3. Next to `forge` on `PATH` — the production install path.
+	 *    4. Windows install-dir registry marker — survives a
+	 *       not-yet-refreshed `PATH` in a fresh editor process.
+	 *
+	 *  Returns an empty string when none hit, which the caller logs
+	 *  and falls back to the CLI subprocess path. The plugin stays
+	 *  functional without the FFI library; it just runs slower. */
+	FString ResolveDllPath()
+	{
+		// 1. Override via env var.
+		{
+			const FString Override = FPlatformMisc::GetEnvironmentVariable(TEXT("FORGE_FFI_PATH"));
+			if (!Override.IsEmpty() && FPaths::FileExists(Override))
+			{
+				return Override;
+			}
+		}
+
+		// 2. Plugin-local Binaries/<Platform>/.
+		if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("ForgeSourceControl")))
+		{
+			const FString Base = Plugin->GetBaseDir();
+		#if PLATFORM_WINDOWS
+			const FString Platform = TEXT("Win64");
+		#elif PLATFORM_MAC
+			const FString Platform = TEXT("Mac");
+		#elif PLATFORM_LINUX
+			const FString Platform = TEXT("Linux");
+		#else
+			const FString Platform;
+		#endif
+			if (!Platform.IsEmpty())
+			{
+				const FString Candidate = FPaths::Combine(Base, TEXT("Binaries"), Platform, FfiLibraryFilename());
+				if (FPaths::FileExists(Candidate))
+				{
+					return Candidate;
+				}
+			}
+		}
+
+		// 3. Scan PATH for `forge` + sibling library.
+		{
+			const FString FromPath = FindFfiNextToForgeOnPath();
+			if (!FromPath.IsEmpty())
+			{
+				return FromPath;
+			}
+		}
+
+	#if PLATFORM_WINDOWS
+		// 4. Installer-written registry marker.
+		{
+			const FString FromReg = ReadFfiFromInstallRegistry();
+			if (!FromReg.IsEmpty())
+			{
+				return FromReg;
+			}
+		}
+	#endif
+
+		return FString();
 	}
 
 	/** Helper: populate FText from a forge_error_t populated by the
