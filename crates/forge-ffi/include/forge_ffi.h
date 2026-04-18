@@ -178,6 +178,51 @@ char *forge_workspace_info_json(struct forge_session_t *session, struct forge_er
 char *forge_current_branch(struct forge_session_t *session, struct forge_error_t *out_err);
 
 /**
+ * Stage the given paths (JSON array of UTF-8 path strings). Paths
+ * are resolved relative to the session's workspace root.
+ *
+ * Returns 0 on success, non-zero on failure. `out_err` carries the
+ * detail. On the Phase-4 perf path this removes N CreateProcess
+ * invocations per CheckIn.
+ *
+ * # Safety
+ * `session` non-null; `paths_json` non-null NUL-terminated UTF-8 C
+ * string parseable as a JSON array of strings; `out_err` nullable.
+ */
+int forge_add_paths(struct forge_session_t *session,
+                    const char *paths_json,
+                    struct forge_error_t *out_err);
+
+/**
+ * Commit the currently-staged index with `message`. Returns 0 on
+ * success; non-zero populates `*out_err` with the failure.
+ *
+ * # Safety
+ * `session` non-null; `message` non-null UTF-8 C string; `out_err` nullable.
+ */
+int forge_commit(struct forge_session_t *session,
+                 const char *message,
+                 struct forge_error_t *out_err);
+
+/**
+ * Push the current workspace to its default remote. `force` flips
+ * the `--force` flag (the server still enforces lock gates + ACLs).
+ *
+ * # Safety
+ * `session` non-null; `out_err` nullable.
+ */
+int forge_push(struct forge_session_t *session, int force, struct forge_error_t *out_err);
+
+/**
+ * Pull the current workspace's default branch from its default
+ * remote.
+ *
+ * # Safety
+ * `session` non-null; `out_err` nullable.
+ */
+int forge_pull(struct forge_session_t *session, struct forge_error_t *out_err);
+
+/**
  * List the active locks on this workspace's default remote as a
  * JSON array. Each element is `{"path":..., "owner":..., "created_at":...}`.
  *

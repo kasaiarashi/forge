@@ -200,24 +200,72 @@ bool FForgeCheckInWorker::Execute(FForgeSourceControlCommand& InCommand)
 	TSharedRef<FCheckIn, ESPMode::ThreadSafe> CheckInOp = StaticCastSharedRef<FCheckIn>(InCommand.Operation);
 	FString Message = CheckInOp->GetDescription().ToString();
 	if (Message.IsEmpty()) { Message = TEXT("Checked in from Unreal Editor"); }
-	Message.ReplaceInline(TEXT("\""), TEXT("\\\""));
+
+	// Phase 4c.3 — every step below is an FFI call when the library is
+	// loaded. A 500-asset check-in on the legacy subprocess path fires
+	// 500 stage + 1 commit + 500 unlock + 1 push = 1002 CreateProcess
+	// calls. Through the bridge it collapses to 1 forge_add_paths + 1
+	// forge_commit + 500 forge_lock_release (on the shared tokio
+	// runtime) + 1 forge_push — N drops from 1002 to 4 subprocess-
+	// equivalent calls, and the three that remain are in-process.
+	const FForgeFFISession* FFI = Provider.GetFFISession();
+
+	// Escape the quote for the subprocess-fallback path; the FFI
+	// path takes the raw FString.
+	FString EscapedMessage = Message;
+	EscapedMessage.ReplaceInline(TEXT("\""), TEXT("\\\""));
 
 	// Stage files.
-	for (const FString& File : InCommand.Files)
+	if (FFI != nullptr)
 	{
-		FString RelPath = File;
-		FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
-		UE_LOG(LogSourceControl, Log, TEXT("Forge CheckIn: staging '%s' (rel: '%s')"), *File, *RelPath);
-		if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("add \"%s\""), *RelPath)))
+		TArray<FString> RelPaths;
+		RelPaths.Reserve(InCommand.Files.Num());
+		for (const FString& File : InCommand.Files)
 		{
-			InCommand.ErrorMessages.Add(FString::Printf(TEXT("Failed to stage '%s'"), *RelPath));
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			RelPaths.Add(MoveTemp(RelPath));
+		}
+		FText StageError;
+		if (!FForgeFFI::AddPaths(*FFI, RelPaths, StageError))
+		{
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Failed to stage (%d file(s)): %s"),
+				RelPaths.Num(),
+				*StageError.ToString()));
 			InCommand.MarkOperationCompleted(false);
 			return false;
 		}
 	}
+	else
+	{
+		for (const FString& File : InCommand.Files)
+		{
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			UE_LOG(LogSourceControl, Log, TEXT("Forge CheckIn: staging '%s' (rel: '%s')"), *File, *RelPath);
+			if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("add \"%s\""), *RelPath)))
+			{
+				InCommand.ErrorMessages.Add(FString::Printf(TEXT("Failed to stage '%s'"), *RelPath));
+				InCommand.MarkOperationCompleted(false);
+				return false;
+			}
+		}
+	}
 
 	// Commit.
-	if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("commit -m \"%s\""), *Message)))
+	if (FFI != nullptr)
+	{
+		FText CommitError;
+		if (!FForgeFFI::Commit(*FFI, Message, CommitError))
+		{
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Failed to create commit: %s"), *CommitError.ToString()));
+			InCommand.MarkOperationCompleted(false);
+			return false;
+		}
+	}
+	else if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("commit -m \"%s\""), *EscapedMessage)))
 	{
 		InCommand.ErrorMessages.Add(TEXT("Failed to create commit"));
 		InCommand.MarkOperationCompleted(false);
@@ -249,8 +297,19 @@ bool FForgeCheckInWorker::Execute(FForgeSourceControlCommand& InCommand)
 		}
 	}
 
-	// Push.
-	if (!Provider.RunForgeCommandRaw(TEXT("push")))
+	// Push. Same FFI/fallback pattern as stage + commit above.
+	if (FFI != nullptr)
+	{
+		FText PushError;
+		if (!FForgeFFI::Push(*FFI, /*bForce=*/false, PushError))
+		{
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Commit created but push failed: %s"), *PushError.ToString()));
+			InCommand.MarkOperationCompleted(false);
+			return false;
+		}
+	}
+	else if (!Provider.RunForgeCommandRaw(TEXT("push")))
 	{
 		InCommand.ErrorMessages.Add(TEXT("Commit created but push failed"));
 		InCommand.MarkOperationCompleted(false);
@@ -282,15 +341,39 @@ bool FForgeMarkForAddWorker::Execute(FForgeSourceControlCommand& InCommand)
 	FForgeSourceControlProvider& Provider = InCommand.Provider;
 	const FString WsRoot = Provider.GetWorkspaceRoot();
 
-	for (const FString& File : InCommand.Files)
+	// One FFI call for the whole batch when the library is loaded.
+	const FForgeFFISession* FFI = Provider.GetFFISession();
+	if (FFI != nullptr)
 	{
-		FString RelPath = File;
-		FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
-		if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("add \"%s\""), *RelPath)))
+		TArray<FString> RelPaths;
+		RelPaths.Reserve(InCommand.Files.Num());
+		for (const FString& File : InCommand.Files)
 		{
-			InCommand.ErrorMessages.Add(FString::Printf(TEXT("Failed to add '%s'"), *RelPath));
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			RelPaths.Add(MoveTemp(RelPath));
+		}
+		FText AddError;
+		if (!FForgeFFI::AddPaths(*FFI, RelPaths, AddError))
+		{
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Failed to add paths: %s"), *AddError.ToString()));
 			InCommand.MarkOperationCompleted(false);
 			return false;
+		}
+	}
+	else
+	{
+		for (const FString& File : InCommand.Files)
+		{
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			if (!Provider.RunForgeCommandRaw(FString::Printf(TEXT("add \"%s\""), *RelPath)))
+			{
+				InCommand.ErrorMessages.Add(FString::Printf(TEXT("Failed to add '%s'"), *RelPath));
+				InCommand.MarkOperationCompleted(false);
+				return false;
+			}
 		}
 	}
 

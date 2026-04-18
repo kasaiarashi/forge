@@ -8,6 +8,14 @@ authors.workspace = true
 name = "forge"
 path = "src/main.rs"
 
+# Expose the command modules as a library so forge-ffi can call the
+# same add/commit/push/pull logic the CLI runs, without forking it
+# into a parallel codebase. The binary above still links the same
+# code via its usual module tree.
+[lib]
+name = "forge_cli"
+path = "src/lib.rs"
+
 [dependencies]
 forge-core.workspace = true
 forge-diff.workspace = true

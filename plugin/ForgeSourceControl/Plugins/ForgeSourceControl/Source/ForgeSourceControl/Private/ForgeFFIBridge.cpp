@@ -35,6 +35,10 @@ namespace
 	typedef int                   (*PFN_forge_lock_release)(forge_session_t*, const char*, forge_error_t*);
 	typedef char*                 (*PFN_forge_workspace_info_json)(forge_session_t*, forge_error_t*);
 	typedef char*                 (*PFN_forge_current_branch)(forge_session_t*, forge_error_t*);
+	typedef int                   (*PFN_forge_add_paths)(forge_session_t*, const char*, forge_error_t*);
+	typedef int                   (*PFN_forge_commit)(forge_session_t*, const char*, forge_error_t*);
+	typedef int                   (*PFN_forge_push)(forge_session_t*, int, forge_error_t*);
+	typedef int                   (*PFN_forge_pull)(forge_session_t*, forge_error_t*);
 
 	PFN_forge_version         GForgeVersion         = nullptr;
 	PFN_forge_abi_version     GForgeAbiVersion      = nullptr;
@@ -48,12 +52,16 @@ namespace
 	PFN_forge_lock_release        GForgeLockRelease       = nullptr;
 	PFN_forge_workspace_info_json GForgeWorkspaceInfoJson = nullptr;
 	PFN_forge_current_branch      GForgeCurrentBranch     = nullptr;
+	PFN_forge_add_paths           GForgeAddPaths          = nullptr;
+	PFN_forge_commit              GForgeCommit            = nullptr;
+	PFN_forge_push                GForgePush              = nullptr;
+	PFN_forge_pull                GForgePull              = nullptr;
 
 	// Minimum ABI version the plugin accepts. Bump when the header
 	// adds or breaks exported signatures so a stale `.dll` on disk
 	// after a plugin upgrade can't silently load and crash on a
 	// later call.
-	constexpr int32 kMinSupportedAbi = 2;
+	constexpr int32 kMinSupportedAbi = 3;
 
 	/** Resolve the expected location of `forge_ffi.dll` next to the
 	 *  plugin's Binaries/ dir so the user doesn't need to PATH-install. */
@@ -182,6 +190,10 @@ void FForgeFFI::Initialize()
 	FFI_RESOLVE(forge_lock_release);
 	FFI_RESOLVE(forge_workspace_info_json);
 	FFI_RESOLVE(forge_current_branch);
+	FFI_RESOLVE(forge_add_paths);
+	FFI_RESOLVE(forge_commit);
+	FFI_RESOLVE(forge_push);
+	FFI_RESOLVE(forge_pull);
 
 	#undef FFI_RESOLVE
 
@@ -225,6 +237,10 @@ void FForgeFFI::Shutdown()
 	GForgeLockRelease = nullptr;
 	GForgeWorkspaceInfoJson = nullptr;
 	GForgeCurrentBranch = nullptr;
+	GForgeAddPaths = nullptr;
+	GForgeCommit = nullptr;
+	GForgePush = nullptr;
+	GForgePull = nullptr;
 #endif
 }
 
@@ -405,6 +421,129 @@ FString FForgeFFI::WorkspaceInfoJson(const FForgeFFISession& Session, FText& Out
 #else
 	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
 	return FString();
+#endif
+}
+
+bool FForgeFFI::AddPaths(
+	const FForgeFFISession& Session,
+	const TArray<FString>& Paths,
+	FText& OutError)
+{
+#if FORGE_FFI_HAVE_HEADER
+	if (!IsAvailable() || !Session.IsValid())
+	{
+		OutError = LOCTEXT("AddUnavailable", "FFI session is not available.");
+		return false;
+	}
+	// Serialise the path list to JSON. Done with a tiny hand-rolled
+	// builder — pulling in Json module here would cost a dependency
+	// for one call. JSON-escaping covers the two characters that
+	// actually matter (`"` and `\`); anything fancier lives in
+	// FJsonSerializer on the consumers that need it.
+	FString Json = TEXT("[");
+	for (int32 Idx = 0; Idx < Paths.Num(); ++Idx)
+	{
+		if (Idx > 0) { Json += TEXT(","); }
+		FString Escaped = Paths[Idx];
+		Escaped.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+		Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
+		Json += TEXT("\"");
+		Json += Escaped;
+		Json += TEXT("\"");
+	}
+	Json += TEXT("]");
+
+	const FTCHARToUTF8 JsonUtf8(*Json);
+	forge_error_t Err = {};
+	const int Rc = GForgeAddPaths(Session.Get(), JsonUtf8.Get(), &Err);
+	if (Rc != 0)
+	{
+		OutError = ConsumeError(Err, (forge_status_t)1, TEXT("forge_add_paths failed"));
+		return false;
+	}
+	OutError = FText::GetEmpty();
+	return true;
+#else
+	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
+	return false;
+#endif
+}
+
+bool FForgeFFI::Commit(
+	const FForgeFFISession& Session,
+	const FString& Message,
+	FText& OutError)
+{
+#if FORGE_FFI_HAVE_HEADER
+	if (!IsAvailable() || !Session.IsValid())
+	{
+		OutError = LOCTEXT("CommitUnavailable", "FFI session is not available.");
+		return false;
+	}
+	const FTCHARToUTF8 MsgUtf8(*Message);
+	forge_error_t Err = {};
+	const int Rc = GForgeCommit(Session.Get(), MsgUtf8.Get(), &Err);
+	if (Rc != 0)
+	{
+		OutError = ConsumeError(Err, (forge_status_t)1, TEXT("forge_commit failed"));
+		return false;
+	}
+	OutError = FText::GetEmpty();
+	return true;
+#else
+	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
+	return false;
+#endif
+}
+
+bool FForgeFFI::Push(
+	const FForgeFFISession& Session,
+	bool bForce,
+	FText& OutError)
+{
+#if FORGE_FFI_HAVE_HEADER
+	if (!IsAvailable() || !Session.IsValid())
+	{
+		OutError = LOCTEXT("PushUnavailable", "FFI session is not available.");
+		return false;
+	}
+	forge_error_t Err = {};
+	const int Rc = GForgePush(Session.Get(), bForce ? 1 : 0, &Err);
+	if (Rc != 0)
+	{
+		OutError = ConsumeError(Err, (forge_status_t)1, TEXT("forge_push failed"));
+		return false;
+	}
+	OutError = FText::GetEmpty();
+	return true;
+#else
+	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
+	return false;
+#endif
+}
+
+bool FForgeFFI::Pull(
+	const FForgeFFISession& Session,
+	FText& OutError)
+{
+#if FORGE_FFI_HAVE_HEADER
+	if (!IsAvailable() || !Session.IsValid())
+	{
+		OutError = LOCTEXT("PullUnavailable", "FFI session is not available.");
+		return false;
+	}
+	forge_error_t Err = {};
+	const int Rc = GForgePull(Session.Get(), &Err);
+	if (Rc != 0)
+	{
+		OutError = ConsumeError(Err, (forge_status_t)1, TEXT("forge_pull failed"));
+		return false;
+	}
+	OutError = FText::GetEmpty();
+	return true;
+#else
+	OutError = LOCTEXT("FFIHeaderMissing", "forge_ffi.h was not available at plugin compile time.");
+	return false;
 #endif
 }
 

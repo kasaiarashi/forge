@@ -1957,6 +1957,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cbindgen",
+ "forge-cli",
  "forge-client",
  "forge-core",
  "forge-ignore",

@@ -476,6 +476,162 @@ fn build_workspace_info_json(sess: &Session) -> Result<String, anyhow::Error> {
     .to_string())
 }
 
+// ── Index / commit / push / pull ────────────────────────────────────────────
+//
+// These wrap `forge_cli::ops::*` so the FFI exposes the exact same
+// semantics the `forge` CLI ships. The plugin migrates each hot-path
+// worker (CheckIn in particular) to these and drops its
+// CreateProcess("forge add <path>") / ExecProcess("forge push") fan-out.
+
+/// Stage the given paths (JSON array of UTF-8 path strings). Paths
+/// are resolved relative to the session's workspace root.
+///
+/// Returns 0 on success, non-zero on failure. `out_err` carries the
+/// detail. On the Phase-4 perf path this removes N CreateProcess
+/// invocations per CheckIn.
+///
+/// # Safety
+/// `session` non-null; `paths_json` non-null NUL-terminated UTF-8 C
+/// string parseable as a JSON array of strings; `out_err` nullable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_add_paths(
+    session: *mut forge_session_t,
+    paths_json: *const c_char,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        let Some(json_str) = cstr_to_str(paths_json, "paths_json", out_err) else {
+            return 1;
+        };
+        let paths: Vec<String> = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_error(
+                    out_err,
+                    forge_status_t::FORGE_ERR_ARG,
+                    &format!("paths_json must be a JSON array of strings: {e}"),
+                );
+                return 1;
+            }
+        };
+        match forge_cli::ops::add(&sess.workspace.root, &paths) {
+            Ok(_) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_add_paths");
+        1
+    })
+}
+
+/// Commit the currently-staged index with `message`. Returns 0 on
+/// success; non-zero populates `*out_err` with the failure.
+///
+/// # Safety
+/// `session` non-null; `message` non-null UTF-8 C string; `out_err` nullable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_commit(
+    session: *mut forge_session_t,
+    message: *const c_char,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        let Some(msg) = cstr_to_str(message, "message", out_err) else {
+            return 1;
+        };
+        match forge_cli::ops::commit(&sess.workspace.root, msg) {
+            Ok(_) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_commit");
+        1
+    })
+}
+
+/// Push the current workspace to its default remote. `force` flips
+/// the `--force` flag (the server still enforces lock gates + ACLs).
+///
+/// # Safety
+/// `session` non-null; `out_err` nullable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_push(
+    session: *mut forge_session_t,
+    force: c_int,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        match forge_cli::ops::push(&sess.workspace.root, force != 0) {
+            Ok(_) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_push");
+        1
+    })
+}
+
+/// Pull the current workspace's default branch from its default
+/// remote.
+///
+/// # Safety
+/// `session` non-null; `out_err` nullable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_pull(
+    session: *mut forge_session_t,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        match forge_cli::ops::pull(&sess.workspace.root) {
+            Ok(_) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(out_err, forge_status_t::FORGE_ERR_INTERNAL, "panic in forge_pull");
+        1
+    })
+}
+
 // ── Remote-backed ops ───────────────────────────────────────────────────────
 
 /// List the active locks on this workspace's default remote as a
@@ -852,7 +1008,8 @@ pub extern "C" fn forge_abi_version() -> c_int {
     //   1 — session open/close, status_json, error/string free.
     //   2 — locks (list/acquire/release), workspace_info_json,
     //       current_branch, tokio runtime on the session.
-    2
+    //   3 — index + commit + push + pull via forge_cli::ops.
+    3
 }
 
 // ── Tests (Rust-side; exercise the FFI contract as a C caller would) ────────
@@ -1060,8 +1217,8 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_bumped_to_two() {
-        assert_eq!(forge_abi_version(), 2);
+    fn abi_version_bumped_to_three() {
+        assert_eq!(forge_abi_version(), 3);
     }
 
     #[test]

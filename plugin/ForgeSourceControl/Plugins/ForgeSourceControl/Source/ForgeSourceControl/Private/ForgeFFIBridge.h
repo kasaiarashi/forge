@@ -185,6 +185,32 @@ public:
 	 */
 	static FString CurrentBranch(const FForgeFFISession& Session, FText& OutError);
 
+	/** Stage one or more paths. `Paths` is serialised to JSON and
+	 *  forwarded to `forge_add_paths` — one FFI call regardless of
+	 *  count. Returns true on success; failure populates `OutError`. */
+	static bool AddPaths(
+		const FForgeFFISession& Session,
+		const TArray<FString>& Paths,
+		FText& OutError);
+
+	/** Commit the currently-staged index with `Message`. */
+	static bool Commit(
+		const FForgeFFISession& Session,
+		const FString& Message,
+		FText& OutError);
+
+	/** Push to the workspace's default remote. `bForce` maps to the
+	 *  `--force` flag; server-side lock + ACL gates still run. */
+	static bool Push(
+		const FForgeFFISession& Session,
+		bool bForce,
+		FText& OutError);
+
+	/** Pull the default branch from the default remote. */
+	static bool Pull(
+		const FForgeFFISession& Session,
+		FText& OutError);
+
 private:
 	// Non-instantiable.
 	FForgeFFI() = delete;

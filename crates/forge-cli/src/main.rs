@@ -1,34 +1,12 @@
-mod commands;
-mod pager;
-
-// Client, credential, URL-resolver, and TOFU logic moved to the
-// shared `forge-client` crate in Phase 4b so forge-ffi (and any
-// future in-process consumer) can open the same authenticated
-// channel without re-implementing TLS + pinned-trust + credential
-// resolution.
-pub(crate) use forge_client::{client, credentials, tofu, url_resolver};
+// Pull shared modules + helpers from the library crate. The binary's
+// purpose is solely to wire up the clap parser → command dispatch;
+// all state lives in `lib.rs`.
+use forge_cli::commands;
+use forge_cli::server_url_hint;
+#[allow(unused_imports)]
+use forge_cli::set_server_url_hint; // May be unused depending on features.
 
 use clap::{Parser, Subcommand};
-use std::cell::RefCell;
-
-// Thread-local "current command server URL hint". Commands that know the
-// target server up-front (`forge clone <url>`) stash it here so that if
-// auth fails mid-execution, `offer_login` prompts with the correct URL
-// instead of asking the user to re-type it.
-thread_local! {
-    static SERVER_URL_HINT: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// Set the current command's server URL hint. Called by commands that
-/// carry an explicit URL argument (e.g. `clone`).
-pub(crate) fn set_server_url_hint(url: impl Into<String>) {
-    SERVER_URL_HINT.with(|h| *h.borrow_mut() = Some(url.into()));
-}
-
-/// Read the hint. `None` when no command stashed one.
-fn server_url_hint() -> Option<String> {
-    SERVER_URL_HINT.with(|h| h.borrow().clone())
-}
 
 #[derive(Parser)]
 #[command(
