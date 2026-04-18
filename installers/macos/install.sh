@@ -188,6 +188,27 @@ EOF
     LAUNCHD_SETUP=1
 fi
 
+# ── Optional: bootstrap a Docker Postgres backend ───────────────────────
+#
+# `FORGE_USE_POSTGRES=1` switches the installed server to a
+# containerised Postgres. Volume lives under $DATA_DIR/postgres/data
+# so a tarball of $DATA_DIR captures the database too.
+if [ "${FORGE_USE_POSTGRES:-}" = "1" ] || [ "${FORGE_USE_POSTGRES:-}" = "docker" ]; then
+    if command -v docker >/dev/null 2>&1; then
+        echo ""
+        echo "Bootstrapping Docker Postgres for forge-server..."
+        mkdir -p "$DATA_DIR/postgres/data"
+        "$PREFIX/bin/forge-server" \
+            --config "$CONFIG_DIR/forge-server.toml" \
+            postgres up
+    else
+        echo ""
+        echo "FORGE_USE_POSTGRES set but 'docker' isn't on PATH; skipping the"
+        echo "Postgres bootstrap. Install Docker Desktop, then run:"
+        echo "  forge-server postgres up"
+    fi
+fi
+
 echo ""
 echo "Forge VCS Server installed successfully!"
 echo ""
@@ -195,6 +216,10 @@ echo "  Binaries: $PREFIX/bin/forge-server, $PREFIX/bin/forge-web"
 echo "  Config:   $CONFIG_DIR/forge-server.toml, $CONFIG_DIR/forge-web.toml"
 echo "  Data:     $DATA_DIR/"
 echo "  Web UI:   $PREFIX/share/forge/ui/"
+echo ""
+echo "Optional — run with a containerised Postgres backend:"
+echo "  FORGE_USE_POSTGRES=1 sudo bash install.sh"
+echo "  (or 'forge-server postgres up' against the installed config)"
 echo ""
 
 if [ "$LAUNCHD_SETUP" = "1" ]; then

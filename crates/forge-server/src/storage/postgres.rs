@@ -121,6 +121,13 @@ impl PgMetadataBackend {
         self.pool.get().context("postgres pool get")
     }
 
+    /// Public pool clone — needed by sibling Postgres stores
+    /// (PgUserStore, PgSecretBackend) so they can share connections
+    /// instead of opening their own pool against the same database.
+    pub fn pool(&self) -> PgPool {
+        self.pool.clone()
+    }
+
     fn apply_pending_migrations_impl(&self) -> Result<usize> {
         let current = self.current_schema_version_impl()?;
         let mut conn = self.conn()?;
@@ -701,6 +708,37 @@ impl MetadataBackend for PgMetadataBackend {
 
     fn apply_pending_migrations(&self) -> Result<usize> {
         self.apply_pending_migrations_impl()
+    }
+
+    // -- Health / observability --
+
+    fn ping(&self) -> Result<()> {
+        let mut conn = self.conn()?;
+        // Cast to BIGINT explicitly; Postgres' SELECT 1 returns int4
+        // and `i64::FromSql` would fail at the column-type check.
+        let _: i64 = conn.query_one("SELECT 1::BIGINT", &[])?.get(0);
+        Ok(())
+    }
+
+    fn metrics_snapshot(&self) -> Result<crate::storage::db::MetricsSnapshot> {
+        let mut conn = self.conn()?;
+        let uploading_sessions: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM upload_sessions WHERE state = 'uploading'",
+                &[],
+            )?
+            .get(0);
+        let total_locks: i64 = conn.query_one("SELECT COUNT(*) FROM locks", &[])?.get(0);
+        let total_repos: i64 = conn.query_one("SELECT COUNT(*) FROM repos", &[])?.get(0);
+        let pending_repo_ops: i64 = conn
+            .query_one("SELECT COUNT(*) FROM pending_repo_ops", &[])?
+            .get(0);
+        Ok(crate::storage::db::MetricsSnapshot {
+            uploading_sessions,
+            total_locks,
+            total_repos,
+            pending_repo_ops,
+        })
     }
 }
 

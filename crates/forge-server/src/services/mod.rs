@@ -15,6 +15,7 @@ pub mod locks;
 pub mod logs;
 pub mod metrics;
 pub mod objects;
+pub mod postgres_docker;
 pub mod refs;
 pub mod repack;
 #[cfg(feature = "s3-objects")]

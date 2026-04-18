@@ -6,6 +6,8 @@ pub mod repo_backend;
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
+#[cfg(feature = "postgres")]
+pub mod postgres_full;
 
 #[cfg(feature = "s3-objects")]
 pub mod s3_objects;

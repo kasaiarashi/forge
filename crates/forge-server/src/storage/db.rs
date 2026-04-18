@@ -8,6 +8,82 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::time::Duration;
 
+/// Forward an inherent-method call on `MetadataDb` to its Postgres
+/// twin via the `MetadataBackend` trait. Used for the small Phase-1
+/// trait-covered surface (repos/refs/locks/upload sessions/repo ops/
+/// schema_version/ping/metrics_snapshot). The macro returns from the
+/// surrounding function on Postgres mode; SQLite path stays as-is.
+///
+/// The Postgres call runs on a fresh OS thread via `block_pg`. The
+/// `postgres` crate creates its own current-thread tokio runtime per
+/// connection; calling that from inside the gRPC server's tokio
+/// worker would panic with "Cannot start a runtime from within a
+/// runtime". `std::thread::scope` lets us escape the runtime
+/// without making the trait async or rewriting every gRPC handler.
+macro_rules! dispatch_pg {
+    ($self:ident, $method:ident $(, $arg:expr)* $(,)?) => {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = $self.pg.as_ref() {
+            let pg = pg.clone();
+            return crate::storage::db::block_pg(move || {
+                crate::storage::backend::MetadataBackend::$method(
+                    pg.as_ref(),
+                    $($arg),*
+                )
+            });
+        }
+    };
+}
+
+/// Variant of [`dispatch_pg!`] for methods that live as **inherent**
+/// methods on `PgMetadataBackend` (issues/PRs/comments/workflows/
+/// runs/steps/artifacts/releases/agents/secrets — i.e., the
+/// Phase-7g full-coverage surface that does NOT go through the
+/// `MetadataBackend` trait). Same runtime-escape semantics. Exposed
+/// via `#[macro_export]` so call sites in `services::actions::db`
+/// (a sibling module) can use it without forwarding boilerplate.
+#[macro_export]
+macro_rules! dispatch_pg_inherent {
+    ($self:ident, $method:ident $(, $arg:expr)* $(,)?) => {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = $self.pg.as_ref() {
+            let pg = pg.clone();
+            return $crate::storage::db::block_pg(move || pg.$method($($arg),*));
+        }
+    };
+}
+
+/// Run `f` on a thread that is NOT a tokio runtime worker. The
+/// `postgres` crate (sync facade over `tokio_postgres`) builds its
+/// own runtime per call and panics if it sees an existing one in
+/// scope. `std::thread::scope` spawns a fresh OS thread, runs the
+/// closure, and joins — no tokio context inherited. Costs a thread
+/// spawn per query (~50µs Linux, ~100µs Windows); good enough for
+/// v1 Postgres while we wait on a real async refactor.
+#[cfg(feature = "postgres")]
+pub(crate) fn block_pg<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    let result = std::thread::scope(|s| s.spawn(f).join());
+    match result {
+        Ok(r) => r,
+        Err(panic) => {
+            // Surface the panic message instead of "Any { .. }".
+            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<unknown panic payload>".to_string()
+            };
+            tracing::error!(panic = %msg, "block_pg dispatch thread panicked");
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
 /// Pooled connection handle returned by [`MetadataDb::conn`].
 ///
 /// Derefs to [`rusqlite::Connection`] so existing call sites keep
@@ -41,13 +117,21 @@ impl Default for DbPoolConfig {
     }
 }
 
-/// SQLite-backed metadata store for repos, refs, locks, upload
-/// sessions, and auth. Backed by an r2d2 pool so metadata ops don't
-/// serialise on a single Mutex — with WAL + `BEGIN IMMEDIATE` +
-/// `synchronous = NORMAL` this lifts the pre-Phase-2 bottleneck that
-/// capped throughput at ~10 concurrent clients.
+/// Metadata store. Either a SQLite pool (default, single-host) or a
+/// Postgres pool (`backend = "postgres"`). Every inherent method
+/// short-circuits through `dispatch_pg!` / `dispatch_pg_inherent!`
+/// when Postgres is installed, so the SQLite pool is never touched
+/// in Postgres mode — it stays `None`.
 pub struct MetadataDb {
-    pub(crate) pool: Pool<SqliteConnectionManager>,
+    pub(crate) pool: Option<Pool<SqliteConnectionManager>>,
+    /// Postgres backend. When `Some`, every trait-covered + inherent
+    /// method that has a PG twin dispatches through this and the
+    /// SQLite pool above stays `None`. Phase 7g ships full coverage
+    /// (issues/PRs/workflows/actions/agents/secrets all hit
+    /// Postgres), so operators picking `backend = "postgres"` run
+    /// entirely without SQLite on disk.
+    #[cfg(feature = "postgres")]
+    pub(crate) pg: Option<std::sync::Arc<crate::storage::postgres::PgMetadataBackend>>,
 }
 
 impl MetadataDb {
@@ -55,14 +139,81 @@ impl MetadataDb {
     /// (currently the default 30 s) if all connections are in use —
     /// should be rare on a correctly-sized pool, and a timeout here
     /// indicates either runaway concurrency or a stuck long-held txn.
+    ///
+    /// Returns an error if the SQLite pool is absent (i.e., we're
+    /// running in Postgres mode). This should never happen in
+    /// practice because every public method short-circuits through
+    /// `dispatch_pg!` before getting here — if you hit this error,
+    /// a method is missing its dispatch line.
     pub(crate) fn conn(&self) -> Result<PooledConn> {
-        self.pool
-            .get()
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("sqlite pool not open (postgres mode); this method is missing its dispatch_pg dispatch line"))?;
+        pool.get()
             .map_err(|e| anyhow::anyhow!("metadata pool get: {e}"))
+    }
+
+    /// Optional Postgres handle. Returns `Some` only when the
+    /// operator selected `[database] backend = "postgres"`. Used by
+    /// the trait-method dispatchers below to forward calls to
+    /// `PgMetadataBackend` instead of running the SQLite path.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn pg(&self) -> Option<&std::sync::Arc<crate::storage::postgres::PgMetadataBackend>> {
+        self.pg.as_ref()
+    }
+
+    /// Stub when the postgres feature is off — keeps call-site
+    /// dispatch code uniform without sprinkling `#[cfg]` everywhere.
+    #[cfg(not(feature = "postgres"))]
+    #[allow(dead_code)]
+    pub(crate) fn pg(&self) -> Option<&()> {
+        None
+    }
+
+    /// Returns true if this `MetadataDb` is wired through Postgres.
+    /// Handlers that need the SQLite-only surface (issues, PRs,
+    /// workflows, etc) check this and return UNAVAILABLE rather
+    /// than silently writing to a local SQLite file the operator
+    /// doesn't realise is in play.
+    pub fn is_postgres_backend(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        {
+            self.pg.is_some()
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            false
+        }
     }
 
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_with_config(path, DbPoolConfig::default())
+    }
+
+    /// Open the SQLite pool plus a Postgres-backed trait dispatcher.
+    /// Both stay alive: the SQLite file under `<base>/legacy.db`
+    /// holds non-trait state (issues/PRs/workflows/etc) that the
+    /// v1 Postgres scope doesn't replicate, while the Postgres
+    /// pool serves the core VCS + auth surface.
+    #[cfg(feature = "postgres")]
+    pub fn open_with_postgres(
+        _sqlite_path: &Path,
+        pg_cfg: crate::storage::postgres::PgPoolConfig,
+    ) -> Result<Self> {
+        // Pure Postgres — no SQLite pool, no legacy file. Every
+        // inherent method dispatches through `dispatch_pg!` before
+        // touching `pool`, so `None` stays safe.
+        //
+        // Phase 7g made this viable: all tables the SQLite baseline
+        // creates inline now live in the Postgres full-schema
+        // migration too, so the server never needs to fall back.
+        let pg = block_pg(move || crate::storage::postgres::PgMetadataBackend::open(pg_cfg))
+            .context("open postgres metadata backend")?;
+        Ok(Self {
+            pool: None,
+            pg: Some(std::sync::Arc::new(pg)),
+        })
     }
 
     /// Open a pooled SQLite metadata store. The `on_acquire` callback
@@ -256,7 +407,11 @@ impl MetadataDb {
         // setup calls don't deadlock when the pool is small.
         drop(conn);
 
-        let db = Self { pool };
+        let db = Self {
+            pool: Some(pool),
+            #[cfg(feature = "postgres")]
+            pg: None,
+        };
         db.ensure_schema_version_table()?;
         db.create_actions_tables()?;
         db.create_secrets_tables()?;
@@ -388,6 +543,7 @@ impl MetadataDb {
         user_id: Option<i64>,
         ttl_seconds: i64,
     ) -> Result<()> {
+        dispatch_pg!(self, create_upload_session, sid, repo, user_id, ttl_seconds);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let expires = now + ttl_seconds;
@@ -403,6 +559,7 @@ impl MetadataDb {
     /// Record a successfully-staged object against a session. `OR IGNORE`
     /// because a client resending a chunk for dedup is fine.
     pub fn record_session_object(&self, sid: &str, hash: &[u8], size: i64) -> Result<()> {
+        dispatch_pg!(self, record_session_object, sid, hash, size);
         let conn = self.conn()?;
         conn.execute(
             "INSERT OR IGNORE INTO session_objects (session_id, hash, size)
@@ -413,6 +570,7 @@ impl MetadataDb {
     }
 
     pub fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>> {
+        dispatch_pg!(self, get_upload_session, sid);
         let conn = self.conn()?;
         let row = conn
             .prepare(
@@ -438,6 +596,7 @@ impl MetadataDb {
     }
 
     pub fn list_session_object_hashes(&self, sid: &str) -> Result<Vec<Vec<u8>>> {
+        dispatch_pg!(self, list_session_object_hashes, sid);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT hash FROM session_objects WHERE session_id = ?1")?;
         let rows = stmt.query_map([sid], |r| r.get::<_, Vec<u8>>(0))?;
@@ -451,6 +610,7 @@ impl MetadataDb {
     /// staging filesystem answers the "how many did I actually land"
     /// question separately.
     pub fn list_session_objects_with_sizes(&self, sid: &str) -> Result<Vec<(Vec<u8>, i64)>> {
+        dispatch_pg!(self, list_session_objects_with_sizes, sid);
         let conn = self.conn()?;
         let mut stmt =
             conn.prepare("SELECT hash, size FROM session_objects WHERE session_id = ?1")?;
@@ -464,6 +624,7 @@ impl MetadataDb {
     /// Mark a session failed. Retries of CommitPush against a failed session
     /// will surface the same failure reason without re-running the work.
     pub fn fail_upload_session(&self, sid: &str, reason: &str, result_json: &str) -> Result<()> {
+        dispatch_pg!(self, fail_upload_session, sid, reason, result_json);
         let conn = self.conn()?;
         conn.execute(
             "UPDATE upload_sessions
@@ -489,6 +650,7 @@ impl MetadataDb {
         sid: &str,
         updates: &[RefUpdateSpec<'_>],
     ) -> Result<CommitSessionOutcome> {
+        dispatch_pg!(self, commit_upload_session, sid, updates);
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
@@ -578,6 +740,7 @@ impl MetadataDb {
     /// state = 'uploading' and expires_at <= cutoff, or state in
     /// ('failed','abandoned','committed') older than the cutoff.
     pub fn list_stale_upload_sessions(&self, cutoff_ts: i64) -> Result<Vec<(String, String)>> {
+        dispatch_pg!(self, list_stale_upload_sessions, cutoff_ts);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo FROM upload_sessions
@@ -595,6 +758,7 @@ impl MetadataDb {
     /// Delete a session row. Cascades to session_objects via FK. Caller is
     /// responsible for having already cleaned up the staging directory.
     pub fn delete_upload_session(&self, sid: &str) -> Result<()> {
+        dispatch_pg!(self, delete_upload_session, sid);
         let conn = self.conn()?;
         conn.execute("DELETE FROM upload_sessions WHERE id = ?1", [sid])?;
         Ok(())
@@ -615,6 +779,7 @@ impl MetadataDb {
         repo: &str,
         new_repo: Option<&str>,
     ) -> Result<i64> {
+        dispatch_pg!(self, enqueue_repo_op, op_type, repo, new_repo);
         if op_type != "rename" && op_type != "delete" {
             anyhow::bail!("op_type must be 'rename' or 'delete', got '{op_type}'");
         }
@@ -630,6 +795,7 @@ impl MetadataDb {
     }
 
     pub fn claim_next_repo_op(&self, visibility_secs: i64) -> Result<Option<PendingRepoOp>> {
+        dispatch_pg!(self, claim_next_repo_op, visibility_secs);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let next_visible = now + visibility_secs;
@@ -659,12 +825,14 @@ impl MetadataDb {
     }
 
     pub fn complete_repo_op(&self, id: i64) -> Result<()> {
+        dispatch_pg!(self, complete_repo_op, id);
         let conn = self.conn()?;
         conn.execute("DELETE FROM pending_repo_ops WHERE id = ?1", [id])?;
         Ok(())
     }
 
     pub fn fail_repo_op(&self, id: i64, error: &str, retry_delay_secs: i64) -> Result<()> {
+        dispatch_pg!(self, fail_repo_op, id, error, retry_delay_secs);
         let conn = self.conn()?;
         let retry_at = chrono::Utc::now().timestamp() + retry_delay_secs;
         conn.execute(
@@ -677,6 +845,7 @@ impl MetadataDb {
     }
 
     pub fn list_pending_repo_ops(&self) -> Result<Vec<PendingRepoOp>> {
+        dispatch_pg!(self, list_pending_repo_ops,);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, op_type, repo, new_repo, attempts
@@ -703,6 +872,7 @@ impl MetadataDb {
     /// effectively free even mid-push, and the pool has 16 slots so
     /// the scraper won't contend with handler work.
     pub fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
+        dispatch_pg!(self, metrics_snapshot,);
         let conn = self.conn()?;
         let uploading_sessions: i64 = conn
             .prepare("SELECT COUNT(*) FROM upload_sessions WHERE state = 'uploading'")?
@@ -728,6 +898,7 @@ impl MetadataDb {
     /// connection so a wedged pool or broken DB file shows up as a
     /// 503 on `/readyz` instead of silently serving traffic.
     pub fn ping(&self) -> Result<()> {
+        dispatch_pg!(self, ping,);
         let conn = self.conn()?;
         let _: i64 = conn.prepare("SELECT 1")?.query_row([], |r| r.get(0))?;
         Ok(())
@@ -769,6 +940,7 @@ impl MetadataDb {
         version: &str,
         os: &str,
     ) -> Result<i64> {
+        dispatch_pg_inherent!(self, upsert_agent, name, token_hash, labels_json, version, os);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -788,6 +960,7 @@ impl MetadataDb {
     }
 
     pub fn get_agent_by_name(&self, name: &str) -> Result<Option<(i64, String, String)>> {
+        dispatch_pg_inherent!(self, get_agent_by_name, name);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, token_hash, labels_json FROM agents WHERE name = ?1")?
@@ -803,6 +976,7 @@ impl MetadataDb {
     }
 
     pub fn get_agent_by_id(&self, id: i64) -> Result<Option<(String, String, String)>> {
+        dispatch_pg_inherent!(self, get_agent_by_id, id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT name, token_hash, labels_json FROM agents WHERE id = ?1")?
@@ -818,6 +992,7 @@ impl MetadataDb {
     }
 
     pub fn touch_agent_last_seen(&self, id: i64) -> Result<()> {
+        dispatch_pg_inherent!(self, touch_agent_last_seen, id);
         let conn = self.conn()?;
         conn.execute(
             "UPDATE agents SET last_seen = ?1 WHERE id = ?2",
@@ -828,6 +1003,7 @@ impl MetadataDb {
 
     pub fn list_agents(&self) -> Result<Vec<(i64, String, String, i64, String, String)>> {
         // (id, name, labels_json, last_seen, version, os)
+        dispatch_pg_inherent!(self, list_agents,);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, labels_json, COALESCE(last_seen, 0), version, os
@@ -848,6 +1024,7 @@ impl MetadataDb {
     }
 
     pub fn delete_agent(&self, id: i64) -> Result<bool> {
+        dispatch_pg_inherent!(self, delete_agent, id);
         let conn = self.conn()?;
         let n = conn.execute("DELETE FROM agents WHERE id = ?1", [id])?;
         Ok(n > 0)
@@ -857,6 +1034,7 @@ impl MetadataDb {
     /// require labels the agent is missing. Returns (run_id) on success
     /// or None when no work is available.
     pub fn claim_next_run(&self, agent_id: i64, _agent_labels: &[String]) -> Result<Option<i64>> {
+        dispatch_pg_inherent!(self, claim_next_run, agent_id, _agent_labels);
         // v1 label routing is permissive: if the run has no claim yet and
         // is queued, any agent can take it. Full label matching lands when
         // runs-on is parsed out of the workflow YAML in Phase 3.
@@ -896,6 +1074,7 @@ impl MetadataDb {
     /// `cutoff_ts` (or never). Drops the claim and re-queues the run so
     /// another agent can pick it up. Returns the number of runs requeued.
     pub fn requeue_stale_runs(&self, cutoff_ts: i64) -> Result<usize> {
+        dispatch_pg_inherent!(self, requeue_stale_runs, cutoff_ts);
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Collect stale (run_id, agent_id) pairs first; we need the ids
@@ -932,6 +1111,7 @@ impl MetadataDb {
     }
 
     pub fn get_run_claim_agent(&self, run_id: i64) -> Result<Option<i64>> {
+        dispatch_pg_inherent!(self, get_run_claim_agent, run_id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT agent_id FROM run_claims WHERE run_id = ?1")?
@@ -968,6 +1148,7 @@ impl MetadataDb {
         nonce: &[u8],
         ciphertext: &[u8],
     ) -> Result<()> {
+        dispatch_pg_inherent!(self, upsert_secret, repo, key, nonce, ciphertext);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -983,6 +1164,7 @@ impl MetadataDb {
     }
 
     pub fn get_secret(&self, repo: &str, key: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        dispatch_pg_inherent!(self, get_secret, repo, key);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT nonce, ciphertext FROM secrets WHERE repo = ?1 AND key = ?2")?
@@ -994,6 +1176,7 @@ impl MetadataDb {
     }
 
     pub fn delete_secret(&self, repo: &str, key: &str) -> Result<bool> {
+        dispatch_pg_inherent!(self, delete_secret, repo, key);
         let conn = self.conn()?;
         let n = conn.execute(
             "DELETE FROM secrets WHERE repo = ?1 AND key = ?2",
@@ -1006,6 +1189,7 @@ impl MetadataDb {
         &self,
         repo: &str,
     ) -> Result<Vec<crate::services::secrets::SecretMeta>> {
+        dispatch_pg_inherent!(self, list_secret_keys, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT repo, key, created_at, updated_at FROM secrets WHERE repo = ?1 ORDER BY key",
@@ -1025,6 +1209,7 @@ impl MetadataDb {
     // -- Repos --
 
     pub fn list_repos(&self) -> Result<Vec<RepoRecord>> {
+        dispatch_pg!(self, list_repos,);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT name, description, created_at, visibility, default_branch FROM repos",
@@ -1049,6 +1234,7 @@ impl MetadataDb {
     /// repo doesn't exist. Used by the gRPC interceptor's read-path authz
     /// check to allow anonymous clones of public repos.
     pub fn get_repo_visibility(&self, name: &str) -> Result<Option<String>> {
+        dispatch_pg!(self, get_repo_visibility, name);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT visibility FROM repos WHERE name = ?1")?;
         let result = stmt.query_row([name], |row| row.get::<_, String>(0)).ok();
@@ -1060,6 +1246,17 @@ impl MetadataDb {
     /// exist — the latter is fine because the read handler will fail later
     /// with NotFound.
     pub fn is_repo_public(&self, name: &str) -> bool {
+        // The dispatch_pg! macro short-circuits Result-returning
+        // methods. is_repo_public returns plain bool, so we have
+        // to inline the bounce-off-runtime dance here.
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = self.pg.as_ref() {
+            let pg = pg.clone();
+            let name = name.to_string();
+            return crate::storage::db::block_pg(move || {
+                crate::storage::backend::MetadataBackend::is_repo_public(pg.as_ref(), &name)
+            });
+        }
         matches!(
             self.get_repo_visibility(name).ok().flatten().as_deref(),
             Some("public")
@@ -1069,6 +1266,7 @@ impl MetadataDb {
     /// Set the visibility of a repo. Returns true on success, false if the
     /// repo doesn't exist.
     pub fn set_repo_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        dispatch_pg!(self, set_repo_visibility, name, visibility);
         if visibility != "private" && visibility != "public" {
             anyhow::bail!("visibility must be 'private' or 'public'");
         }
@@ -1081,6 +1279,7 @@ impl MetadataDb {
     }
 
     pub fn create_repo(&self, name: &str, description: &str) -> Result<bool> {
+        dispatch_pg!(self, create_repo, name, description);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let affected = conn.execute(
@@ -1091,6 +1290,7 @@ impl MetadataDb {
     }
 
     pub fn update_repo(&self, name: &str, new_name: &str, description: &str) -> Result<bool> {
+        dispatch_pg!(self, update_repo, name, new_name, description);
         let mut conn = self.conn()?;
 
         // Check that the repo exists.
@@ -1139,6 +1339,7 @@ impl MetadataDb {
     }
 
     pub fn delete_repo(&self, name: &str) -> Result<bool> {
+        dispatch_pg!(self, delete_repo, name);
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let affected = tx.execute("DELETE FROM repos WHERE name = ?1", [name])?;
@@ -1151,6 +1352,7 @@ impl MetadataDb {
     // -- Refs --
 
     pub fn get_ref(&self, repo: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        dispatch_pg!(self, get_ref, repo, name);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT hash FROM refs WHERE repo = ?1 AND name = ?2")?;
         let result = stmt
@@ -1162,6 +1364,7 @@ impl MetadataDb {
     }
 
     pub fn get_all_refs(&self, repo: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        dispatch_pg!(self, get_all_refs, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT name, hash FROM refs WHERE repo = ?1")?;
         let rows = stmt.query_map([repo], |row| {
@@ -1193,6 +1396,7 @@ impl MetadataDb {
         new_hash: &[u8],
         force: bool,
     ) -> Result<bool> {
+        dispatch_pg!(self, update_ref, repo, name, old_hash, new_hash, force);
         let conn = self.conn()?;
 
         if force {
@@ -1237,6 +1441,7 @@ impl MetadataDb {
         workspace_id: &str,
         reason: &str,
     ) -> Result<std::result::Result<(), LockInfo>> {
+        dispatch_pg!(self, acquire_lock, repo, path, owner, workspace_id, reason);
         let conn = self.conn()?;
 
         // Check if already locked.
@@ -1267,6 +1472,7 @@ impl MetadataDb {
     }
 
     pub fn release_lock(&self, repo: &str, path: &str, owner: &str, force: bool) -> Result<bool> {
+        dispatch_pg!(self, release_lock, repo, path, owner, force);
         let conn = self.conn()?;
         let affected = if force {
             conn.execute(
@@ -1288,6 +1494,7 @@ impl MetadataDb {
         path_prefix: &str,
         owner_filter: &str,
     ) -> Result<Vec<LockInfo>> {
+        dispatch_pg!(self, list_locks, repo, path_prefix, owner_filter);
         let conn = self.conn()?;
         let mut locks = Vec::new();
 
@@ -1335,6 +1542,7 @@ impl MetadataDb {
         limit: i32,
         offset: i32,
     ) -> Result<(Vec<IssueRecord>, i32, i32, i32)> {
+        dispatch_pg_inherent!(self, list_issues, repo, status, limit, offset);
         let conn = self.conn()?;
         let lim = if limit <= 0 { 50 } else { limit };
 
@@ -1376,6 +1584,7 @@ impl MetadataDb {
         author: &str,
         labels: &str,
     ) -> Result<i64> {
+        dispatch_pg_inherent!(self, create_issue, repo, title, body, author, labels);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -1387,6 +1596,7 @@ impl MetadataDb {
 
     /// Get a single issue by ID.
     pub fn get_issue(&self, id: i64) -> Result<Option<IssueRecord>> {
+        dispatch_pg_inherent!(self, get_issue, id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, title, body, author, status, labels, created_at, updated_at, comment_count, assignee FROM issues WHERE id = ?1")?
@@ -1405,6 +1615,7 @@ impl MetadataDb {
         labels: &str,
         assignee: &str,
     ) -> Result<bool> {
+        dispatch_pg_inherent!(self, update_issue, id, title, body, status, labels, assignee);
         let current = self.get_issue(id)?;
         let current = match current {
             Some(c) => c,
@@ -1467,6 +1678,7 @@ impl MetadataDb {
         limit: i32,
         offset: i32,
     ) -> Result<(Vec<PullRequestRecord>, i32, i32, i32)> {
+        dispatch_pg_inherent!(self, list_pull_requests, repo, status, limit, offset);
         let conn = self.conn()?;
         let lim = if limit <= 0 { 50 } else { limit };
 
@@ -1507,6 +1719,17 @@ impl MetadataDb {
         target_branch: &str,
         labels: &str,
     ) -> Result<i64> {
+        dispatch_pg_inherent!(
+            self,
+            create_pull_request,
+            repo,
+            title,
+            body,
+            author,
+            source_branch,
+            target_branch,
+            labels
+        );
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -1518,6 +1741,7 @@ impl MetadataDb {
 
     /// Get a single pull request by ID.
     pub fn get_pull_request(&self, id: i64) -> Result<Option<PullRequestRecord>> {
+        dispatch_pg_inherent!(self, get_pull_request, id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, title, body, author, status, source_branch, target_branch, labels, created_at, updated_at, comment_count, assignee FROM pull_requests WHERE id = ?1")?
@@ -1536,6 +1760,16 @@ impl MetadataDb {
         labels: &str,
         assignee: &str,
     ) -> Result<bool> {
+        dispatch_pg_inherent!(
+            self,
+            update_pull_request,
+            id,
+            title,
+            body,
+            status,
+            labels,
+            assignee
+        );
         let current = self.get_pull_request(id)?;
         let current = match current {
             Some(c) => c,
@@ -1576,6 +1810,7 @@ impl MetadataDb {
     // -- Default branch --
 
     pub fn get_default_branch(&self, repo: &str) -> Result<String> {
+        dispatch_pg_inherent!(self, get_default_branch, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT default_branch FROM repos WHERE name = ?1")?;
         let result = stmt
@@ -1586,6 +1821,7 @@ impl MetadataDb {
     }
 
     pub fn set_default_branch(&self, repo: &str, branch: &str) -> Result<bool> {
+        dispatch_pg_inherent!(self, set_default_branch, repo, branch);
         let conn = self.conn()?;
         let n = conn.execute(
             "UPDATE repos SET default_branch = ?1 WHERE name = ?2",
@@ -1602,6 +1838,7 @@ impl MetadataDb {
         issue_id: i64,
         kind: &str,
     ) -> Result<Vec<CommentRecord>> {
+        dispatch_pg_inherent!(self, list_comments, repo, issue_id, kind);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, issue_id, kind, author, body, created_at, updated_at
@@ -1631,6 +1868,7 @@ impl MetadataDb {
         author: &str,
         body: &str,
     ) -> Result<i64> {
+        dispatch_pg_inherent!(self, create_comment, repo, issue_id, kind, author, body);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -1652,6 +1890,7 @@ impl MetadataDb {
     }
 
     pub fn update_comment(&self, id: i64, body: &str) -> Result<bool> {
+        dispatch_pg_inherent!(self, update_comment, id, body);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let n = conn.execute(
@@ -1662,6 +1901,7 @@ impl MetadataDb {
     }
 
     pub fn delete_comment(&self, id: i64) -> Result<bool> {
+        dispatch_pg_inherent!(self, delete_comment, id);
         let conn = self.conn()?;
         // Get the comment first to decrement the parent's count
         let comment: Option<(String, i64, String)> = conn
@@ -1686,6 +1926,7 @@ impl MetadataDb {
     }
 
     pub fn get_comment(&self, id: i64) -> Result<Option<CommentRecord>> {
+        dispatch_pg_inherent!(self, get_comment, id);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, issue_id, kind, author, body, created_at, updated_at FROM comments WHERE id = ?1",
@@ -2029,6 +2270,14 @@ impl crate::storage::backend::MetadataBackend for MetadataDb {
             current,
             crate::storage::migrations::SQLITE_MIGRATIONS,
         )
+    }
+
+    fn ping(&self) -> Result<()> {
+        MetadataDb::ping(self)
+    }
+
+    fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
+        MetadataDb::metrics_snapshot(self)
     }
 }
 

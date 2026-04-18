@@ -20,16 +20,53 @@ use crate::auth::{NewUser, RepoRole, SqliteUserStore, UserStore};
 use crate::config::ServerConfig;
 use crate::storage::db::MetadataDb;
 
-/// Open the metadata DB at the location the loaded config points at and wrap
-/// it in a [`SqliteUserStore`]. Used by every admin subcommand.
-fn open_store(config: &ServerConfig) -> Result<SqliteUserStore> {
+/// Open the metadata DB the loaded config points at and wrap it in
+/// the right [`UserStore`] impl. Postgres-mode admin commands hit
+/// `PgUserStore` so users created via the CLI are visible to the
+/// running server (and vice versa).
+fn open_store(config: &ServerConfig) -> Result<Arc<dyn UserStore>> {
     let db_path = config.resolved_db_path();
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let db = MetadataDb::open(&db_path)
-        .with_context(|| format!("open metadata db at {}", db_path.display()))?;
-    Ok(SqliteUserStore::new(Arc::new(db)))
+    match config.database.backend.as_str() {
+        "sqlite" => {
+            let db = MetadataDb::open(&db_path)
+                .with_context(|| format!("open metadata db at {}", db_path.display()))?;
+            Ok(Arc::new(SqliteUserStore::new(Arc::new(db))) as Arc<dyn UserStore>)
+        }
+        "postgres" => {
+            #[cfg(feature = "postgres")]
+            {
+                if config.database.url.is_empty() {
+                    bail!(
+                        "[database] url is required when backend = \"postgres\"; \
+                         run `forge-server postgres up` first"
+                    );
+                }
+                let pg_cfg = crate::storage::postgres::PgPoolConfig {
+                    url: config.database.url.clone(),
+                    max_size: config.database.max_connections,
+                    statement_timeout_ms: config.database.busy_timeout_ms,
+                    ..Default::default()
+                };
+                let pg = crate::storage::postgres::PgMetadataBackend::open(pg_cfg)
+                    .context("open postgres metadata backend")?;
+                Ok(
+                    Arc::new(crate::auth::store_postgres::PgUserStore::new(Arc::new(pg)))
+                        as Arc<dyn UserStore>,
+                )
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                bail!(
+                    "[database] backend = \"postgres\" requires the `postgres` Cargo \
+                     feature. Rebuild forge-server with `--features postgres`."
+                );
+            }
+        }
+        other => bail!("unknown [database] backend '{other}'"),
+    }
 }
 
 // ── User subcommands ─────────────────────────────────────────────────────────

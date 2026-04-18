@@ -165,6 +165,15 @@ enum Commands {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// Manage a Docker-bundled Postgres instance for the
+    /// `[database] backend = "postgres"` mode. Volume lives under
+    /// `<base_path>/postgres/data/` so the entire deployment stays
+    /// transferable — copy the base directory and the database
+    /// comes with it.
+    Postgres {
+        #[command(subcommand)]
+        action: PostgresAction,
+    },
     /// Run a closed-loop load test against an existing server.
     /// Spawns N virtual users on a tokio runtime, each running a
     /// weighted workload mix (lock acquire/release, list locks,
@@ -313,6 +322,52 @@ enum BackupAction {
     Verify {
         /// Backup directory produced by `backup create`.
         path: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum PostgresAction {
+    /// Start (or restart) the bundled Postgres container, generate
+    /// credentials on first run, write the connection URL into the
+    /// loaded config so `serve` can pick it up.
+    Up {
+        /// Container runtime — `docker` (default) or `podman`.
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+        /// Container name. Override only if you run multiple
+        /// forge-server instances on one host.
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_CONTAINER_NAME.to_string())]
+        name: String,
+        /// Host port mapped to the container's 5432.
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_HOST_PORT)]
+        port: u16,
+        /// Postgres image tag. Defaults to a pinned minor release.
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_IMAGE.to_string())]
+        image: String,
+        /// Skip rewriting forge-server.toml. Useful when scripting.
+        #[arg(long)]
+        no_write_config: bool,
+    },
+    /// Stop the container; data dir survives. Pass `--rm` to also
+    /// drop the container metadata so the next `up` recreates it.
+    Down {
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_CONTAINER_NAME.to_string())]
+        name: String,
+        /// Also `docker rm` the stopped container.
+        #[arg(long)]
+        rm: bool,
+    },
+    /// Print whether the container exists / is running, and the
+    /// libpq URL if credentials are present.
+    Status {
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_CONTAINER_NAME.to_string())]
+        name: String,
+        #[arg(long, default_value_t = services::postgres_docker::DEFAULT_HOST_PORT)]
+        port: u16,
     },
 }
 
@@ -495,6 +550,11 @@ fn main() -> Result<()> {
             cli_admin::migrate(&config)?;
             return Ok(());
         }
+        Some(Commands::Postgres { ref action }) => {
+            let config = load_config_for_admin(&cli)?;
+            handle_postgres_command(&config, &cli, action)?;
+            return Ok(());
+        }
         Some(Commands::Backup { ref action }) => {
             match action {
                 BackupAction::Create { dest } => {
@@ -672,36 +732,55 @@ pub(crate) async fn serve_inner_with_edge(
     // final flush from the non-blocking appender.
     let _log_guards = observability::init(&config.logging, config.resolved_log_dir().as_deref());
 
-    // Metadata backend selection. Phase 2b.2 shipped the trait +
-    // Postgres impl + parity tests, but the server process still
-    // relies on concrete MetadataDb for the non-trait surface
-    // (issues/PRs/workflows/auth/actions/agents). Running a full
-    // server against Postgres is deferred — accept only SQLite
-    // here and tell the operator explicitly what's going on.
-    match config.database.backend.as_str() {
-        "sqlite" => {}
+    // Metadata backend selection. Phase 7g — a Postgres backend
+    // serves the trait-covered surface (repos/refs/locks/upload
+    // sessions/repo ops + auth) end-to-end. SQLite-only surfaces
+    // (issues/PRs/workflows/actions/agents/secrets) still write to
+    // the local SQLite file because they aren't replicated; on
+    // Postgres mode the operator should treat them as node-local
+    // until those modules grow Postgres impls.
+    let db_path = config.resolved_db_path();
+    let db = match config.database.backend.as_str() {
+        "sqlite" => Arc::new(MetadataDb::open(&db_path)?),
         "postgres" => {
-            anyhow::bail!(
-                "postgres backend is a Phase-2b.2 preview: the trait-covered \
-                 atomic-push surface is tested against both backends, but the \
-                 full server still requires SQLite. Set [database] backend = \
-                 \"sqlite\" to run the server, or use `forge-server migrate` \
-                 against a postgres URL to exercise the runner."
-            );
+            #[cfg(feature = "postgres")]
+            {
+                if config.database.url.is_empty() {
+                    anyhow::bail!(
+                        "[database] url is required when backend = \"postgres\". \
+                         Run `forge-server postgres up` to bootstrap a local \
+                         Docker instance."
+                    );
+                }
+                let pg_cfg = crate::storage::postgres::PgPoolConfig {
+                    url: config.database.url.clone(),
+                    max_size: config.database.max_connections,
+                    statement_timeout_ms: config.database.busy_timeout_ms,
+                    ..Default::default()
+                };
+                warn!(
+                    "starting with Postgres backend — SQLite-only handlers \
+                     (issues/PRs/workflows/actions/agents/secrets) remain \
+                     node-local until their Postgres impls land. See \
+                     docs/postgres-mode.md."
+                );
+                Arc::new(MetadataDb::open_with_postgres(&db_path, pg_cfg)?)
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                anyhow::bail!(
+                    "[database] backend = \"postgres\" requires the \
+                     `postgres` Cargo feature. Rebuild forge-server with \
+                     `--features postgres`, or set backend = \"sqlite\"."
+                );
+            }
         }
         other => {
             anyhow::bail!("unknown [database] backend '{other}' (expected 'sqlite' or 'postgres')")
         }
-    }
+    };
 
-    let db_path = config.resolved_db_path();
-    let db = Arc::new(MetadataDb::open(&db_path)?);
-
-    // Bootstrap token: generated on first start (no users yet), written to
-    // `<base_path>/.bootstrap_token`, and required on the BootstrapAdmin RPC.
-    // Once the first admin is created we delete the file and stop enforcing.
     let bootstrap_token_path = base.join(".bootstrap_token");
-    let bootstrap_token = ensure_bootstrap_token(Arc::clone(&db), &bootstrap_token_path)?;
 
     let repo_overrides: std::collections::HashMap<String, std::path::PathBuf> = config
         .repos
@@ -743,8 +822,33 @@ pub(crate) async fn serve_inner_with_edge(
             other => anyhow::bail!("[objects] backend = \"{other}\" — expected \"fs\" or \"s3\""),
         };
 
-    let user_store: Arc<dyn auth::UserStore> =
-        Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
+    // UserStore picks PgUserStore on postgres mode so logins / PATs /
+    // repo grants land in the replicated database. SQLite mode keeps
+    // SqliteUserStore; existing call sites all hold Arc<dyn UserStore>
+    // already so nothing downstream cares which is in play.
+    let user_store: Arc<dyn auth::UserStore> = {
+        #[cfg(feature = "postgres")]
+        {
+            if let Some(pg) = db.pg() {
+                Arc::new(auth::store_postgres::PgUserStore::new(Arc::clone(pg)))
+                    as Arc<dyn auth::UserStore>
+            } else {
+                Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)))
+                    as Arc<dyn auth::UserStore>
+            }
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            Arc::new(auth::SqliteUserStore::new(Arc::clone(&db))) as Arc<dyn auth::UserStore>
+        }
+    };
+
+    // Bootstrap token: generated on first start (no users yet), written to
+    // `<base_path>/.bootstrap_token`, and required on the BootstrapAdmin RPC.
+    // Once the first admin is created we delete the file and stop enforcing.
+    // Routed through the trait so the count_users()/admin-creation check
+    // hits whichever backend the operator selected.
+    let bootstrap_token = ensure_bootstrap_token(user_store.as_ref(), &bootstrap_token_path)?;
 
     // Secrets: load/create master key under <base>/secrets/master.key, then
     // wrap the DB in the AES-GCM SQLite backend. Swap to a KMS-backed
@@ -1120,6 +1224,177 @@ fn handle_service_command(action: &ServiceAction) -> Result<()> {
     }
 }
 
+/// `forge-server postgres` dispatcher. Lives outside `serve_inner`
+/// because the subcommand never touches the gRPC stack — it's a
+/// thin wrapper around the `docker` CLI plus a config-rewrite step.
+fn handle_postgres_command(
+    config: &ServerConfig,
+    cli: &Cli,
+    action: &PostgresAction,
+) -> Result<()> {
+    let base = config.storage.base_path.clone();
+    std::fs::create_dir_all(&base).ok();
+    match action {
+        PostgresAction::Up {
+            runtime,
+            name,
+            port,
+            image,
+            no_write_config,
+        } => {
+            let cfg = services::postgres_docker::PostgresDockerConfig {
+                runtime: runtime.clone(),
+                container_name: name.clone(),
+                host_port: *port,
+                image: image.clone(),
+                base_path: base.clone(),
+            };
+            let report = services::postgres_docker::up(&cfg)?;
+            if report.already_running {
+                println!("forge-postgres already running.");
+            } else {
+                println!("forge-postgres started.");
+            }
+            println!("  container : {}", report.container_name);
+            println!("  port      : {}", report.host_port);
+            println!("  data dir  : {}", base.join("postgres").join("data").display());
+            println!("  url       : {}", report.url);
+            println!(
+                "  credentials saved to {}",
+                base.join("postgres").join("credentials.json").display()
+            );
+            if !no_write_config {
+                let written = update_config_for_postgres(&cli.config, &report.url)?;
+                if written {
+                    println!(
+                        "Updated {} → [database] backend = \"postgres\", url = \"...\".",
+                        cli.config
+                    );
+                } else {
+                    println!(
+                        "Config {} not updated (file missing). Set [database] manually.",
+                        cli.config
+                    );
+                }
+            }
+            Ok(())
+        }
+        PostgresAction::Down {
+            runtime,
+            name,
+            rm,
+        } => {
+            let cfg = services::postgres_docker::PostgresDockerConfig {
+                runtime: runtime.clone(),
+                container_name: name.clone(),
+                host_port: 0,
+                image: services::postgres_docker::DEFAULT_IMAGE.into(),
+                base_path: base,
+            };
+            services::postgres_docker::down(&cfg, *rm)?;
+            println!("forge-postgres stopped{}.", if *rm { " and removed" } else { "" });
+            Ok(())
+        }
+        PostgresAction::Status {
+            runtime,
+            name,
+            port,
+        } => {
+            let cfg = services::postgres_docker::PostgresDockerConfig {
+                runtime: runtime.clone(),
+                container_name: name.clone(),
+                host_port: *port,
+                image: services::postgres_docker::DEFAULT_IMAGE.into(),
+                base_path: base,
+            };
+            let report = services::postgres_docker::status(&cfg);
+            println!("runtime present : {}", report.runtime_present);
+            println!("container       : {}", report.container_name);
+            println!("exists          : {}", report.exists);
+            println!("running         : {}", report.running);
+            println!("port            : {}", report.host_port);
+            if let Some(url) = report.url {
+                println!("url             : {}", url);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Rewrite the `[database]` section in `forge-server.toml` to point
+/// at the freshly-bootstrapped Postgres URL. We surgically replace
+/// just `backend` and `url` so operator-set knobs (max_connections
+/// etc) stay intact. Returns `Ok(false)` when the config file
+/// doesn't exist — operators wiring this from a Dockerfile may
+/// run `postgres up` before `init`.
+fn update_config_for_postgres(config_path: &str, url: &str) -> Result<bool> {
+    let path = std::path::Path::new(config_path);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut text = std::fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    text = rewrite_db_field(&text, "backend", "\"postgres\"");
+    text = rewrite_db_field(&text, "url", &format!("\"{url}\""));
+    // Make sure [objects] backend is non-empty too — the default in
+    // ObjectsSection's Default impl is "" which the runtime rejects
+    // at startup. Operators relying on `forge-server postgres up`
+    // for first-time setup wouldn't have hand-written this section.
+    if !text.contains("[objects]") {
+        text.push_str("\n[objects]\nbackend = \"fs\"\n");
+    }
+    std::fs::write(path, text)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
+/// Replace the value of `<key> = …` inside the `[database]` block,
+/// inserting the line if missing. Tiny TOML editor — pulling in
+/// toml_edit's full DOM for two field rewrites would be overkill,
+/// and this stays line-based + deterministic.
+fn rewrite_db_field(text: &str, key: &str, value_literal: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    let mut in_db_section = false;
+    let mut wrote = false;
+    for line in &lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            // Leaving the previous section. If we were in [database]
+            // and never overwrote/inserted the key, append it now.
+            if in_db_section && !wrote {
+                out.push(format!("{key} = {value_literal}"));
+                wrote = true;
+            }
+            in_db_section = trimmed == "[database]";
+        }
+        if in_db_section
+            && !wrote
+            && trimmed.split('=').next().map(|s| s.trim()) == Some(key)
+        {
+            out.push(format!("{key} = {value_literal}"));
+            wrote = true;
+            continue;
+        }
+        out.push((*line).to_string());
+    }
+    if in_db_section && !wrote {
+        out.push(format!("{key} = {value_literal}"));
+        wrote = true;
+    }
+    if !wrote {
+        // No [database] section at all — append one.
+        out.push(String::new());
+        out.push("[database]".into());
+        out.push(format!("{key} = {value_literal}"));
+    }
+    let mut joined = out.join("\n");
+    if !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// Ensure a bootstrap token exists for a fresh install. When the users table
 /// is empty and no token file has been created yet, generate a random token,
 /// write it to `<base>/.bootstrap_token`, and log it loudly so the operator
@@ -1128,9 +1403,10 @@ fn handle_service_command(action: &ServiceAction) -> Result<()> {
 /// Returns `None` when the server is already initialized (users exist). The
 /// returned `Option<String>` is stashed on `ForgeAuthService` and compared
 /// against `BootstrapAdminRequest.bootstrap_token`.
-fn ensure_bootstrap_token(db: Arc<MetadataDb>, path: &std::path::Path) -> Result<Option<String>> {
-    use auth::store::UserStore as _;
-    let store = auth::SqliteUserStore::new(db);
+fn ensure_bootstrap_token(
+    store: &dyn auth::UserStore,
+    path: &std::path::Path,
+) -> Result<Option<String>> {
     let user_count = store.count_users().context("counting users")?;
     if user_count > 0 {
         // Already initialized — make sure any leftover token file is gone.

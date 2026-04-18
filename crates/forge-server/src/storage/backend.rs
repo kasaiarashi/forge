@@ -131,4 +131,16 @@ pub trait MetadataBackend: Send + Sync {
     /// lands in its own transaction alongside the `schema_version`
     /// insert. Returns the number of migrations applied.
     fn apply_pending_migrations(&self) -> Result<usize>;
+
+    // -- Health / observability --
+
+    /// Liveness probe. Runs the cheapest possible round-trip so a
+    /// wedged pool surfaces as a `/readyz` 503 instead of silently
+    /// serving traffic.
+    fn ping(&self) -> Result<()>;
+
+    /// On-scrape counters for `/metrics`. One method per backend so
+    /// the SQL stays dialect-native (SQLite COUNT(*) plans
+    /// differently from Postgres COUNT(*) and we want both fast).
+    fn metrics_snapshot(&self) -> Result<crate::storage::db::MetricsSnapshot>;
 }

@@ -91,6 +91,31 @@ Filename: "{app}\forge-web.exe"; \
     Flags: runhidden nowait; \
     Tasks: installServices
 
+; Optional Postgres bootstrap. Selected via the "Use Docker
+; Postgres backend" task on the components page. Pulls the
+; postgres:16 image, mounts <app>\forge-data\postgres\data, and
+; rewrites forge-server.toml to point at the new instance. We rely
+; on Docker Desktop already being installed; the forge-server
+; subcommand fails loudly with a clear hint when it's missing.
+Filename: "{app}\forge-server.exe"; \
+    Parameters: "--config ""{app}\forge-server.toml"" postgres up"; \
+    StatusMsg: "Bootstrapping Docker Postgres..."; \
+    Flags: waituntilterminated; \
+    Tasks: bootstrapPostgres
+
+; Restart forge-server so it picks up the new [database] settings
+; the postgres-up subcommand wrote. SCM start is a no-op when the
+; service is already in the desired state.
+Filename: "{app}\forge-server.exe"; \
+    Parameters: "service stop"; \
+    Flags: runhidden waituntilterminated; \
+    Tasks: bootstrapPostgres
+
+Filename: "{app}\forge-server.exe"; \
+    Parameters: "service start"; \
+    Flags: runhidden nowait; \
+    Tasks: bootstrapPostgres
+
 [UninstallRun]
 ; Stop and remove both services on uninstall. We use `runhidden
 ; runascurrentuser` so the SCM commands inherit the elevated context the
@@ -110,6 +135,11 @@ Name: "installServices"; \
     Description: "Install and start ForgeServer + ForgeWeb as Windows services"; \
     GroupDescription: "Service installation:"; \
     Flags: checkedonce
+
+Name: "bootstrapPostgres"; \
+    Description: "Run a containerised Postgres backend (Docker required, data lives next to forge-data for transferability)"; \
+    GroupDescription: "Optional database backend:"; \
+    Flags: unchecked
 
 [Code]
 function NeedsAddPath(Param: string): Boolean;

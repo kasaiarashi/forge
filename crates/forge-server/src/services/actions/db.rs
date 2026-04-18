@@ -141,6 +141,7 @@ impl MetadataDb {
     // ── Workflows ──
 
     pub fn create_workflow(&self, repo: &str, name: &str, yaml: &str) -> Result<i64> {
+        crate::dispatch_pg_inherent!(self, create_workflow, repo, name, yaml);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -151,6 +152,7 @@ impl MetadataDb {
     }
 
     pub fn update_workflow(&self, id: i64, name: &str, yaml: &str, enabled: bool) -> Result<bool> {
+        crate::dispatch_pg_inherent!(self, update_workflow, id, name, yaml, enabled);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         let affected = conn.execute(
@@ -161,12 +163,14 @@ impl MetadataDb {
     }
 
     pub fn delete_workflow(&self, id: i64) -> Result<bool> {
+        crate::dispatch_pg_inherent!(self, delete_workflow, id);
         let conn = self.conn()?;
         let affected = conn.execute("DELETE FROM workflows WHERE id = ?1", [id])?;
         Ok(affected > 0)
     }
 
     pub fn list_workflows(&self, repo: &str) -> Result<Vec<WorkflowRecord>> {
+        crate::dispatch_pg_inherent!(self, list_workflows, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE repo = ?1 ORDER BY name",
@@ -187,6 +191,7 @@ impl MetadataDb {
     }
 
     pub fn get_workflow(&self, id: i64) -> Result<Option<WorkflowRecord>> {
+        crate::dispatch_pg_inherent!(self, get_workflow, id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE id = ?1")?
@@ -206,6 +211,7 @@ impl MetadataDb {
     }
 
     pub fn get_enabled_workflows_for_repo(&self, repo: &str) -> Result<Vec<WorkflowRecord>> {
+        crate::dispatch_pg_inherent!(self, get_enabled_workflows_for_repo, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, name, yaml, enabled, created_at, updated_at FROM workflows WHERE repo = ?1 AND enabled = 1",
@@ -236,6 +242,16 @@ impl MetadataDb {
         commit_hash: &str,
         triggered_by: &str,
     ) -> Result<i64> {
+        crate::dispatch_pg_inherent!(
+            self,
+            create_run,
+            repo,
+            workflow_id,
+            trigger,
+            trigger_ref,
+            commit_hash,
+            triggered_by
+        );
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -246,6 +262,7 @@ impl MetadataDb {
     }
 
     pub fn update_run_status(&self, run_id: i64, status: &str) -> Result<()> {
+        crate::dispatch_pg_inherent!(self, update_run_status, run_id, status);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         match status {
@@ -278,6 +295,7 @@ impl MetadataDb {
         limit: i32,
         offset: i32,
     ) -> Result<(Vec<RunRecord>, i32)> {
+        crate::dispatch_pg_inherent!(self, list_runs, repo, workflow_id, limit, offset);
         let conn = self.conn()?;
 
         let (where_clause, total) = if workflow_id > 0 {
@@ -338,6 +356,7 @@ impl MetadataDb {
     }
 
     pub fn get_run(&self, run_id: i64) -> Result<Option<RunRecord>> {
+        crate::dispatch_pg_inherent!(self, get_run, run_id);
         let conn = self.conn()?;
         let result = conn
             .prepare(
@@ -358,6 +377,7 @@ impl MetadataDb {
         step_index: i32,
         name: &str,
     ) -> Result<i64> {
+        crate::dispatch_pg_inherent!(self, create_step, run_id, job_name, step_index, name);
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO workflow_steps (run_id, job_name, step_index, name, status) VALUES (?1, ?2, ?3, ?4, 'pending')",
@@ -373,6 +393,7 @@ impl MetadataDb {
         exit_code: Option<i32>,
         log: &str,
     ) -> Result<()> {
+        crate::dispatch_pg_inherent!(self, update_step, step_id, status, exit_code, log);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         match status {
@@ -393,6 +414,7 @@ impl MetadataDb {
     }
 
     pub fn list_steps(&self, run_id: i64) -> Result<Vec<StepRecord>> {
+        crate::dispatch_pg_inherent!(self, list_steps, run_id);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, job_name, step_index, name, status, exit_code, log, started_at, finished_at FROM workflow_steps WHERE run_id = ?1 ORDER BY step_index",
@@ -423,6 +445,7 @@ impl MetadataDb {
         path: &str,
         size_bytes: i64,
     ) -> Result<i64> {
+        crate::dispatch_pg_inherent!(self, create_artifact, run_id, name, path, size_bytes);
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -433,6 +456,7 @@ impl MetadataDb {
     }
 
     pub fn list_artifacts(&self, run_id: i64) -> Result<Vec<ArtifactRecord>> {
+        crate::dispatch_pg_inherent!(self, list_artifacts, run_id);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, run_id, name, size_bytes, created_at FROM artifacts WHERE run_id = ?1 ORDER BY name",
@@ -451,6 +475,7 @@ impl MetadataDb {
     }
 
     pub fn get_artifact(&self, artifact_id: i64) -> Result<Option<ArtifactRecord>> {
+        crate::dispatch_pg_inherent!(self, get_artifact, artifact_id);
         let conn = self.conn()?;
         let result = conn
             .prepare(
@@ -497,6 +522,7 @@ impl MetadataDb {
     /// (delete_run_artifacts refuses to drop pinned rows), so it's safe to
     /// over-report candidates here.
     pub fn retention_candidates(&self, cutoff_ts: i64, keep_per_workflow: i64) -> Result<Vec<i64>> {
+        crate::dispatch_pg_inherent!(self, retention_candidates, cutoff_ts, keep_per_workflow);
         let conn = self.conn()?;
 
         let mut out = std::collections::BTreeSet::new();
@@ -535,6 +561,7 @@ impl MetadataDb {
     /// Remove every artifact row for `run_id` except those pinned to a
     /// release. Caller is expected to delete the backend blobs first.
     pub fn delete_run_artifacts(&self, run_id: i64) -> Result<usize> {
+        crate::dispatch_pg_inherent!(self, delete_run_artifacts, run_id);
         let conn = self.conn()?;
         let n = conn.execute(
             "DELETE FROM artifacts WHERE run_id = ?1
@@ -554,6 +581,15 @@ impl MetadataDb {
         name: &str,
         artifact_ids: &[i64],
     ) -> Result<i64> {
+        crate::dispatch_pg_inherent!(
+            self,
+            create_release,
+            repo,
+            run_id,
+            tag,
+            name,
+            artifact_ids
+        );
         let conn = self.conn()?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -572,6 +608,7 @@ impl MetadataDb {
     }
 
     pub fn list_releases(&self, repo: &str) -> Result<Vec<ReleaseRecord>> {
+        crate::dispatch_pg_inherent!(self, list_releases, repo);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo, run_id, tag, name, created_at FROM releases WHERE repo = ?1 ORDER BY created_at DESC",
@@ -591,6 +628,7 @@ impl MetadataDb {
     }
 
     pub fn get_release(&self, release_id: i64) -> Result<Option<ReleaseRecord>> {
+        crate::dispatch_pg_inherent!(self, get_release, release_id);
         let conn = self.conn()?;
         let result = conn
             .prepare("SELECT id, repo, run_id, tag, name, created_at FROM releases WHERE id = ?1")?
@@ -609,6 +647,7 @@ impl MetadataDb {
     }
 
     pub fn get_release_artifact_ids(&self, release_id: i64) -> Result<Vec<i64>> {
+        crate::dispatch_pg_inherent!(self, get_release_artifact_ids, release_id);
         let conn = self.conn()?;
         let mut stmt =
             conn.prepare("SELECT artifact_id FROM release_artifacts WHERE release_id = ?1")?;

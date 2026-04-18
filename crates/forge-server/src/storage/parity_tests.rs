@@ -305,11 +305,19 @@ mod pg {
     fn reset(url: &str) {
         let mut client = ::postgres::Client::connect(url, ::postgres::NoTls)
             .expect("connect to DATABASE_URL for reset");
+        // Drop everything the migrations create so each test starts at
+        // version 0. The auth tables (Phase 7g migration 3) join the
+        // list here so a stale row from a prior run doesn't poison
+        // PgUserStore parity.
         client
             .batch_execute(
                 "DROP TABLE IF EXISTS pending_repo_ops CASCADE;
                  DROP TABLE IF EXISTS session_objects CASCADE;
                  DROP TABLE IF EXISTS upload_sessions CASCADE;
+                 DROP TABLE IF EXISTS repo_acls CASCADE;
+                 DROP TABLE IF EXISTS personal_access_tokens CASCADE;
+                 DROP TABLE IF EXISTS sessions CASCADE;
+                 DROP TABLE IF EXISTS users CASCADE;
                  DROP TABLE IF EXISTS locks CASCADE;
                  DROP TABLE IF EXISTS refs CASCADE;
                  DROP TABLE IF EXISTS repos CASCADE;

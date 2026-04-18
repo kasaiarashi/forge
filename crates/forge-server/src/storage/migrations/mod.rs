@@ -99,6 +99,22 @@ pub const POSTGRES_MIGRATIONS: &[Migration] = &[
         name: "pending_repo_ops",
         sql: include_str!("postgres/0002_pending_repo_ops.sql"),
     },
+    // Phase 7g — auth surface (users, sessions, PATs, ACLs) so
+    // PgUserStore can serve a real production deployment.
+    Migration {
+        version: 3,
+        name: "auth",
+        sql: include_str!("postgres/0003_auth.sql"),
+    },
+    // Phase 7g full coverage — every remaining table the SQLite
+    // path creates inline at boot, so the entire gRPC + admin
+    // surface lands in Postgres (issues/PRs/comments/workflows/
+    // runs/steps/artifacts/releases/agents/secrets).
+    Migration {
+        version: 4,
+        name: "full_schema",
+        sql: include_str!("postgres/0004_full_schema.sql"),
+    },
 ];
 
 pub fn apply_pending(conn: &mut Connection, current: i64, list: &[Migration]) -> Result<usize> {

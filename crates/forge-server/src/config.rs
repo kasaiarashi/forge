@@ -95,7 +95,7 @@ impl Default for MetricsSection {
 /// `[objects]` block — picks the live object-store backend. Staging
 /// is always on local disk (see `S3RepoStorage` for why); this
 /// selector only controls where committed objects land.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectsSection {
     /// `"fs"` (default) keeps the pre-Phase-3b.4 local layout. `"s3"`
     /// publishes to the `[objects.s3]` bucket; requires the
@@ -114,6 +114,15 @@ pub struct ObjectsSection {
 
 fn default_objects_backend() -> String {
     "fs".into()
+}
+
+impl Default for ObjectsSection {
+    fn default() -> Self {
+        Self {
+            backend: default_objects_backend(),
+            s3: ObjectsS3::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

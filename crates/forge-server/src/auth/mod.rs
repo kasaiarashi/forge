@@ -29,10 +29,15 @@ pub mod caller;
 pub mod interceptor;
 pub mod password;
 pub mod store;
+#[cfg(feature = "postgres")]
+pub mod store_postgres;
 pub mod tokens;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "postgres-tests"))]
+mod tests_postgres;
 
 // Phase-1 ergonomic re-exports. Downstream phases (interceptor, gRPC service,
 // CLI subcommands) will import from here rather than the submodules. Marked
