@@ -222,6 +222,69 @@ fn flatten_snapshot_tree(
     Ok(forge_core::diff::flatten_tree(&root, "", &getter))
 }
 
+/// Return any touched path rejected by the new tree's `.forgeignore`.
+///
+/// A misbehaving client can skip its own ignore checks and push
+/// `Saved/`, `DerivedDataCache/`, or `Binaries/` straight at the
+/// server; we enforce the rule server-side so a broken `forge` CLI
+/// can't contaminate the repo. The enforcement reads the
+/// `.forgeignore` blob from the *new* tree (not the old one) — the
+/// push carries the rules it must obey.
+///
+/// Returns an empty vec when:
+/// - `new_hash` is all-zero (branch deletion, nothing to enforce);
+/// - the new tree has no `.forgeignore` (operator opted out);
+/// - the file isn't UTF-8 (we log a warning and let the push through
+///   rather than hard-fail on a corrupt ignore file).
+fn forgeignore_violations(
+    os: &ObjectStore,
+    new_snapshot_hash: &[u8],
+    touched: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, anyhow::Error> {
+    if new_snapshot_hash.iter().all(|&b| b == 0) {
+        return Ok(Vec::new());
+    }
+    let new_map = flatten_snapshot_tree(os, new_snapshot_hash)?;
+    let Some((hash, _size)) = new_map.get(".forgeignore") else {
+        return Ok(Vec::new());
+    };
+    let bytes = match os.read_file(hash) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "read .forgeignore from new tree failed; skipping server-side enforcement",
+            );
+            return Ok(Vec::new());
+        }
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        tracing::warn!(
+            "new tree's .forgeignore is not UTF-8; skipping server-side enforcement",
+        );
+        return Ok(Vec::new());
+    };
+    let ignore = match forge_ignore::ForgeIgnore::from_str(text) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(error = %e, "new tree's .forgeignore failed to parse; skipping enforcement");
+            return Ok(Vec::new());
+        }
+    };
+    let mut violations = Vec::new();
+    for path in touched {
+        // The ignore file itself is always allowed — otherwise editing
+        // it would be impossible.
+        if path == ".forgeignore" {
+            continue;
+        }
+        if ignore.is_ignored(path) {
+            violations.push(path.clone());
+        }
+    }
+    Ok(violations)
+}
+
 /// Paths added / removed / modified between `old_hash` and `new_hash`
 /// snapshots. Used by the CommitPush lock-gate.
 fn compute_touched_paths(
@@ -605,6 +668,52 @@ impl ForgeService for ForgeGrpcService {
         // path either side thinks is touched gets lock-checked.
         for p in &req.touched_paths {
             touched.insert(p.clone());
+        }
+
+        // 3a. .forgeignore enforcement (Phase 7). Reject before the
+        //     lock gate: a push that violates the ignore rules is the
+        //     client's bug; there's no point checking who else owns a
+        //     lock on a path that shouldn't be in the repo at all.
+        let mut ignore_violations: Vec<String> = Vec::new();
+        for u in &req.ref_updates {
+            let v = forgeignore_violations(&os, &u.new_hash, &touched)
+                .map_err(|e| internal_err("forgeignore check", e))?;
+            ignore_violations.extend(v);
+        }
+        ignore_violations.sort();
+        ignore_violations.dedup();
+        if !ignore_violations.is_empty() {
+            // Cap the list we echo back so a catastrophically broken
+            // client doesn't blow up the audit log or the gRPC response.
+            let shown: Vec<String> = ignore_violations.iter().take(10).cloned().collect();
+            let suffix = if ignore_violations.len() > 10 {
+                format!(" (and {} more)", ignore_violations.len() - 10)
+            } else {
+                String::new()
+            };
+            let _ = self.db.fail_upload_session(
+                &req.upload_session_id,
+                "forgeignore_violation",
+                &serde_json::to_string(&ignore_violations).unwrap_or_default(),
+            );
+            audit!(
+                action = "push.forgeignore_rejected",
+                outcome = "denied",
+                actor_id = caller.user_id(),
+                repo = repo,
+                session_id = %req.upload_session_id,
+                violation_count = ignore_violations.len()
+            );
+            return Ok(Response::new(CommitPushResponse {
+                success: false,
+                error: format!(
+                    "commit contains paths excluded by .forgeignore: {}{}",
+                    shown.join(", "),
+                    suffix,
+                ),
+                blocking_locks: Vec::new(),
+                ref_results: Vec::new(),
+            }));
         }
 
         // 3. Lock gate: any lock owned by someone other than the caller

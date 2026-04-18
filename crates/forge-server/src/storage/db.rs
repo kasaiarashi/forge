@@ -704,6 +704,45 @@ impl MetadataDb {
             .map_err(Into::into)
     }
 
+    // -- Metrics snapshot (Phase 7 observability) --
+
+    /// Cheap, read-only counts used by `/metrics`. One connection,
+    /// four `SELECT COUNT(*)` queries — SQLite WAL makes these
+    /// effectively free even mid-push, and the pool has 16 slots so
+    /// the scraper won't contend with handler work.
+    pub fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
+        let conn = self.conn()?;
+        let uploading_sessions: i64 = conn
+            .prepare("SELECT COUNT(*) FROM upload_sessions WHERE state = 'uploading'")?
+            .query_row([], |r| r.get(0))?;
+        let total_locks: i64 = conn
+            .prepare("SELECT COUNT(*) FROM locks")?
+            .query_row([], |r| r.get(0))?;
+        let total_repos: i64 = conn
+            .prepare("SELECT COUNT(*) FROM repos")?
+            .query_row([], |r| r.get(0))?;
+        let pending_repo_ops: i64 = conn
+            .prepare("SELECT COUNT(*) FROM pending_repo_ops")?
+            .query_row([], |r| r.get(0))?;
+        Ok(MetricsSnapshot {
+            uploading_sessions,
+            total_locks,
+            total_repos,
+            pending_repo_ops,
+        })
+    }
+
+    /// Liveness / readiness probe. Runs `SELECT 1` against a pooled
+    /// connection so a wedged pool or broken DB file shows up as a
+    /// 503 on `/readyz` instead of silently serving traffic.
+    pub fn ping(&self) -> Result<()> {
+        let conn = self.conn()?;
+        let _: i64 = conn
+            .prepare("SELECT 1")?
+            .query_row([], |r| r.get(0))?;
+        Ok(())
+    }
+
     // -- Agents (Phase 2 distributed runners) --
 
     pub fn create_agent_tables(&self) -> Result<()> {
@@ -1651,6 +1690,16 @@ pub struct UploadSessionRecord {
     pub committed_at: Option<i64>,
     pub result_json: Option<String>,
     pub failure: Option<String>,
+}
+
+/// Cheap gauge bundle for the `/metrics` endpoint. Refreshed on
+/// every scrape; holds no state between scrapes.
+#[derive(Debug, Clone, Default)]
+pub struct MetricsSnapshot {
+    pub uploading_sessions: i64,
+    pub total_locks: i64,
+    pub total_repos: i64,
+    pub pending_repo_ops: i64,
 }
 
 /// Row shape for the Phase 3b.5 durable-drain queue.

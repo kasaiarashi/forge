@@ -562,6 +562,208 @@ pub fn gc(
     Ok(())
 }
 
+// ── Backup subcommand (Phase 7) ──────────────────────────────────────────────
+
+/// Snapshot JSON written alongside the DB copy. Captures the minimum
+/// context needed to sanity-check a restore: schema version, repo +
+/// ref heads at the instant of the snapshot, and a human timestamp.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct BackupManifest {
+    pub created_at: String,
+    pub server_version: String,
+    pub schema_version: i64,
+    pub backend: String,
+    pub repos: Vec<BackupRepoEntry>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct BackupRepoEntry {
+    pub name: String,
+    pub visibility: String,
+    pub refs: Vec<BackupRefEntry>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct BackupRefEntry {
+    pub name: String,
+    pub hash: String,
+}
+
+/// `forge-server backup create <dest>`.
+///
+/// Produces a **consistent** point-in-time DB snapshot via SQLite's
+/// `VACUUM INTO` (safe to run against a live server) and writes a
+/// sibling `manifest.json` listing repo + ref state. Object blobs are
+/// content-addressed and immutable — operators back those up out-of-band
+/// (rsync the FS tree, or `aws s3 sync` the bucket prefix); the CLI
+/// would rather print the right command than lock users into a slow
+/// in-binary copy. See docs/backup.md for the operator runbook.
+pub fn backup_create(config: &ServerConfig, dest: &std::path::Path) -> Result<()> {
+    let backend_name = config.database.backend.as_str();
+    match backend_name {
+        "sqlite" => {}
+        "postgres" => bail!(
+            "backup create is SQLite-only. For Postgres use pg_dump / pg_basebackup \
+             against [database] url, and rsync the object store prefix alongside it."
+        ),
+        other => bail!("unknown [database] backend '{other}'"),
+    }
+
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("create backup dir {}", dest.display()))?;
+
+    let db_path = config.resolved_db_path();
+    if !db_path.exists() {
+        bail!("metadata db {} does not exist", db_path.display());
+    }
+    let db = MetadataDb::open(&db_path)
+        .with_context(|| format!("open metadata db at {}", db_path.display()))?;
+
+    let out_db = dest.join("forge.db");
+    if out_db.exists() {
+        bail!(
+            "{} already exists; refusing to overwrite. Point --dest at a fresh dir.",
+            out_db.display()
+        );
+    }
+
+    // VACUUM INTO produces a single-file snapshot of the live DB without
+    // holding a write lock on the source for long. Safe to run against
+    // a running server.
+    let conn = crate::storage::db::MetadataDb::conn(&db).context("borrow pooled conn")?;
+    // sqlite3 VACUUM INTO syntax accepts a path literal. We escape the
+    // single quote by doubling it — SQLite's rule.
+    let escaped = out_db.to_string_lossy().replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{escaped}';"))
+        .with_context(|| format!("VACUUM INTO {}", out_db.display()))?;
+    drop(conn);
+
+    // Emit the manifest from the live DB (not the snapshot — the snapshot
+    // is identical for our purposes, and using the live handle keeps the
+    // code path simple).
+    let mut repos: Vec<BackupRepoEntry> = Vec::new();
+    for r in db.list_repos()? {
+        let refs = db
+            .get_all_refs(&r.name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, hash)| BackupRefEntry {
+                name,
+                hash: hex::encode(hash),
+            })
+            .collect();
+        repos.push(BackupRepoEntry {
+            name: r.name,
+            visibility: r.visibility,
+            refs,
+        });
+    }
+    let manifest = BackupManifest {
+        created_at: chrono::Utc::now().to_rfc3339(),
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        schema_version: db.current_schema_version()?,
+        backend: backend_name.to_string(),
+        repos,
+    };
+    let manifest_path = dest.join("manifest.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest)?,
+    )
+    .with_context(|| format!("write {}", manifest_path.display()))?;
+
+    let size = std::fs::metadata(&out_db).map(|m| m.len()).unwrap_or(0);
+    println!("wrote {} ({} bytes)", out_db.display(), size);
+    println!("wrote {}", manifest_path.display());
+    println!(
+        "\nobject store is NOT included in this snapshot — back it up separately:"
+    );
+    match config.objects.backend.as_str() {
+        "s3" => {
+            println!("  aws s3 sync s3://{}/ s3://<backup-bucket>/", config.objects.s3.bucket);
+        }
+        _ => {
+            let repos_root = config.storage.base_path.join("repos");
+            println!("  rsync -a {} <backup-target>/", repos_root.display());
+        }
+    }
+    Ok(())
+}
+
+/// `forge-server backup verify <path>`.
+///
+/// Opens the backup DB in read-only mode, runs `PRAGMA integrity_check`,
+/// confirms the manifest matches, and reports the schema version. Safe
+/// to run on a live backup dir.
+pub fn backup_verify(path: &std::path::Path) -> Result<()> {
+    let db_path = path.join("forge.db");
+    let manifest_path = path.join("manifest.json");
+    if !db_path.exists() {
+        bail!("{} does not exist", db_path.display());
+    }
+    if !manifest_path.exists() {
+        bail!("{} does not exist", manifest_path.display());
+    }
+
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open backup db {}", db_path.display()))?;
+
+    let integrity: String = conn
+        .prepare("PRAGMA integrity_check;")?
+        .query_row([], |r| r.get(0))
+        .unwrap_or_else(|_| "unknown".into());
+    if integrity != "ok" {
+        bail!("integrity_check failed: {integrity}");
+    }
+
+    let schema_version: i64 = conn
+        .prepare("SELECT COALESCE(MAX(version), 0) FROM schema_version")?
+        .query_row([], |r| r.get(0))?;
+    let repo_count: i64 = conn
+        .prepare("SELECT COUNT(*) FROM repos")?
+        .query_row([], |r| r.get(0))?;
+    let ref_count: i64 = conn
+        .prepare("SELECT COUNT(*) FROM refs")?
+        .query_row([], |r| r.get(0))?;
+
+    let manifest: BackupManifest = serde_json::from_slice(
+        &std::fs::read(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("parse {}", manifest_path.display()))?;
+
+    // Cross-check: manifest's repo count and schema_version must match
+    // the DB file. A mismatch means the archive was tampered with or
+    // copied inconsistently.
+    let manifest_refs: i64 = manifest.repos.iter().map(|r| r.refs.len() as i64).sum();
+    if manifest.schema_version != schema_version {
+        bail!(
+            "schema_version mismatch: manifest = {}, db = {schema_version}",
+            manifest.schema_version,
+        );
+    }
+    if manifest.repos.len() as i64 != repo_count {
+        bail!(
+            "repo count mismatch: manifest = {}, db = {repo_count}",
+            manifest.repos.len(),
+        );
+    }
+    if manifest_refs != ref_count {
+        bail!("ref count mismatch: manifest = {manifest_refs}, db = {ref_count}");
+    }
+
+    println!("integrity_check:  ok");
+    println!("schema_version:   {schema_version}");
+    println!("repos:            {repo_count}");
+    println!("refs:             {ref_count}");
+    println!("created_at:       {}", manifest.created_at);
+    println!("server_version:   {}", manifest.server_version);
+    Ok(())
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()

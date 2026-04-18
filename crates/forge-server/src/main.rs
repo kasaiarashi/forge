@@ -99,6 +99,14 @@ enum Commands {
     /// the current schema version. Picks the backend out of the
     /// `[database]` config block — same knob the server uses.
     Migrate,
+    /// Point-in-time backup of the metadata DB + a manifest of repo
+    /// state. Object blobs are content-addressed and immutable —
+    /// back them up separately (rsync the FS tree, or `aws s3 sync`
+    /// the bucket prefix). See `docs/backup.md` for the runbook.
+    Backup {
+        #[command(subcommand)]
+        action: BackupAction,
+    },
     /// Offline repack — consolidate small loose objects into pack
     /// files to relieve NTFS file-count pressure and speed up cold
     /// server restarts. Run this while the server is stopped; a
@@ -233,6 +241,24 @@ enum RepoAction {
     Revoke { repo: String, username: String },
     /// List the users that have an explicit grant on a repo
     ListMembers { repo: String },
+}
+
+#[derive(Subcommand)]
+enum BackupAction {
+    /// Snapshot the DB into `<dest>/forge.db` + `<dest>/manifest.json`.
+    /// Safe to run against a live server.
+    Create {
+        /// Destination directory. Created if missing; must not already
+        /// contain `forge.db` (we refuse to overwrite).
+        dest: std::path::PathBuf,
+    },
+    /// Verify an existing backup directory. Runs
+    /// `PRAGMA integrity_check` and confirms the manifest matches
+    /// the DB file. No writes.
+    Verify {
+        /// Backup directory produced by `backup create`.
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -412,6 +438,18 @@ fn main() -> Result<()> {
         Some(Commands::Migrate) => {
             let config = load_config_for_admin(&cli)?;
             cli_admin::migrate(&config)?;
+            return Ok(());
+        }
+        Some(Commands::Backup { ref action }) => {
+            match action {
+                BackupAction::Create { dest } => {
+                    let config = load_config_for_admin(&cli)?;
+                    cli_admin::backup_create(&config, dest)?;
+                }
+                BackupAction::Verify { path } => {
+                    cli_admin::backup_verify(path)?;
+                }
+            }
             return Ok(());
         }
         Some(Commands::Gc { dry_run, grace_hours, ref repo }) => {
@@ -640,6 +678,19 @@ pub(crate) async fn serve_inner(
     services::agent_sweeper::spawn(Arc::clone(&db));
     services::session_sweeper::spawn(Arc::clone(&db), Arc::clone(&fs));
     services::gc::spawn(Arc::clone(&db), Arc::clone(&fs));
+
+    // Phase 7 — /metrics + /healthz + /readyz. Off-by-port so a scraper
+    // can hit plain HTTP without threading the gRPC TLS trust chain.
+    if config.metrics.enabled {
+        services::metrics::spawn(
+            services::metrics::MetricsState {
+                db: Arc::clone(&db),
+                start: std::time::Instant::now(),
+                version: env!("CARGO_PKG_VERSION"),
+            },
+            config.metrics.listen.clone(),
+        );
+    }
 
     // Live step-log broadcast hub. Engine + (future) agents publish;
     // StreamStepLogs readers subscribe.

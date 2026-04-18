@@ -46,6 +46,50 @@ pub struct ServerConfig {
     /// (MinIO, AWS S3, Ceph RGW) while staging stays on local disk.
     #[serde(default)]
     pub objects: ObjectsSection,
+
+    /// `/metrics` + `/healthz` + `/readyz` HTTP listener (Phase 7).
+    /// Separate port so a scraper can hit the server without needing
+    /// the gRPC TLS trust chain.
+    #[serde(default)]
+    pub metrics: MetricsSection,
+}
+
+/// `[metrics]` block — controls the Prometheus + health HTTP listener.
+///
+/// The listener speaks plain HTTP (no TLS) because scrape endpoints
+/// traditionally ride on the internal network — a sidecar Prometheus
+/// or a k8s liveness probe doesn't want to learn the forge CA.
+/// Binding to loopback by default keeps it off the wire for operators
+/// who haven't thought about scraping yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsSection {
+    /// Turn the listener on. Default true — exposing health +
+    /// a handful of gauges costs nothing.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Listen address for the scrape endpoints. Default
+    /// `127.0.0.1:9877` so it's reachable by a local scraper but
+    /// not the open network. Operators running a Prometheus
+    /// sidecar on the same host point it here.
+    #[serde(default = "default_metrics_listen")]
+    pub listen: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_metrics_listen() -> String {
+    "127.0.0.1:9877".into()
+}
+
+impl Default for MetricsSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            listen: default_metrics_listen(),
+        }
+    }
 }
 
 /// `[objects]` block — picks the live object-store backend. Staging
@@ -538,6 +582,7 @@ impl Default for ServerConfig {
             limits: LimitsSection::default(),
             database: DatabaseSection::default(),
             objects: ObjectsSection::default(),
+            metrics: MetricsSection::default(),
         }
     }
 }
@@ -619,6 +664,13 @@ enabled = false
 # Authentication is always on. Create users with:
 #   forge-server user add --admin <username>
 # or via the web setup wizard at /setup on first run.
+
+[metrics]
+# Prometheus /metrics + /healthz + /readyz listener (plain HTTP — no
+# TLS, scrape traffic stays on the internal network). Disable if you
+# don't scrape; health probes (k8s liveness/readiness) work regardless.
+enabled = true
+listen  = "127.0.0.1:9877"
 "#
         .to_string()
     }
