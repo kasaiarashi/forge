@@ -1,0 +1,28 @@
+[package]
+name = "forge-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Stable C ABI bindings for the Forge VCS client — consumed by the Unreal Engine source-control plugin in place of the per-op forge CLI subprocess."
+
+[lib]
+name = "forge_ffi"
+# cdylib: the `.dll` / `.dylib` / `.so` the UE plugin loads at editor
+#         startup. One file per host; shipped next to the editor binary.
+# staticlib: the `.a` / `.lib` UE can statically link against on platforms
+#         where loadable libraries are discouraged (consoles).
+# rlib: keeps the crate consumable from Rust tests + any future Rust
+#         caller that wants the in-process client without paying the FFI
+#         cost.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+forge-core.workspace = true
+forge-ignore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

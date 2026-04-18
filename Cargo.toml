@@ -9,6 +9,7 @@ members = [
     "crates/forge-web/server",
     "crates/forge-unreal",
     "crates/forge-agent",
+    "crates/forge-ffi",
 ]
 resolver = "2"
 
