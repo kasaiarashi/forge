@@ -552,12 +552,12 @@ pub(crate) async fn serve_inner(
                 artifacts_root.clone(),
             )),
             "s3" => {
-                // Trait-compatible stub: constructs fine, validates config,
-                // but every put/get returns a clear "not implemented" error.
-                // Keeps the wiring honest so a real S3 client is a drop-in.
+                #[cfg(not(feature = "s3-objects"))]
                 warn!(
-                    "artifacts backend = \"s3\" is a stub in this build; \
-                     uploads will fail. Use backend = \"fs\" for production."
+                    "artifacts backend = \"s3\" requires the `s3-objects` \
+                     cargo feature. This build is a stub: uploads will fail. \
+                     Rebuild with `--features s3-objects` or set backend = \
+                     \"fs\" for production."
                 );
                 Arc::new(services::artifacts::s3::S3ArtifactStore::new(
                     config.artifacts.s3.clone(),
