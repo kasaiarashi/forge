@@ -45,11 +45,21 @@ jobs:
       # Install protoc by hand rather than arduino/setup-protoc — the
       # action only retries the GitHub-release download twice before
       # giving up, which took down the v0.2.0 release build when the
-      # CDN returned a transient 504. curl's --retry with
-      # --retry-all-errors backs off through 5xx responses with
-      # exponential wait, which is what we actually want on flaky
-      # transport. Pinned to v27.5 to match what `tonic-build` expects
-      # downstream.
+      # CDN returned a transient 504. curl's --retry-all-errors backs
+      # off through 5xx responses with exponential wait, which is
+      # what we actually want on flaky transport. Pinned to v27.5 to
+      # match what `tonic-build` expects downstream.
+      #
+      # Two gotchas we hit + now defend against:
+      # 1. `$HOME/...` in git-bash on Windows resolves to a POSIX path
+      #    like `/c/Users/runneradmin/protoc/bin`. If that literal
+      #    string goes into `$GITHUB_PATH`, the follow-up cargo step
+      #    (which doesn't shell through bash) can't find protoc. Use
+      #    `$RUNNER_TEMP` for the install dir and `cygpath -w` on
+      #    Windows so PATH entries are in native format.
+      # 2. `prost-build` checks `$PROTOC` BEFORE doing a PATH lookup,
+      #    so even if PATH is wrong the build still succeeds as long
+      #    as that env var is set. Emit both for belt + suspenders.
       - name: Install protoc (curl with retry)
         shell: bash
         run: |
@@ -62,14 +72,23 @@ jobs:
             *) echo "Unsupported runner: ${{ runner.os }}" >&2; exit 1 ;;
           esac
           URL="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${ZIP}"
+          INSTALL_DIR="$RUNNER_TEMP/protoc"
+          mkdir -p "$INSTALL_DIR"
           echo "Fetching $URL"
           curl --fail --show-error --location \
                --retry 8 --retry-delay 15 --retry-max-time 300 --retry-all-errors \
-               -o protoc.zip "$URL"
-          mkdir -p "$HOME/protoc"
-          unzip -q -o protoc.zip -d "$HOME/protoc"
-          echo "$HOME/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/protoc/bin/protoc" --version
+               -o "$INSTALL_DIR/protoc.zip" "$URL"
+          unzip -q -o "$INSTALL_DIR/protoc.zip" -d "$INSTALL_DIR"
+          "$INSTALL_DIR/bin/protoc" --version
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN_NATIVE=$(cygpath -w "$INSTALL_DIR/bin")
+            PROTOC_NATIVE=$(cygpath -w "$INSTALL_DIR/bin/protoc.exe")
+          else
+            BIN_NATIVE="$INSTALL_DIR/bin"
+            PROTOC_NATIVE="$INSTALL_DIR/bin/protoc"
+          fi
+          echo "$BIN_NATIVE" >> "$GITHUB_PATH"
+          echo "PROTOC=$PROTOC_NATIVE" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -128,11 +147,21 @@ jobs:
       # Install protoc by hand rather than arduino/setup-protoc — the
       # action only retries the GitHub-release download twice before
       # giving up, which took down the v0.2.0 release build when the
-      # CDN returned a transient 504. curl's --retry with
-      # --retry-all-errors backs off through 5xx responses with
-      # exponential wait, which is what we actually want on flaky
-      # transport. Pinned to v27.5 to match what `tonic-build` expects
-      # downstream.
+      # CDN returned a transient 504. curl's --retry-all-errors backs
+      # off through 5xx responses with exponential wait, which is
+      # what we actually want on flaky transport. Pinned to v27.5 to
+      # match what `tonic-build` expects downstream.
+      #
+      # Two gotchas we hit + now defend against:
+      # 1. `$HOME/...` in git-bash on Windows resolves to a POSIX path
+      #    like `/c/Users/runneradmin/protoc/bin`. If that literal
+      #    string goes into `$GITHUB_PATH`, the follow-up cargo step
+      #    (which doesn't shell through bash) can't find protoc. Use
+      #    `$RUNNER_TEMP` for the install dir and `cygpath -w` on
+      #    Windows so PATH entries are in native format.
+      # 2. `prost-build` checks `$PROTOC` BEFORE doing a PATH lookup,
+      #    so even if PATH is wrong the build still succeeds as long
+      #    as that env var is set. Emit both for belt + suspenders.
       - name: Install protoc (curl with retry)
         shell: bash
         run: |
@@ -145,14 +174,23 @@ jobs:
             *) echo "Unsupported runner: ${{ runner.os }}" >&2; exit 1 ;;
           esac
           URL="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${ZIP}"
+          INSTALL_DIR="$RUNNER_TEMP/protoc"
+          mkdir -p "$INSTALL_DIR"
           echo "Fetching $URL"
           curl --fail --show-error --location \
                --retry 8 --retry-delay 15 --retry-max-time 300 --retry-all-errors \
-               -o protoc.zip "$URL"
-          mkdir -p "$HOME/protoc"
-          unzip -q -o protoc.zip -d "$HOME/protoc"
-          echo "$HOME/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/protoc/bin/protoc" --version
+               -o "$INSTALL_DIR/protoc.zip" "$URL"
+          unzip -q -o "$INSTALL_DIR/protoc.zip" -d "$INSTALL_DIR"
+          "$INSTALL_DIR/bin/protoc" --version
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN_NATIVE=$(cygpath -w "$INSTALL_DIR/bin")
+            PROTOC_NATIVE=$(cygpath -w "$INSTALL_DIR/bin/protoc.exe")
+          else
+            BIN_NATIVE="$INSTALL_DIR/bin"
+            PROTOC_NATIVE="$INSTALL_DIR/bin/protoc"
+          fi
+          echo "$BIN_NATIVE" >> "$GITHUB_PATH"
+          echo "PROTOC=$PROTOC_NATIVE" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
