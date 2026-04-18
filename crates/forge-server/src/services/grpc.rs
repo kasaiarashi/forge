@@ -815,6 +815,10 @@ impl ForgeService for ForgeGrpcService {
         // 3. Lock gate: any lock owned by someone other than the caller
         //    that covers a touched path blocks the commit. P4-style strict
         //    enforcement; typemap broadens this in Phase 5.
+        //
+        // Lock owner is the authenticated username (not display_name).
+        // The CLI normalises to `cred.user` on acquire so this strict
+        // equality against `caller.username()` is always safe.
         let caller_user = caller
             .username()
             .map(|s| s.to_string())
