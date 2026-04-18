@@ -555,6 +555,13 @@ pub(crate) async fn serve_inner(
         .filter_map(|(name, rc)| rc.path.as_ref().map(|p| (name.clone(), p.clone())))
         .collect();
     let fs = Arc::new(FsStorage::new(base.join("repos"), repo_overrides));
+    // Phase 3b.3 — hand gRPC a trait-object view of storage so S3
+    // can plug in without the handlers knowing. Single concrete
+    // backend today (`fs`); 3b.4 adds the config-driven
+    // RepoStorageBackend selector that picks S3 when
+    // `[objects] backend = "s3"`.
+    let storage: Arc<dyn storage::repo_backend::RepoStorageBackend> =
+        Arc::clone(&fs) as Arc<dyn storage::repo_backend::RepoStorageBackend>;
 
     let user_store: Arc<dyn auth::UserStore> =
         Arc::new(auth::SqliteUserStore::new(Arc::clone(&db)));
@@ -650,6 +657,7 @@ pub(crate) async fn serve_inner(
 
     let grpc_service = ForgeGrpcService {
         fs: Arc::clone(&fs),
+        storage: Arc::clone(&storage),
         db: Arc::clone(&db),
         start_time: std::time::Instant::now(),
         workflow_engine,

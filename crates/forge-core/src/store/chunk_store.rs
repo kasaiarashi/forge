@@ -316,6 +316,24 @@ impl ObjectBackend for ChunkStore {
         let it = ChunkStore::iter_all(self)?;
         Ok(Box::new(it))
     }
+
+    // Phase 3b.3 — expose the inherent FS fast paths via the trait so
+    // ObjectStore (and anything else holding `Arc<dyn ObjectBackend>`)
+    // can call them. Default impls in backend.rs cover non-FS
+    // backends with a safe no-op / put_raw forward.
+    fn ensure_shard_dirs(&self) -> Result<(), ForgeError> {
+        ChunkStore::ensure_shard_dirs(self)
+    }
+    fn put_raw_direct(
+        &self,
+        hash: &ForgeHash,
+        compressed: &[u8],
+    ) -> Result<(), ForgeError> {
+        ChunkStore::put_raw_direct(self, hash, compressed)
+    }
+    fn local_root(&self) -> Option<&std::path::Path> {
+        Some(ChunkStore::root(self))
+    }
 }
 
 #[cfg(test)]

@@ -63,4 +63,39 @@ pub trait ObjectBackend: Send + Sync {
     fn iter_all<'a>(
         &'a self,
     ) -> Result<Box<dyn Iterator<Item = Result<ForgeHash, ForgeError>> + 'a>, ForgeError>;
+
+    // ── Optional FS-flavoured niceties (Phase 3b.3) ────────────────
+    //
+    // These are meaningful on the filesystem backend and no-op on
+    // object-store backends (S3, &c). Default impls let trait
+    // consumers call them uniformly — the concrete ChunkStore
+    // overrides the ones that do real work.
+
+    /// Pre-create any shard / prefix directories so subsequent
+    /// per-object writes skip a `create_dir_all`. No-op on backends
+    /// that don't have an on-disk shard tree.
+    fn ensure_shard_dirs(&self) -> Result<(), ForgeError> {
+        Ok(())
+    }
+
+    /// Fast-path write that skips dedup/atomic-rename scaffolding.
+    /// Callers are responsible for having already verified the
+    /// object is missing (e.g. via a preceding `has_objects` RPC).
+    /// Default implementation just forwards to
+    /// [`ObjectBackend::put_raw`].
+    fn put_raw_direct(
+        &self,
+        hash: &ForgeHash,
+        compressed: &[u8],
+    ) -> Result<(), ForgeError> {
+        self.put_raw(hash, compressed)?;
+        Ok(())
+    }
+
+    /// Local filesystem root for this store, if any. Used by callers
+    /// that need path arithmetic (e.g. computing sibling tmp dirs).
+    /// Returns `None` on non-FS backends.
+    fn local_root(&self) -> Option<&std::path::Path> {
+        None
+    }
 }

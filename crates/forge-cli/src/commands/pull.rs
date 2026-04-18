@@ -183,7 +183,8 @@ pub(super) async fn fetch_objects_to_tip(
         let pull_tmp_dir = ws
             .object_store
             .chunks
-            .root()
+            .local_root()
+            .expect("workspace backend must be FS-backed")
             .join("_pull_tmp");
         std::fs::create_dir_all(&pull_tmp_dir)?;
 
@@ -298,7 +299,8 @@ pub(super) async fn fetch_objects_to_tip(
                     let final_path = ws
                         .object_store
                         .chunks
-                        .root()
+                        .local_root()
+            .expect("workspace backend must be FS-backed")
                         .join(&hash_hex[..2])
                         .join(&hash_hex[2..]);
                     let partial_path = current_partial_path
@@ -349,7 +351,8 @@ pub(super) async fn fetch_objects_to_tip(
                             let final_path = ws
                                 .object_store
                                 .chunks
-                                .root()
+                                .local_root()
+            .expect("workspace backend must be FS-backed")
                                 .join(&stem[..2])
                                 .join(&stem[2..]);
                             if final_path.exists() {

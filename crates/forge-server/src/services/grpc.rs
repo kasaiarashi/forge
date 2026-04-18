@@ -22,6 +22,7 @@ use crate::config::LimitsSection;
 use crate::services::lock_events::LockEventHub;
 use crate::storage::db::{CommitSessionOutcome, MetadataDb, RefUpdateSpec};
 use crate::storage::fs::FsStorage;
+use crate::storage::repo_backend::RepoStorageBackend;
 
 /// Slice `compressed` from `start_offset` forwards into a sequence
 /// of [`ObjectChunk`]s whose aggregate reproduces the tail-slice the
@@ -99,7 +100,14 @@ fn internal_err<E: std::fmt::Display>(label: &'static str, err: E) -> Status {
 }
 
 pub struct ForgeGrpcService {
+    /// Filesystem-rooted storage, used for staging + repo lifecycle
+    /// + the (still-concrete) push/pull promote paths.
     pub fs: Arc<FsStorage>,
+    /// Trait-dispatched storage — Phase 3b.3. Resolves `repo_object_backend`
+    /// for every read-path handler so an S3 live store can plug in
+    /// without the handler knowing. `fs` above satisfies this trait,
+    /// so single-backend deployments keep a single `Arc` under the hood.
+    pub storage: Arc<dyn RepoStorageBackend>,
     pub db: Arc<MetadataDb>,
     pub start_time: Instant,
     /// Channel to queue workflow runs for execution (Phase 3).
@@ -159,10 +167,11 @@ fn resolve_repo(repo: &str, caller: &crate::auth::Caller) -> Result<String, Stat
 }
 
 impl ForgeGrpcService {
-    /// Build an ObjectStore for a specific repo.
+    /// Build a typed ObjectStore for a repo via the trait surface.
+    /// Works for any backend that satisfies [`RepoStorageBackend`] —
+    /// FS today, S3 once [`S3RepoStorage`] lands in 3b.4.
     fn object_store(&self, repo: &str) -> ObjectStore {
-        let store = self.fs.repo_store(repo);
-        ObjectStore::new(store.root().to_path_buf())
+        ObjectStore::with_backend(self.storage.repo_object_backend(repo))
     }
 }
 
@@ -879,7 +888,10 @@ impl ForgeService for ForgeGrpcService {
             )));
         }
 
-        let store = self.fs.repo_store(&repo);
+        // Phase 3b.3 — resolve the repo's live store through the
+        // trait so an S3 backend answers the `.get_raw` fanout the
+        // same way an FS backend does.
+        let store = self.storage.repo_object_backend(&repo);
 
         // Normalise the two wire formats into a single (hash_bytes,
         // start_offset) list so the stage-1/stage-2 pipeline below
@@ -953,7 +965,9 @@ impl ForgeService for ForgeGrpcService {
         let repo_full = resolve_repo(&req.repo, &caller)?;
         let repo = repo_full.as_str();
         require_repo_read(&caller, &self.user_store, repo, self.db.is_repo_public(repo))?;
-        let store = self.fs.repo_store(repo);
+        // Phase 3b.3 — trait-dispatched so has_objects works against
+        // both FS and S3 backends without a per-backend fast path.
+        let store = self.storage.repo_object_backend(repo);
 
         // Parallelize filesystem stat calls — checking 100K+ paths
         // sequentially is the dominant cost on large pushes.
@@ -1929,17 +1943,22 @@ impl ForgeService for ForgeGrpcService {
                 .map_err(|e| internal_err("grpc", e))?;
             total_locks += locks.len() as i32;
 
-            // Walk the objects directory for this repo to count objects and size.
+            // Walk the objects directory for this repo to count
+            // objects and size. Only works on FS-backed stores — S3
+            // deployments surface zero here and fall back to the
+            // list_objects_v2 pagination when the repo-stats RPC
+            // grows object-store awareness (Phase 3b.4).
             let os = self.object_store(&r.name);
-            let objects_dir = os.objects_dir();
-            if objects_dir.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&objects_dir) {
-                    for prefix_entry in entries.flatten() {
-                        if prefix_entry.path().is_dir() {
-                            if let Ok(inner) = std::fs::read_dir(prefix_entry.path()) {
-                                for obj in inner.flatten() {
-                                    total_objects += 1;
-                                    total_size_bytes += obj.metadata().map(|m| m.len() as i64).unwrap_or(0);
+            if let Some(objects_dir) = os.objects_dir() {
+                if objects_dir.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(objects_dir) {
+                        for prefix_entry in entries.flatten() {
+                            if prefix_entry.path().is_dir() {
+                                if let Ok(inner) = std::fs::read_dir(prefix_entry.path()) {
+                                    for obj in inner.flatten() {
+                                        total_objects += 1;
+                                        total_size_bytes += obj.metadata().map(|m| m.len() as i64).unwrap_or(0);
+                                    }
                                 }
                             }
                         }
