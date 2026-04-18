@@ -13,6 +13,11 @@ use clap::{Parser, Subcommand};
     name = "forge",
     about = "Version control for Unreal Engine",
     version,
+    // Keep in lockstep with commands::version::render_banner so
+    // `forge --version` and `forge version`/`forge info` print the
+    // same leading block. Clap prepends the command name ("forge ")
+    // before the first line of `long_version`, so we deliberately
+    // start with just the bare version number + metadata tail.
     long_version = concat!(
         env!("CARGO_PKG_VERSION"), "\n",
         "Copyright (c) 2026 Krishna Teja Mekala \u{2014} https://github.com/kasaiarashi/forge\n",
@@ -413,6 +418,7 @@ enum Commands {
     },
 
     /// Print client version; inside a repo, also print the server version.
+    #[command(visible_alias = "info")]
     Version,
 
     /// Pin a forge server's self-signed TLS certificate (trust on first use).

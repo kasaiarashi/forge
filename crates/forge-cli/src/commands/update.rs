@@ -103,6 +103,14 @@ pub fn run(check_only: bool, force: bool, json: bool) -> Result<()> {
         println!("Replacing: {}", exe_path.display());
     }
 
+    // Snapshot the file size before replacement so a post-verify failure
+    // can tell "replacement didn't change the bytes on disk" (shim / PATH
+    // shadow / admin-rights denial that fell through to a scheduled-for-
+    // delete on Windows) apart from "replacement succeeded but the
+    // downloaded release binary itself still reports the wrong version"
+    // (mispackaged release — Cargo.toml wasn't bumped before CI built).
+    let pre_size = std::fs::metadata(&exe_path).ok().map(|m| m.len());
+
     let tmp_path = std::env::temp_dir().join(format!("forge-update-{}", expected));
     http_download_file(&asset.browser_download_url, &tmp_path)?;
 
@@ -139,10 +147,44 @@ pub fn run(check_only: bool, force: bool, json: bool) -> Result<()> {
             Ok(())
         }
         Ok(installed) => {
+            // Replacement returned Ok but `<exe> --version` reports the
+            // wrong version. Two common causes, worth distinguishing so
+            // the user can act:
+            //
+            // 1. The bytes on disk never changed — self_replace fell
+            //    through to a scheduled-for-delete path (Windows, no
+            //    admin) or the running `forge` is a shim/PATH shadow.
+            //    Detectable by comparing file size pre/post.
+            //
+            // 2. The bytes DID change but the freshly-downloaded release
+            //    binary reports the wrong version. This is a release-
+            //    packaging bug: Cargo.toml wasn't bumped before CI built
+            //    the artefact, so CARGO_PKG_VERSION baked into the
+            //    binary doesn't match the release tag.
+            let post_size = std::fs::metadata(&exe_path).ok().map(|m| m.len());
+            let bytes_changed = match (pre_size, post_size) {
+                (Some(a), Some(b)) => a != b,
+                _ => false,
+            };
+            if bytes_changed {
+                bail!(
+                    "Replacement wrote a new binary at {exe} but it reports v{} \
+                     (expected v{}). The GitHub release asset itself appears to be \
+                     mispackaged — the uploaded binary was likely built from a \
+                     source tree whose Cargo.toml wasn't bumped before tagging. \
+                     This is a maintainer bug; please file an issue.",
+                    format_version(installed),
+                    format_version(&latest),
+                    exe = exe_path.display(),
+                );
+            }
             let hint = path_shadowing_hint(&exe_path);
             bail!(
-                "Replacement ran but `{exe} --version` still reports v{} (expected v{}). \
-                 The binary at {exe} may be a PATH-shadowed duplicate or a shim.{hint}",
+                "Replacement ran but the bytes at {exe} didn't change — \
+                 `{exe} --version` still reports v{} (expected v{}). The binary \
+                 at that path is likely a PATH-shadowed duplicate, a shim \
+                 (scoop/winget/chocolatey), or in a location where the current \
+                 user lacks write permission.{hint}",
                 format_version(installed),
                 format_version(&latest),
                 exe = exe_path.display(),

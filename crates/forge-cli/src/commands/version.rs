@@ -1,24 +1,27 @@
 // Copyright (c) 2026 Krishna Teja. All rights reserved.
 // Licensed under the BSL 1.1..
 
-//! `forge version` — print the client version and, when run inside a
-//! workspace, the server version too.
+//! `forge version` (alias: `forge info`) — print the client version
+//! banner and, when run inside a workspace, the server version too.
 //!
 //! Design notes:
 //!
+//! * The leading banner is intentionally identical to what `forge
+//!   --version` prints. Clap drives `--version` from `long_version` on
+//!   the parser, which starts with the bare version number; we prepend
+//!   "forge " here to match clap's auto-prefixed output. Keeping the
+//!   two in lockstep avoids the "which command tells the truth?"
+//!   confusion users hit when one form showed "forge 0.1.0" and the
+//!   other showed "0.2.0 / Copyright …".
+//!
 //! * Outside a workspace, the command stays completely silent about the
 //!   missing workspace. The user ran `forge version` — they're asking
-//!   "what version am I using?", not "please validate my repo". A
-//!   warning here would be noise.
+//!   "what version am I using?", not "please validate my repo".
 //!
 //! * Inside a workspace, we try to fetch the server version via
 //!   `GetServerInfo`. A network/auth failure downgrades the output to
-//!   `server: (unreachable: <url>)` rather than erroring out, because
+//!   `server (unreachable: <url>)` rather than erroring out, because
 //!   the client version is still useful information.
-//!
-//! * Clap already exposes `forge --version`, which prints the crate
-//!   version and exits. That's kept working (via `#[command(version)]`
-//!   on the parser). `forge version` is the richer subcommand form.
 //!
 //! * `--json` is honored via the global `cli.json` flag for tooling.
 
@@ -33,6 +36,17 @@ use crate::url_resolver;
 /// Version of the `forge` CLI binary, baked in at compile time from the
 /// crate metadata.
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Multi-line banner printed by both `forge --version` (via clap's
+/// `long_version`) and this subcommand. Kept in one place so the two
+/// forms can't drift.
+pub fn render_banner() -> String {
+    format!(
+        "forge {CLIENT_VERSION}\n\
+         Copyright (c) 2026 Krishna Teja Mekala \u{2014} https://github.com/kasaiarashi/forge\n\
+         Licensed under BSL 1.1",
+    )
+}
 
 pub fn run(json: bool) -> Result<()> {
     // Best-effort server info lookup. Any step can fail silently — none
@@ -50,7 +64,7 @@ pub fn run(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("forge {CLIENT_VERSION}");
+    println!("{}", render_banner());
     if let Some(info) = server_info {
         match (info.version.is_empty(), info.error) {
             (false, _) => println!("server {} ({})", info.version, info.url),
