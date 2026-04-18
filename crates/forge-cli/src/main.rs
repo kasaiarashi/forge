@@ -159,9 +159,10 @@ enum Commands {
         reason: Option<String>,
     },
 
-    /// Unlock a file
+    /// Unlock a file, or `.` to release every lock you own in the repo
     Unlock {
-        /// File path to unlock
+        /// File path to unlock. Pass `.` to bulk-release all locks
+        /// owned by the current user, like `forge add .`.
         path: String,
 
         /// Force unlock (admin)

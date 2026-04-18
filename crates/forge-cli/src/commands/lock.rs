@@ -16,6 +16,13 @@ pub fn run(path: String, reason: Option<String>, json: bool) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>"))?
         .to_string();
 
+    // Lock owner is the authenticated username — that's what the server
+    // compares against `caller.username()` in the push-time lock gate.
+    // Falls back to the workspace author name only when there are no
+    // stored credentials (offline / pre-login). Using the display name
+    // here silently blocks the lock holder's own pushes later on.
+    let owner = resolve_lock_owner(&server_url, &config.user.name);
+
     // Normalize path.
     let rel_path = path.replace('\\', "/");
 
@@ -31,7 +38,7 @@ pub fn run(path: String, reason: Option<String>, json: bool) -> Result<()> {
                     config.repo.clone()
                 },
                 path: rel_path.clone(),
-                owner: config.user.name.clone(),
+                owner: owner.clone(),
                 workspace_id: config.workspace_id.clone(),
                 reason: reason.unwrap_or_default(),
             })
@@ -45,7 +52,7 @@ pub fn run(path: String, reason: Option<String>, json: bool) -> Result<()> {
                     serde_json::to_string_pretty(&json!({
                         "ok": true,
                         "path": rel_path,
-                        "owner": config.user.name,
+                        "owner": owner,
                     }))?
                 );
             } else {
@@ -93,4 +100,22 @@ pub fn run(path: String, reason: Option<String>, json: bool) -> Result<()> {
 
         Ok(())
     })
+}
+
+/// Resolve the lock owner string for this repo.
+///
+/// Preference order:
+/// 1. Authenticated credential's `user` field (the username).
+/// 2. `config.user.name` fallback — only hit when nobody is logged in.
+///
+/// Using the display name (`config.user.name` in UE workflows) breaks
+/// the push-time lock gate because the server compares `lock.owner`
+/// against `caller.username()`, not the display name.
+pub(crate) fn resolve_lock_owner(server_url: &str, config_user_name: &str) -> String {
+    if let Ok(Some(cred)) = crate::credentials::load(server_url) {
+        if !cred.user.is_empty() {
+            return cred.user;
+        }
+    }
+    config_user_name.to_string()
 }
