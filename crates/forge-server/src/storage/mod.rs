@@ -2,6 +2,7 @@ pub mod fs;
 pub mod db;
 pub mod migrations;
 pub mod backend;
+pub mod repo_backend;
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
