@@ -72,6 +72,23 @@ pub const SQLITE_MIGRATIONS: &[Migration] = &[
 /// the SQL committed and the revision row exists, or neither did.
 ///
 /// Returns the number of migrations applied.
+/// Postgres migrations, in ascending version order.
+///
+/// Unlike SQLite — which bootstraps revision 1 implicitly via the
+/// inline `create_*_tables` DDL in `MetadataDb::open` — Postgres has
+/// no bootstrap path, so revision 1 IS the baseline `.sql` file. The
+/// runner inserts `schema_version` inside the same transaction that
+/// applies the SQL, so a crashed migration leaves the DB on the
+/// previous revision.
+#[cfg(feature = "postgres")]
+pub const POSTGRES_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "baseline",
+        sql: include_str!("postgres/0001_baseline.sql"),
+    },
+];
+
 pub fn apply_pending(
     conn: &mut Connection,
     current: i64,
@@ -109,6 +126,69 @@ pub fn apply_pending(
             version = m.version,
             name = m.name,
             "schema migration applied"
+        );
+        applied += 1;
+    }
+
+    Ok(applied)
+}
+
+/// Postgres variant of [`apply_pending`]. Drops into a transaction
+/// on the supplied `postgres::Client`, runs the migration body
+/// (`batch_execute`, which accepts a multi-statement body), then
+/// inserts the `schema_version` row before committing.
+///
+/// The schema_version table may not exist on a fresh Postgres database
+/// — unlike SQLite there's no bootstrap baseline — so the runner
+/// creates it on the first pass if missing. This mirrors what
+/// `MetadataDb::ensure_schema_version_table` does on the SQLite side.
+#[cfg(feature = "postgres")]
+pub fn apply_pending_postgres(
+    client: &mut postgres::Client,
+    current: i64,
+    list: &[Migration],
+) -> Result<usize> {
+    // Ensure the version table exists before anything tries to read
+    // from or write to it.
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version     BIGINT  PRIMARY KEY,
+                name        TEXT    NOT NULL,
+                applied_at  BIGINT  NOT NULL
+             );",
+        )
+        .context("ensure schema_version table on postgres")?;
+
+    for window in list.windows(2) {
+        debug_assert!(
+            window[0].version < window[1].version,
+            "postgres migration versions must strictly ascend: {} before {}",
+            window[0].version,
+            window[1].version,
+        );
+    }
+
+    let mut applied = 0usize;
+    for m in list.iter().filter(|m| m.version > current) {
+        let mut tx = client
+            .transaction()
+            .with_context(|| format!("begin pg migration {} ({})", m.version, m.name))?;
+        tx.batch_execute(m.sql)
+            .with_context(|| format!("execute pg migration {} ({})", m.version, m.name))?;
+        let now = chrono::Utc::now().timestamp();
+        tx.execute(
+            "INSERT INTO schema_version (version, name, applied_at)
+             VALUES ($1, $2, $3)",
+            &[&m.version, &m.name, &now],
+        )
+        .with_context(|| format!("record pg migration {} ({})", m.version, m.name))?;
+        tx.commit()
+            .with_context(|| format!("commit pg migration {} ({})", m.version, m.name))?;
+        tracing::info!(
+            version = m.version,
+            name = m.name,
+            "postgres schema migration applied"
         );
         applied += 1;
     }

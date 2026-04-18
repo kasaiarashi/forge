@@ -313,6 +313,97 @@ pub fn agent_remove(config: &ServerConfig, name: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Migration subcommand ─────────────────────────────────────────────────────
+
+/// `forge-server migrate`: idempotent schema migration runner.
+///
+/// Reads `[database] backend = ...` from the config and applies any
+/// pending migrations for the selected backend. A DB already at head
+/// logs its current revision and exits 0.
+///
+/// For Postgres, `[database] url` must be set. Build the binary with
+/// `--features postgres` to include the backend.
+pub fn migrate(config: &ServerConfig) -> Result<()> {
+    use crate::storage::backend::MetadataBackend;
+
+    let backend_name = config.database.backend.as_str();
+    match backend_name {
+        "sqlite" => {
+            let db_path = config.resolved_db_path();
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            println!("SQLite backend: {}", db_path.display());
+            // MetadataDb::open already applies pending migrations and
+            // records the baseline. Calling apply_pending_migrations()
+            // again just logs "no pending migrations" — still useful
+            // because it prints the current version.
+            let db = MetadataDb::open(&db_path)
+                .with_context(|| format!("open metadata db at {}", db_path.display()))?;
+            let before = db.current_schema_version()?;
+            let applied = db.apply_pending_migrations()?;
+            println!("schema_version before: {before}");
+            println!("migrations applied:    {applied}");
+            println!("schema_version after:  {}", db.current_schema_version()?);
+        }
+        "postgres" => {
+            #[cfg(feature = "postgres")]
+            {
+                use crate::storage::postgres::{PgMetadataBackend, PgPoolConfig};
+                if config.database.url.is_empty() {
+                    bail!("postgres backend selected but [database] url is empty");
+                }
+                println!(
+                    "Postgres backend: {}",
+                    mask_url_password(&config.database.url)
+                );
+                let pg_cfg = PgPoolConfig {
+                    url: config.database.url.clone(),
+                    max_size: config.database.max_connections,
+                    ..Default::default()
+                };
+                let backend = PgMetadataBackend::open(pg_cfg)
+                    .context("open postgres backend")?;
+                let before = backend.current_schema_version()?;
+                // open() already applied pending migrations; re-running
+                // is a no-op and prints the idempotent status line.
+                let applied = backend.apply_pending_migrations()?;
+                println!("schema_version before: {before}");
+                println!("migrations applied:    {applied}");
+                println!(
+                    "schema_version after:  {}",
+                    backend.current_schema_version()?
+                );
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                bail!(
+                    "postgres backend requested but this binary was built without \
+                     the `postgres` feature. Rebuild with `--features postgres`."
+                );
+            }
+        }
+        other => bail!("unknown [database] backend '{other}' (expected 'sqlite' or 'postgres')"),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+fn mask_url_password(url: &str) -> String {
+    // Avoid leaking a libpq password to operator logs. Splits on `:` +
+    // `@` and replaces the password chunk with `***`. Best-effort —
+    // unparseable URLs pass through unchanged so an operator sees the
+    // literal value and can debug their config.
+    if let Some((prefix, rest)) = url.split_once("://") {
+        if let Some((creds, host)) = rest.split_once('@') {
+            if let Some((user, _pw)) = creds.split_once(':') {
+                return format!("{prefix}://{user}:***@{host}");
+            }
+        }
+    }
+    url.to_string()
+}
+
 fn prompt_password_with_confirm() -> Result<String> {
     let p1 = rpassword::prompt_password("Password: ")?;
     if p1.is_empty() {

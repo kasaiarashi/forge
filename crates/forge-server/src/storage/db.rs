@@ -442,6 +442,23 @@ impl MetadataDb {
             .map_err(Into::into)
     }
 
+    /// Hashes + declared sizes for every object recorded against a
+    /// session. Used by `QueryUploadSession` to tell the resuming
+    /// client how many bytes per object it's already announced — the
+    /// staging filesystem answers the "how many did I actually land"
+    /// question separately.
+    pub fn list_session_objects_with_sizes(&self, sid: &str) -> Result<Vec<(Vec<u8>, i64)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT hash, size FROM session_objects WHERE session_id = ?1",
+        )?;
+        let rows = stmt.query_map([sid], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Mark a session failed. Retries of CommitPush against a failed session
     /// will surface the same failure reason without re-running the work.
     pub fn fail_upload_session(&self, sid: &str, reason: &str, result_json: &str) -> Result<()> {
@@ -1628,6 +1645,121 @@ pub struct CommentRecord {
     pub body: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl crate::storage::backend::MetadataBackend for MetadataDb {
+    fn list_repos(&self) -> Result<Vec<RepoRecord>> {
+        MetadataDb::list_repos(self)
+    }
+    fn get_repo_visibility(&self, name: &str) -> Result<Option<String>> {
+        MetadataDb::get_repo_visibility(self, name)
+    }
+    fn is_repo_public(&self, name: &str) -> bool {
+        MetadataDb::is_repo_public(self, name)
+    }
+    fn set_repo_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        MetadataDb::set_repo_visibility(self, name, visibility)
+    }
+    fn create_repo(&self, name: &str, description: &str) -> Result<bool> {
+        MetadataDb::create_repo(self, name, description)
+    }
+    fn update_repo(&self, name: &str, new_name: &str, description: &str) -> Result<bool> {
+        MetadataDb::update_repo(self, name, new_name, description)
+    }
+    fn delete_repo(&self, name: &str) -> Result<bool> {
+        MetadataDb::delete_repo(self, name)
+    }
+
+    fn get_ref(&self, repo: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        MetadataDb::get_ref(self, repo, name)
+    }
+    fn get_all_refs(&self, repo: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        MetadataDb::get_all_refs(self, repo)
+    }
+    fn update_ref(
+        &self,
+        repo: &str,
+        name: &str,
+        old_hash: &[u8],
+        new_hash: &[u8],
+        force: bool,
+    ) -> Result<bool> {
+        MetadataDb::update_ref(self, repo, name, old_hash, new_hash, force)
+    }
+
+    fn acquire_lock(
+        &self,
+        repo: &str,
+        path: &str,
+        owner: &str,
+        workspace_id: &str,
+        reason: &str,
+    ) -> Result<std::result::Result<(), LockInfo>> {
+        MetadataDb::acquire_lock(self, repo, path, owner, workspace_id, reason)
+    }
+    fn release_lock(&self, repo: &str, path: &str, owner: &str, force: bool) -> Result<bool> {
+        MetadataDb::release_lock(self, repo, path, owner, force)
+    }
+    fn list_locks(
+        &self,
+        repo: &str,
+        path_prefix: &str,
+        owner_filter: &str,
+    ) -> Result<Vec<LockInfo>> {
+        MetadataDb::list_locks(self, repo, path_prefix, owner_filter)
+    }
+
+    fn create_upload_session(
+        &self,
+        sid: &str,
+        repo: &str,
+        user_id: Option<i64>,
+        ttl_seconds: i64,
+    ) -> Result<()> {
+        MetadataDb::create_upload_session(self, sid, repo, user_id, ttl_seconds)
+    }
+    fn record_session_object(&self, sid: &str, hash: &[u8], size: i64) -> Result<()> {
+        MetadataDb::record_session_object(self, sid, hash, size)
+    }
+    fn get_upload_session(&self, sid: &str) -> Result<Option<UploadSessionRecord>> {
+        MetadataDb::get_upload_session(self, sid)
+    }
+    fn list_session_object_hashes(&self, sid: &str) -> Result<Vec<Vec<u8>>> {
+        MetadataDb::list_session_object_hashes(self, sid)
+    }
+    fn list_session_objects_with_sizes(&self, sid: &str) -> Result<Vec<(Vec<u8>, i64)>> {
+        MetadataDb::list_session_objects_with_sizes(self, sid)
+    }
+    fn fail_upload_session(&self, sid: &str, reason: &str, result_json: &str) -> Result<()> {
+        MetadataDb::fail_upload_session(self, sid, reason, result_json)
+    }
+    fn commit_upload_session(
+        &self,
+        sid: &str,
+        updates: &[RefUpdateSpec<'_>],
+    ) -> Result<CommitSessionOutcome> {
+        MetadataDb::commit_upload_session(self, sid, updates)
+    }
+    fn list_stale_upload_sessions(&self, cutoff_ts: i64) -> Result<Vec<(String, String)>> {
+        MetadataDb::list_stale_upload_sessions(self, cutoff_ts)
+    }
+    fn delete_upload_session(&self, sid: &str) -> Result<()> {
+        MetadataDb::delete_upload_session(self, sid)
+    }
+
+    fn current_schema_version(&self) -> Result<i64> {
+        MetadataDb::current_schema_version(self)
+    }
+
+    fn apply_pending_migrations(&self) -> Result<usize> {
+        let current = MetadataDb::current_schema_version(self)?;
+        let mut conn = self.conn()?;
+        crate::storage::migrations::apply_pending(
+            &mut conn,
+            current,
+            crate::storage::migrations::SQLITE_MIGRATIONS,
+        )
+    }
 }
 
 #[cfg(test)]

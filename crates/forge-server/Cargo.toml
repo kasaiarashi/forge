@@ -49,11 +49,24 @@ futures = "0.3"
 bytes = "1"
 async-stream = "0.3"
 
+postgres = { workspace = true, optional = true }
+r2d2_postgres = { workspace = true, optional = true }
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[features]
+default = []
+# Enables the Postgres metadata backend. Pulls in the sync `postgres`
+# crate + r2d2 pool. The server binary builds without it; Postgres is
+# opt-in per deployment.
+postgres = ["dep:postgres", "dep:r2d2_postgres"]
+# Runs the cross-backend integration tests against a live Postgres
+# reachable via `DATABASE_URL`. CI-only; leave off for local dev.
+postgres-tests = ["postgres"]
 
 [dev-dependencies]
 tempfile.workspace = true

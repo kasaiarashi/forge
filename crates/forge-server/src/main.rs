@@ -93,6 +93,12 @@ enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Apply pending metadata migrations and exit.
+    ///
+    /// Idempotent: on a DB already at head, it's a no-op that logs
+    /// the current schema version. Picks the backend out of the
+    /// `[database]` config block — same knob the server uses.
+    Migrate,
     /// Check for updates and self-update the server
     Update {
         /// Only check for updates without installing
@@ -362,6 +368,11 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Some(Commands::Migrate) => {
+            let config = load_config_for_admin(&cli)?;
+            cli_admin::migrate(&config)?;
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -457,6 +468,26 @@ pub(crate) async fn serve_inner(
         &config.logging,
         config.resolved_log_dir().as_deref(),
     );
+
+    // Metadata backend selection. Phase 2b.2 shipped the trait +
+    // Postgres impl + parity tests, but the server process still
+    // relies on concrete MetadataDb for the non-trait surface
+    // (issues/PRs/workflows/auth/actions/agents). Running a full
+    // server against Postgres is deferred — accept only SQLite
+    // here and tell the operator explicitly what's going on.
+    match config.database.backend.as_str() {
+        "sqlite" => {}
+        "postgres" => {
+            anyhow::bail!(
+                "postgres backend is a Phase-2b.2 preview: the trait-covered \
+                 atomic-push surface is tested against both backends, but the \
+                 full server still requires SQLite. Set [database] backend = \
+                 \"sqlite\" to run the server, or use `forge-server migrate` \
+                 against a postgres URL to exercise the runner."
+            );
+        }
+        other => anyhow::bail!("unknown [database] backend '{other}' (expected 'sqlite' or 'postgres')"),
+    }
 
     let db_path = config.resolved_db_path();
     let db = Arc::new(MetadataDb::open(&db_path)?);
