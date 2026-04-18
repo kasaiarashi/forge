@@ -7,6 +7,7 @@
 #include "ISourceControlOperation.h"
 #include "ForgeSourceControlState.h"
 #include "ForgeSourceControlWorkers.h"
+#include "ForgeFFIBridge.h"
 
 class FForgeSourceControlCommand;
 
@@ -126,6 +127,22 @@ public:
 	const FString& GetWorkspaceRoot() const { return WorkspaceRoot; }
 	const FString& GetCurrentUserName() const { return CurrentUserName; }
 
+	/**
+	 * Lazily-opened FFI session shared by every worker for the
+	 * lifetime of this provider. Returns a pointer to the stored
+	 * session when [`FForgeFFI::IsAvailable`] and the workspace is
+	 * valid; returns `nullptr` when the library failed to load or
+	 * the session couldn't be opened — callers must fall back to
+	 * the CLI subprocess path in that case.
+	 *
+	 * Thread-safe to call from worker threads: construction is
+	 * protected by a mutex; reads after the first call are just a
+	 * pointer load. The session outlives every worker because
+	 * workers complete on the game thread during Tick() while the
+	 * provider owns the session until Close().
+	 */
+	const FForgeFFISession* GetFFISession();
+
 private:
 	TSharedPtr<IForgeWorker, ESPMode::ThreadSafe> CreateWorker(const FName& InOperationName) const;
 	ECommandResult::Type IssueCommand(FForgeSourceControlCommand& InCommand);
@@ -151,6 +168,13 @@ private:
 	FString WorkspaceRoot;
 	FString CurrentUserName;
 	bool bIsAvailable = false;
+
+	// FFI session, lazily opened on the first `GetFFISession` call
+	// under `FFISessionMutex`. Null until opened or when the library
+	// is unavailable / the workspace is unusable.
+	FForgeFFISession FFISession;
+	bool bFFISessionAttempted = false;
+	FCriticalSection FFISessionMutex;
 
 	/** Deferred broadcast — set when states change, fires on the NEXT tick. */
 	bool bPendingBroadcast = false;

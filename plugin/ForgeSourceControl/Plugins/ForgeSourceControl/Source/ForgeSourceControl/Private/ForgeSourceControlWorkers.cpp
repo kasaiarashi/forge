@@ -119,11 +119,36 @@ bool FForgeCheckOutWorker::Execute(FForgeSourceControlCommand& InCommand)
 	const FString WsRoot = Provider.GetWorkspaceRoot();
 	bool bSuccess = true;
 
+	// Phase 4c.2 — prefer FFI when the library is loaded. Each lock
+	// used to cost one CreateProcess + forge CLI startup (~15 ms
+	// cold). Through the bridge it's a direct gRPC call on the
+	// session's owned tokio runtime, so N files = N round-trips, no
+	// per-file process overhead. A missing library or failed session
+	// transparently falls back to the legacy subprocess path.
+	const FForgeFFISession* FFI = Provider.GetFFISession();
+
 	for (const FString& File : InCommand.Files)
 	{
 		FString RelPath = File;
 		FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
 
+		if (FFI != nullptr)
+		{
+			FText LockError;
+			if (FForgeFFI::LockAcquire(*FFI, RelPath, FString(), LockError))
+			{
+				LockedFiles.Add(File);
+				continue;
+			}
+			InCommand.ErrorMessages.Add(FString::Printf(
+				TEXT("Lock denied for '%s': %s"), *RelPath, *LockError.ToString()));
+			bSuccess = false;
+			break;
+		}
+
+		// CLI fallback. Kept in place for:
+		//  - dev builds where forge_ffi.dll isn't next to the editor.
+		//  - transient session-open failures logged by GetFFISession.
 		TSharedPtr<FJsonObject> JsonResult;
 		if (Provider.RunForgeCommand(FString::Printf(TEXT("lock \"%s\""), *RelPath), JsonResult))
 		{
@@ -199,13 +224,29 @@ bool FForgeCheckInWorker::Execute(FForgeSourceControlCommand& InCommand)
 		return false;
 	}
 
-	// Unlock files (non-fatal).
-	for (const FString& File : InCommand.Files)
+	// Unlock files (non-fatal). Prefer FFI when available — one
+	// gRPC round-trip per file on the session's owned runtime,
+	// instead of per-file subprocess spawn. Either path is
+	// best-effort: unlock failure doesn't block the check-in.
 	{
-		FString RelPath = File;
-		FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
-		TSharedPtr<FJsonObject> Unused;
-		Provider.RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+		const FForgeFFISession* FFI = Provider.GetFFISession();
+		for (const FString& File : InCommand.Files)
+		{
+			FString RelPath = File;
+			FPaths::MakePathRelativeTo(RelPath, *(WsRoot / TEXT("")));
+			if (FFI != nullptr)
+			{
+				FText IgnoredErr;
+				FForgeFFI::LockRelease(*FFI, RelPath, IgnoredErr);
+				// We deliberately drop IgnoredErr — unlock failures
+				// are non-fatal and already logged by the Rust side.
+			}
+			else
+			{
+				TSharedPtr<FJsonObject> Unused;
+				Provider.RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+			}
+		}
 	}
 
 	// Push.
@@ -270,6 +311,8 @@ bool FForgeRevertWorker::Execute(FForgeSourceControlCommand& InCommand)
 	FForgeSourceControlProvider& Provider = InCommand.Provider;
 	const FString WsRoot = Provider.GetWorkspaceRoot();
 
+	// See CheckIn unlock comment — FFI-first, subprocess fallback.
+	const FForgeFFISession* FFI = Provider.GetFFISession();
 	for (const FString& File : InCommand.Files)
 	{
 		FString RelPath = File;
@@ -283,8 +326,16 @@ bool FForgeRevertWorker::Execute(FForgeSourceControlCommand& InCommand)
 		}
 
 		// Unlock (non-fatal).
-		TSharedPtr<FJsonObject> Unused;
-		Provider.RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+		if (FFI != nullptr)
+		{
+			FText IgnoredErr;
+			FForgeFFI::LockRelease(*FFI, RelPath, IgnoredErr);
+		}
+		else
+		{
+			TSharedPtr<FJsonObject> Unused;
+			Provider.RunForgeCommand(FString::Printf(TEXT("unlock \"%s\""), *RelPath), Unused);
+		}
 	}
 
 	InCommand.MarkOperationCompleted(true);

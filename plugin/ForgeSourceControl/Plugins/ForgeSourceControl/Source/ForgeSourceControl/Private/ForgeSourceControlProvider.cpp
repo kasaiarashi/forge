@@ -95,6 +95,51 @@ void FForgeSourceControlProvider::Close()
 		if (Cmd->bAutoDelete) delete Cmd;
 	}
 	CommandQueue.Empty();
+
+	// Drop any open FFI session. The destructor runs forge_session_close.
+	{
+		FScopeLock Lock(&FFISessionMutex);
+		FFISession = FForgeFFISession();
+		bFFISessionAttempted = false;
+	}
+}
+
+const FForgeFFISession* FForgeSourceControlProvider::GetFFISession()
+{
+	if (!FForgeFFI::IsAvailable() || WorkspaceRoot.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	FScopeLock Lock(&FFISessionMutex);
+	if (FFISession.IsValid())
+	{
+		return &FFISession;
+	}
+	if (bFFISessionAttempted)
+	{
+		// A previous open failed. Don't pound the library — a second
+		// failure is almost certainly for the same reason.
+		return nullptr;
+	}
+	bFFISessionAttempted = true;
+
+	FText OpenError;
+	FForgeFFISession Opened = FForgeFFI::OpenSession(WorkspaceRoot, OpenError);
+	if (!Opened.IsValid())
+	{
+		UE_LOG(LogSourceControl, Warning,
+			TEXT("Forge: FFI session open failed — will keep using CLI subprocess path. %s"),
+			*OpenError.ToString());
+		return nullptr;
+	}
+	FFISession = MoveTemp(Opened);
+	UE_LOG(LogSourceControl, Log,
+		TEXT("Forge: FFI session open for workspace %s (library version %s, abi %d)"),
+		*WorkspaceRoot,
+		*FForgeFFI::GetLibraryVersion(),
+		FForgeFFI::GetAbiVersion());
+	return &FFISession;
 }
 
 // ── Identity ────────────────────────────────────────────────────────────────
