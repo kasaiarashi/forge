@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <RootNamespace>Forge.Gui.Ffi</RootNamespace>
+    <AssemblyName>Forge.Gui.Ffi</AssemblyName>
+    <UseWinUI>false</UseWinUI>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Workspace root: three dirs up from Forge.Gui.Ffi/. -->
+    <ForgeRepoRoot>$(MSBuildThisFileDirectory)..\..\..\..\</ForgeRepoRoot>
+    <ForgeFfiDll>$(ForgeRepoRoot)target\release\forge_ffi.dll</ForgeFfiDll>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Forge.Gui.Core\Forge.Gui.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Build forge_ffi.dll if the user hasn't already.
+       Uses scripts\build.bat so the MSVC env (vcvars64 + MSVC 14.44
+       paths) is set up the way the rest of the repo expects. The
+       target is skipped when the DLL already exists and is newer
+       than its crate sources, so incremental dev rebuilds don't
+       pay the cargo-no-op cost. -->
+  <Target Name="_BuildForgeFfiDll" BeforeTargets="CopyFilesToOutputDirectory"
+          Inputs="@(Compile);$(ForgeRepoRoot)crates\forge-ffi\src\lib.rs"
+          Outputs="$(ForgeFfiDll)">
+    <Message Text="Building forge_ffi.dll via scripts\build.bat ..." Importance="high" />
+    <Exec Command='cmd /c "scripts\build.bat --lib -p forge-ffi"'
+          WorkingDirectory="$(ForgeRepoRoot)" />
+  </Target>
+
+  <!-- Copy the built DLL into Forge.Gui.App's bin directory so
+       [DllImport("forge_ffi")] in NativeMethods.cs can load it. -->
+  <ItemGroup>
+    <None Include="$(ForgeFfiDll)" Condition="Exists('$(ForgeFfiDll)')">
+      <Link>forge_ffi.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,15 @@
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:conv="using:Forge.Gui.App.Converters">
+
+    <SolidColorBrush x:Key="FgAddedBrush"      Color="#6CCB5F" />
+    <SolidColorBrush x:Key="FgModifiedBrush"   Color="#E3B341" />
+    <SolidColorBrush x:Key="FgDeletedBrush"    Color="#F85149" />
+    <SolidColorBrush x:Key="FgLockedBrush"     Color="#D2A8FF" />
+    <SolidColorBrush x:Key="FgConflictBrush"   Color="#FF7B72" />
+    <SolidColorBrush x:Key="FgUntrackedBrush"  Color="#8B949E" />
+
+    <conv:NullToCollapsedConverter x:Key="NullToCollapsed" />
+    <conv:BoolNotConverter x:Key="BoolNot" />
+</ResourceDictionary>

@@ -1,0 +1,67 @@
+<Page
+    x:Class="Forge.Gui.App.Pages.HistoryPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:Forge.Gui.Core.Models"
+    xmlns:conv="using:Forge.Gui.App.Converters">
+
+    <Page.Resources>
+        <conv:NullToCollapsedConverter x:Key="NullToCollapsed" />
+        <conv:RelativeTimeConverter x:Key="RelTime" />
+    </Page.Resources>
+
+    <Grid RowSpacing="12" Padding="{StaticResource FgPagePadding}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+            <TextBlock Text="History" Style="{StaticResource FgH1}" />
+            <Border Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="10"
+                    Padding="8,2,8,2" VerticalAlignment="Center">
+                <TextBlock Text="{x:Bind Vm.Total, Mode=OneWay}"
+                           FontSize="12" FontWeight="SemiBold" Foreground="White" />
+            </Border>
+        </StackPanel>
+
+        <Border Grid.Row="1" Style="{StaticResource FgCard}">
+            <ListView ItemsSource="{x:Bind Vm.Commits, Mode=OneWay}"
+                      SelectedItem="{x:Bind Vm.Selected, Mode=TwoWay}"
+                      Background="Transparent"
+                      ItemContainerStyle="{StaticResource FgListItem}">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="models:LogEntry">
+                        <Grid Padding="6,12,6,12" ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="80" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock Text="{x:Bind ShortHash}"
+                                       FontFamily="Cascadia Mono" FontSize="12" Opacity="0.7"
+                                       VerticalAlignment="Top" Margin="0,2,0,0" />
+
+                            <StackPanel Grid.Column="1" Spacing="4">
+                                <TextBlock Text="{x:Bind Subject}"
+                                           FontSize="14" FontWeight="SemiBold"
+                                           TextWrapping="Wrap" MaxLines="2"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{x:Bind Body}"
+                                           Style="{StaticResource FgCaption}"
+                                           TextWrapping="Wrap" MaxLines="6"
+                                           TextTrimming="CharacterEllipsis"
+                                           Visibility="{x:Bind Body, Converter={StaticResource NullToCollapsed}}" />
+                                <TextBlock Style="{StaticResource FgCaption}" Margin="0,2,0,0">
+                                    <Run Text="{x:Bind AuthorName}" />
+                                    <Run Text=" · " />
+                                    <Run Text="{x:Bind Timestamp, Converter={StaticResource RelTime}}" />
+                                </TextBlock>
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Border>
+    </Grid>
+</Page>

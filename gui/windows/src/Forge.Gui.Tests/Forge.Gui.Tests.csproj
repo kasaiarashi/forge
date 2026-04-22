@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <UseWinUI>false</UseWinUI>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
+    <PackageReference Include="xunit" Version="2.7.0" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.7" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Forge.Gui.Core\Forge.Gui.Core.csproj" />
+    <ProjectReference Include="..\Forge.Gui.Mock\Forge.Gui.Mock.csproj" />
+  </ItemGroup>
+</Project>
