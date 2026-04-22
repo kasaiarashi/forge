@@ -604,6 +604,24 @@ async fn push_async(
             commit_resp.error
         );
     } else {
+        // Special case: the caller passed --bypass-forgeignore but the
+        // server still rejected with a .forgeignore violation. The
+        // bypass is a v0.2.5+ field; an older server drops the
+        // unknown proto field and enforces the check regardless.
+        // Surface that explicitly so the operator knows to upgrade.
+        let looks_like_forgeignore =
+            commit_resp.error.contains(".forgeignore");
+        if bypass_forgeignore && looks_like_forgeignore {
+            bail!(
+                "Push to {} rejected: {}.\n\n\
+                 Note: --bypass-forgeignore was set but the server still \
+                 ran the ignore check. This means the server is older than \
+                 v0.2.5 (which introduced the bypass). Upgrade the server: \
+                 `sudo forge-server update -f`, then retry.",
+                ref_name,
+                commit_resp.error
+            );
+        }
         bail!(
             "Push to {} rejected: {}.\n\
              Pull and rebase, then push again — or use `forge push --force` \
@@ -778,6 +796,163 @@ fn collect_snapshot_objects(
     }
 
     Ok(())
+}
+
+/// `forge push --delete <branch>` entry point. Removes the given
+/// branch from the server and drops the matching local remote-tracking
+/// ref. Mirrors `git push <remote> --delete <branch>`.
+pub fn run_delete(remote_arg: Option<&str>, branch: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    run_delete_in(&cwd, remote_arg, branch)
+}
+
+/// Explicit-CWD variant for the FFI layer, parallel to [`run_in`].
+pub fn run_delete_in(
+    cwd: &std::path::Path,
+    remote_arg: Option<&str>,
+    branch: &str,
+) -> Result<()> {
+    if branch.trim().is_empty() {
+        bail!("--delete requires a branch name");
+    }
+    // Defence against typos that start with `refs/…` — the server's
+    // `validate::ref_name` is strict but catching it here yields a
+    // better error than a generic gRPC rejection.
+    if branch.starts_with("refs/") {
+        bail!("pass the branch short name (e.g. `feature/foo`), not a refs/ path");
+    }
+
+    let ws = Workspace::discover(cwd)?;
+    let config = ws.config()?;
+
+    let server_url = config
+        .default_remote_url()
+        .ok_or_else(|| anyhow::anyhow!("No remote configured. Use: forge remote add origin <url>"))?
+        .to_string();
+
+    let repo_name = if config.repo.is_empty() {
+        "default".to_string()
+    } else {
+        config.repo.clone()
+    };
+
+    let remote_name = config
+        .default_remote()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "origin".to_string());
+
+    if let Some(r) = remote_arg {
+        if r != remote_name {
+            bail!(
+                "remote '{}' is not configured (current: '{}'). Use `forge remote` to inspect.",
+                r,
+                remote_name
+            );
+        }
+    }
+
+    // Refuse to wipe the remote ref of the branch we're currently on —
+    // users almost never mean this and it leaves the workspace in a
+    // broken state (next push would recreate it anyway). Force it
+    // through explicitly by switching off the branch first.
+    if let Some(current) = ws.current_branch()? {
+        if current == branch {
+            bail!(
+                "refusing to delete remote branch '{}' — it is the currently checked-out branch. \
+                 Switch to another branch first (`forge switch <other>`) and retry.",
+                branch
+            );
+        }
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        delete_remote_branch_async(&ws, &server_url, &repo_name, &remote_name, branch).await
+    })
+}
+
+async fn delete_remote_branch_async(
+    ws: &Workspace,
+    server_url: &str,
+    repo_name: &str,
+    remote_name: &str,
+    branch: &str,
+) -> Result<()> {
+    let mut client = crate::client::connect_forge_write(server_url).await?;
+
+    // Look up the current remote tip so the server-side CAS check in
+    // `update_ref` rejects us if another client pushed/deleted in the
+    // window between our fetch and our delete. Fall back to force when
+    // the ref is missing so `forge push --delete` is idempotent:
+    // re-running after a successful delete should succeed silently
+    // rather than fail with "not found".
+    let ref_name = format!("refs/heads/{}", branch);
+    let refs_resp = client
+        .get_refs(GetRefsRequest { repo: repo_name.to_string() })
+        .await?
+        .into_inner();
+
+    let old_hash = match refs_resp.refs.get(&ref_name) {
+        Some(bytes) if !bytes.is_empty() => bytes.clone(),
+        _ => {
+            // Not present on the server. Still clean up any stale
+            // local remote-tracking ref so the next `forge branch -r`
+            // doesn't show a ghost.
+            prune_local_remote_ref(ws, remote_name, branch);
+            println!(
+                "Remote branch '{}/{}' is already absent on the server — nothing to delete.",
+                remote_name, branch
+            );
+            return Ok(());
+        }
+    };
+
+    let zero = vec![0u8; 32];
+    let resp = client
+        .update_ref(UpdateRefRequest {
+            repo: repo_name.to_string(),
+            ref_name: ref_name.clone(),
+            old_hash: old_hash.clone(),
+            new_hash: zero,
+            // CAS against `old_hash` prevents races; force only if the
+            // caller is rerunning after a server-side change they
+            // already reconciled with.
+            force: false,
+        })
+        .await?
+        .into_inner();
+
+    if !resp.success {
+        bail!(
+            "server rejected delete of '{}/{}': {}. \
+             If another client moved the ref concurrently, re-fetch and retry.",
+            remote_name,
+            branch,
+            if resp.error.is_empty() { "unknown error" } else { resp.error.as_str() }
+        );
+    }
+
+    prune_local_remote_ref(ws, remote_name, branch);
+    println!("Deleted remote branch '{}/{}'", remote_name, branch);
+    Ok(())
+}
+
+/// Remove the `.forge/refs/remotes/<remote>/<branch>` sidecar so local
+/// branch listings stop advertising a ref that the server no longer has.
+/// Best-effort: missing file is not an error.
+fn prune_local_remote_ref(ws: &Workspace, remote: &str, branch: &str) {
+    let path = ws
+        .forge_dir()
+        .join("refs")
+        .join("remotes")
+        .join(remote)
+        .join(branch);
+    let _ = std::fs::remove_file(&path);
+    // Best-effort tidy of empty parent dirs so `refs/remotes/origin/feature/`
+    // doesn't linger after the last branch under it was deleted.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
 }
 
 /// Return true if a tree-entry file could have been written as a

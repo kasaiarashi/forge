@@ -110,12 +110,114 @@ fn fetch_server_info(ws: &Workspace, branch: Option<&str>) -> ServerInfo {
     })
 }
 
-pub fn run(json: bool) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+/// Pure-data result of a status walk. Used by both the CLI's `run()`
+/// (which formats this for a terminal) and `forge-ffi` (which JSON-
+/// serialises it for the UE plugin and the WinUI GUI). The
+/// `serde_json::Value` shape is the committed FFI contract — see
+/// `compute_status_json` below.
+#[derive(Debug, Clone)]
+pub struct StatusData {
+    pub workspace_root: String,
+    pub branch: Option<String>,
+    pub staged_new: Vec<String>,
+    pub staged_modified: Vec<String>,
+    pub staged_deleted: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+    pub untracked: Vec<String>,
+    pub locks: Vec<(String, String)>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub remote_label: Option<String>,
+}
+
+/// Walk the working tree + index of the workspace containing `cwd` and
+/// return a structured status. Factored out of `run` so both the CLI
+/// and the FFI layer share one implementation of the dirty-file logic.
+pub fn compute_status(cwd: &std::path::Path) -> Result<StatusData> {
+    let ws = Workspace::discover(cwd)?;
     let index = Index::load(&ws.forge_dir().join("index"))?;
     let ignore = forge_ignore::ForgeIgnore::from_file(&ws.root.join(".forgeignore"))
         .unwrap_or_default();
+
+    let (
+        staged_new,
+        staged_modified,
+        staged_deleted,
+        modified,
+        deleted,
+        untracked,
+        branch_name,
+        ahead,
+        behind,
+        remote_label,
+        locks,
+    ) = walk_workspace(&ws, &index, &ignore)?;
+
+    Ok(StatusData {
+        workspace_root: ws.root.display().to_string(),
+        branch: branch_name,
+        staged_new,
+        staged_modified,
+        staged_deleted,
+        modified,
+        deleted,
+        untracked,
+        locks,
+        ahead,
+        behind,
+        remote_label,
+    })
+}
+
+/// Serialise [`StatusData`] to the JSON shape the GUI + plugin consume:
+/// `{workspace_root, branch, staged_new[], staged_modified[], staged_deleted[],
+///   modified[], deleted[], untracked[], locked[{path,owner}], ahead, behind, remote}`.
+pub fn compute_status_json(cwd: &std::path::Path) -> Result<serde_json::Value> {
+    let data = compute_status(cwd)?;
+    let lock_entries: Vec<serde_json::Value> = data
+        .locks
+        .iter()
+        .map(|(p, o)| serde_json::json!({"path": p, "owner": o}))
+        .collect();
+    Ok(serde_json::json!({
+        "workspace_root": data.workspace_root,
+        "branch": data.branch,
+        "staged_new": data.staged_new,
+        "staged_modified": data.staged_modified,
+        "staged_deleted": data.staged_deleted,
+        "modified": data.modified,
+        "deleted": data.deleted,
+        "untracked": data.untracked,
+        "locked": lock_entries,
+        "ahead": data.ahead,
+        "behind": data.behind,
+        "remote": data.remote_label,
+    }))
+}
+
+// Internal workhorse: shared by both `run` (for CLI printing) and
+// `compute_status` (for the structured FFI path). Returns a tuple in
+// the same order the original `run` used so callers can continue to
+// pattern-match without a struct here.
+#[allow(clippy::type_complexity)]
+fn walk_workspace(
+    ws: &Workspace,
+    index: &Index,
+    ignore: &forge_ignore::ForgeIgnore,
+) -> Result<(
+    Vec<String>, // staged_new
+    Vec<String>, // staged_modified
+    Vec<String>, // staged_deleted
+    Vec<String>, // modified
+    Vec<String>, // deleted
+    Vec<String>, // untracked
+    Option<String>, // branch
+    usize, // ahead
+    usize, // behind
+    Option<String>, // remote_label
+    Vec<(String, String)>, // locks
+)> {
 
     // Staged entries, sub-categorized like git status.
     let mut staged_new = Vec::new();
@@ -292,101 +394,126 @@ pub fn run(json: bool) -> Result<()> {
         (0, 0, None)
     };
 
+    let _ = has_staged;
+    Ok((
+        staged_new,
+        staged_modified,
+        staged_deleted,
+        modified,
+        deleted,
+        untracked,
+        branch_name,
+        ahead,
+        behind,
+        remote_label,
+        locks,
+    ))
+}
+
+/// CLI entry point: computes status via [`compute_status`] then
+/// formats for a terminal (or emits the JSON payload directly).
+pub fn run(json: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let data = compute_status(&cwd)?;
+
     if json {
-        let lock_entries: Vec<serde_json::Value> = locks
-            .iter()
-            .map(|(p, o)| serde_json::json!({"path": p, "owner": o}))
-            .collect();
-        let output = serde_json::json!({
-            "staged_new": staged_new,
-            "staged_modified": staged_modified,
-            "staged_deleted": staged_deleted,
-            "modified": modified,
-            "deleted": deleted,
-            "untracked": untracked,
-            "locked": lock_entries,
-            "ahead": ahead,
-            "behind": behind,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        if let Some(ref branch) = branch_name {
-            println!("On branch {}", branch);
+        let payload = compute_status_json(&cwd)?;
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    let has_staged = !data.staged_new.is_empty()
+        || !data.staged_modified.is_empty()
+        || !data.staged_deleted.is_empty();
+
+    if let Some(ref branch) = data.branch {
+        println!("On branch {}", branch);
+    }
+    if let Some(ref label) = data.remote_label {
+        if data.ahead == 0 && data.behind == 0 {
+            println!("Your branch is up to date with '{}'.", label);
+        } else if data.ahead > 0 && data.behind == 0 {
+            println!(
+                "Your branch is ahead of '{}' by {} commit{}.",
+                label,
+                data.ahead,
+                if data.ahead == 1 { "" } else { "s" }
+            );
+        } else if data.behind > 0 && data.ahead == 0 {
+            println!(
+                "Your branch is behind '{}' by {} commit{}, and can be fast-forwarded.",
+                label,
+                data.behind,
+                if data.behind == 1 { "" } else { "s" }
+            );
+        } else {
+            println!(
+                "Your branch and '{}' have diverged,\n\
+                 and have {} and {} different commit{} each, respectively.",
+                label,
+                data.ahead,
+                data.behind,
+                if data.ahead + data.behind == 2 { "" } else { "s" }
+            );
         }
-        if let Some(ref label) = remote_label {
-            if ahead == 0 && behind == 0 {
-                println!("Your branch is up to date with '{}'.", label);
-            } else if ahead > 0 && behind == 0 {
-                println!(
-                    "Your branch is ahead of '{}' by {} commit{}.",
-                    label, ahead, if ahead == 1 { "" } else { "s" }
-                );
-            } else if behind > 0 && ahead == 0 {
-                println!(
-                    "Your branch is behind '{}' by {} commit{}, and can be fast-forwarded.",
-                    label, behind, if behind == 1 { "" } else { "s" }
-                );
-            } else {
-                println!(
-                    "Your branch and '{}' have diverged,\n\
-                     and have {} and {} different commit{} each, respectively.",
-                    label, ahead, behind, if ahead + behind == 2 { "" } else { "s" }
-                );
-            }
+    }
+    println!();
+
+    if !data.locks.is_empty() {
+        println!("Locked files:");
+        for (path, owner) in &data.locks {
+            println!("  \x1b[35m  locked: {} (by {})\x1b[0m", path, owner);
         }
         println!();
+    }
 
-        if !locks.is_empty() {
-            println!("Locked files:");
-            for (path, owner) in &locks {
-                println!("  \x1b[35m  locked: {} (by {})\x1b[0m", path, owner);
-            }
-            println!();
+    if has_staged {
+        println!("Changes to be committed:");
+        println!("  (use \"forge unstage <file>...\" to unstage)");
+        println!();
+        for f in &data.staged_new {
+            println!("        \x1b[32mnew file:   {}\x1b[0m", f);
         }
+        for f in &data.staged_modified {
+            println!("        \x1b[32mmodified:   {}\x1b[0m", f);
+        }
+        for f in &data.staged_deleted {
+            println!("        \x1b[32mdeleted:    {}\x1b[0m", f);
+        }
+        println!();
+    }
 
-        if has_staged {
-            println!("Changes to be committed:");
-            println!("  (use \"forge unstage <file>...\" to unstage)");
-            println!();
-            for f in &staged_new {
-                println!("        \x1b[32mnew file:   {}\x1b[0m", f);
-            }
-            for f in &staged_modified {
-                println!("        \x1b[32mmodified:   {}\x1b[0m", f);
-            }
-            for f in &staged_deleted {
-                println!("        \x1b[32mdeleted:    {}\x1b[0m", f);
-            }
-            println!();
+    if !data.modified.is_empty() || !data.deleted.is_empty() {
+        println!("Changes not staged for commit:");
+        println!("  (use \"forge add <file>...\" to update what will be committed)");
+        println!("  (use \"forge restore <file>...\" to discard changes in working directory)");
+        println!();
+        for f in &data.modified {
+            println!("        \x1b[31mmodified:   {}\x1b[0m", f);
         }
+        for f in &data.deleted {
+            println!("        \x1b[31mdeleted:    {}\x1b[0m", f);
+        }
+        println!();
+    }
 
-        if !modified.is_empty() || !deleted.is_empty() {
-            println!("Changes not staged for commit:");
-            println!("  (use \"forge add <file>...\" to update what will be committed)");
-            println!("  (use \"forge restore <file>...\" to discard changes in working directory)");
-            println!();
-            for f in &modified {
-                println!("        \x1b[31mmodified:   {}\x1b[0m", f);
-            }
-            for f in &deleted {
-                println!("        \x1b[31mdeleted:    {}\x1b[0m", f);
-            }
-            println!();
+    if !data.untracked.is_empty() {
+        println!("Untracked files:");
+        println!("  (use \"forge add <file>...\" to include in what will be committed)");
+        println!();
+        for f in &data.untracked {
+            println!("        \x1b[31m{}\x1b[0m", f);
         }
+        println!();
+    }
 
-        if !untracked.is_empty() {
-            println!("Untracked files:");
-            println!("  (use \"forge add <file>...\" to include in what will be committed)");
-            println!();
-            for f in &untracked {
-                println!("        \x1b[31m{}\x1b[0m", f);
-            }
-            println!();
-        }
-
-        if !has_staged && modified.is_empty() && deleted.is_empty() && untracked.is_empty() && locks.is_empty() {
-            println!("Nothing to report — working tree clean.");
-        }
+    if !has_staged
+        && data.modified.is_empty()
+        && data.deleted.is_empty()
+        && data.untracked.is_empty()
+        && data.locks.is_empty()
+    {
+        println!("Nothing to report — working tree clean.");
     }
 
     Ok(())

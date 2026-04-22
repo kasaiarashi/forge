@@ -19,7 +19,14 @@ pub fn run(name: String) -> Result<()> {
 ///   new commits on it.
 pub fn run_with_create(name: String, create: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_with_create_in(&cwd, name, create)
+}
+
+/// FFI-facing entry point — same as [`run_with_create`] but with an
+/// explicit workspace anchor so the GUI / UE plugin don't have to
+/// mutate process CWD.
+pub fn run_with_create_in(cwd: &std::path::Path, name: String, create: bool) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
 
     if create {
         // Refuse to clobber an existing branch — users can manage that

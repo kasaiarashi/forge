@@ -126,6 +126,12 @@ enum Commands {
         /// practical. The bypass is audit-logged on the server.
         #[arg(long)]
         bypass_forgeignore: bool,
+        /// Delete the given remote branch instead of pushing commits
+        /// (mirrors `git push --delete <branch>`). The local branch
+        /// is untouched; only the server-side ref and the local
+        /// remote-tracking ref under `refs/remotes/` are removed.
+        #[arg(long, value_name = "BRANCH", conflicts_with_all = ["force", "bypass_forgeignore", "branch"])]
+        delete: Option<String>,
         /// Optional remote name (git-compat; must match the configured remote when set)
         remote: Option<String>,
         /// Optional branch ref (git-compat; must match the current branch when set)
@@ -566,8 +572,12 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Status => commands::status::run(cli.json)?,
         Commands::Diff { commit, staged, stat, extract, no_pager, class_stats, paths } => commands::diff::run(commit, staged, stat, extract, paths, no_pager, cli.json, class_stats)?,
         Commands::Log { count, file, oneline, all, no_pager } => commands::log::run(count, file, oneline, all, no_pager, cli.json)?,
-        Commands::Push { force, bypass_forgeignore, remote, branch } => {
-            commands::push::run(force, bypass_forgeignore, remote.as_deref(), branch.as_deref())?
+        Commands::Push { force, bypass_forgeignore, delete, remote, branch } => {
+            if let Some(branch_to_delete) = delete {
+                commands::push::run_delete(remote.as_deref(), &branch_to_delete)?
+            } else {
+                commands::push::run(force, bypass_forgeignore, remote.as_deref(), branch.as_deref())?
+            }
         }
         Commands::Pull => commands::pull::run()?,
         Commands::Fetch { branch } => commands::fetch::run(branch)?,

@@ -1,0 +1,46 @@
+<Page
+    x:Class="Forge.Gui.App.Pages.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ScrollViewer Padding="{StaticResource FgPagePadding}">
+        <StackPanel Spacing="16" MaxWidth="640" HorizontalAlignment="Left">
+            <TextBlock Text="Settings" Style="{StaticResource FgH1}" />
+
+            <Border Style="{StaticResource FgCard}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Mode" Style="{StaticResource FgH2}" />
+                    <ToggleSwitch Header="Advanced mode"
+                                  OffContent="Simple — artist-friendly"
+                                  OnContent="Advanced — developer-friendly"
+                                  IsOn="{x:Bind Vm.AdvancedMode, Mode=TwoWay}" />
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource FgCard}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Account" Style="{StaticResource FgH2}" />
+                    <TextBox Header="Server URL"
+                             PlaceholderText="https://forge.example.com:50051"
+                             Text="{x:Bind Vm.ServerUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <TextBox Header="Username"
+                             Text="{x:Bind Vm.Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <PasswordBox Header="Personal Access Token (fpat_…)"
+                                 Password="{x:Bind Vm.Token, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button Content="Sign in" Style="{StaticResource AccentButtonStyle}"
+                                Command="{x:Bind Vm.SignInCommand}" />
+                        <TextBlock Text="{x:Bind Vm.SignInStatus, Mode=OneWay}" VerticalAlignment="Center" Opacity="0.8" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource FgCard}">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="About" Style="{StaticResource FgH2}" />
+                    <TextBlock Text="Forge GUI 0.1.0 (P0 prototype, mock data)" Style="{StaticResource FgCaption}" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

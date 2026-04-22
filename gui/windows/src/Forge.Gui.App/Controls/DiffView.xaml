@@ -1,0 +1,115 @@
+<UserControl
+    x:Class="Forge.Gui.App.Controls.DiffView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:Forge.Gui.Core.ViewModels"
+    xmlns:models="using:Forge.Gui.Core.Models"
+    xmlns:conv="using:Forge.Gui.App.Converters">
+
+    <UserControl.Resources>
+        <conv:DiffLineKindToBackgroundConverter x:Key="DiffKindBg" />
+        <conv:DiffLineNumberFormatter x:Key="LineNo" />
+    </UserControl.Resources>
+
+    <Grid>
+        <!-- Empty state -->
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" Opacity="0.6"
+                    Visibility="{x:Bind Vm.Path, Mode=OneWay, Converter={StaticResource NullToCollapsed}, ConverterParameter=invert}">
+            <FontIcon Glyph="&#xE943;" FontSize="32" />
+            <TextBlock Text="Select a file to preview diff" HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <!-- Header + content -->
+        <Grid Visibility="{x:Bind Vm.Path, Mode=OneWay, Converter={StaticResource NullToCollapsed}}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <StackPanel Padding="0,0,0,8" Spacing="2">
+                <TextBlock Text="{x:Bind Vm.HeaderLabel, Mode=OneWay}" FontWeight="SemiBold" />
+                <TextBlock Style="{StaticResource FgCaption}"
+                           Visibility="{x:Bind Vm.IsBinary, Mode=OneWay}">
+                    Binary asset — property-level diff below
+                </TextBlock>
+            </StackPanel>
+
+            <!-- Text diff -->
+            <ScrollViewer Grid.Row="1"
+                          Visibility="{x:Bind Vm.IsBinary, Mode=OneWay, Converter={StaticResource BoolNot}}">
+                <ItemsRepeater ItemsSource="{x:Bind Vm.Lines, Mode=OneWay}">
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate x:DataType="vm:DiffHunkLine">
+                            <Grid Background="{x:Bind Kind, Converter={StaticResource DiffKindBg}}"
+                                  Padding="8,0,8,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="48" />
+                                    <ColumnDefinition Width="48" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{x:Bind OldLineNo, Converter={StaticResource LineNo}}"
+                                           FontFamily="Cascadia Mono" Opacity="0.5" TextAlignment="Right" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind NewLineNo, Converter={StaticResource LineNo}}"
+                                           FontFamily="Cascadia Mono" Opacity="0.5" TextAlignment="Right" />
+                                <TextBlock Grid.Column="2" Text="{x:Bind Text}" FontFamily="Cascadia Mono" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+            </ScrollViewer>
+
+            <!-- Asset property diff -->
+            <ScrollViewer Grid.Row="1"
+                          Visibility="{x:Bind Vm.IsBinary, Mode=OneWay}">
+                <StackPanel Spacing="16">
+                    <StackPanel Spacing="4"
+                                Visibility="{x:Bind Vm.AssetMetadata, Mode=OneWay, Converter={StaticResource NullToCollapsed}}">
+                        <TextBlock Text="Asset metadata" Style="{StaticResource FgH2}" />
+                        <Grid ColumnSpacing="16" RowSpacing="2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Text="Class" Opacity="0.7" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind Vm.AssetMetadata.AssetClass, Mode=OneWay, FallbackValue=''}" />
+                            <TextBlock Grid.Row="1" Text="Engine" Opacity="0.7" />
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{x:Bind Vm.AssetMetadata.EngineVersion, Mode=OneWay, FallbackValue=''}" />
+                            <TextBlock Grid.Row="2" Text="Size" Opacity="0.7" />
+                            <TextBlock Grid.Row="2" Grid.Column="1" Text="{x:Bind Vm.AssetMetadata.FileSize, Mode=OneWay}" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Property deltas" Style="{StaticResource FgH2}" />
+                        <ItemsRepeater ItemsSource="{x:Bind Vm.AssetDeltas, Mode=OneWay}">
+                            <ItemsRepeater.ItemTemplate>
+                                <DataTemplate x:DataType="models:AssetPropertyDelta">
+                                    <Grid Padding="0,4,0,4" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="220" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{x:Bind PropertyPath}" FontFamily="Cascadia Mono" FontSize="12" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind OldValue, FallbackValue=''}"
+                                                   Foreground="{ThemeResource FgDeletedBrush}" FontFamily="Cascadia Mono" FontSize="12" />
+                                        <TextBlock Grid.Column="2" Text="{x:Bind NewValue, FallbackValue=''}"
+                                                   Foreground="{ThemeResource FgAddedBrush}" FontFamily="Cascadia Mono" FontSize="12" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </StackPanel>
+
+                    <Button Content="Open in Unreal Editor" HorizontalAlignment="Left"
+                            Click="OnOpenInUeClicked" />
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+</UserControl>

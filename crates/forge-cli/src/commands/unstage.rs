@@ -6,7 +6,13 @@ use std::path::Path;
 
 pub fn run(paths: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ws = Workspace::discover(&cwd)?;
+    run_in(&cwd, paths)
+}
+
+/// FFI-facing entry: unstage the given paths rooted at `cwd` without
+/// mutating process CWD. Matches the semantics of `run` exactly.
+pub fn run_in(cwd: &std::path::Path, paths: Vec<String>) -> Result<()> {
+    let ws = Workspace::discover(cwd)?;
     let mut index = Index::load(&ws.forge_dir().join("index"))?;
 
     // Build set of paths from previous commit to restore hash on unstage.

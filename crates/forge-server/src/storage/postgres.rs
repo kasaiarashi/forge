@@ -315,6 +315,27 @@ impl MetadataBackend for PgMetadataBackend {
         force: bool,
     ) -> Result<bool> {
         let mut conn = self.conn()?;
+
+        // `new_hash == 0` is the sentinel for "delete this ref" — mirrors
+        // git's `push <remote> :branch` semantics. See the sqlite impl
+        // in db.rs for the full rationale; semantics are identical here.
+        let new_is_zero = new_hash.iter().all(|&b| b == 0);
+        if new_is_zero {
+            let old_is_zero = old_hash.iter().all(|&b| b == 0);
+            if force || old_is_zero {
+                conn.execute(
+                    "DELETE FROM refs WHERE repo = $1 AND name = $2",
+                    &[&repo, &name],
+                )?;
+                return Ok(true);
+            }
+            let n = conn.execute(
+                "DELETE FROM refs WHERE repo = $1 AND name = $2 AND hash = $3",
+                &[&repo, &name, &old_hash],
+            )?;
+            return Ok(n > 0);
+        }
+
         if force {
             let n = conn.execute(
                 "INSERT INTO refs (repo, name, hash) VALUES ($1, $2, $3)

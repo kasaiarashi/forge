@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Forge.Gui.App</RootNamespace>
+    <AssemblyName>Forge.Gui.App</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <EnableDefaultContentItems>false</EnableDefaultContentItems>
+    <DefaultLanguage>en-US</DefaultLanguage>
+
+    <!--
+      Dev builds: unpackaged (launches via Forge.Gui.App.exe with
+      Windows App SDK bootstrapper auto-initialize).
+      CI release builds pass `/p:WindowsPackageType=MSIX /p:AppxPackage=true`
+      to produce a signed .msix instead.
+    -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- Disable MRT resource generation for unpackaged builds; the
+         MrtCore PriGen task requires VS-installed Appx BuildTools
+         that aren't shipped with the .NET SDK. -->
+    <EnableMrtResourceGeneration>false</EnableMrtResourceGeneration>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Markdig" Version="0.37.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260416003" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <Manifest Include="$(ApplicationManifest)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Forge.Gui.Core\Forge.Gui.Core.csproj" />
+    <ProjectReference Include="..\Forge.Gui.Ffi\Forge.Gui.Ffi.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Only consumed when WindowsPackageType=MSIX (release builds). -->
+    <None Include="Package.appxmanifest" />
+    <Content Include="Assets\**\*" />
+  </ItemGroup>
+</Project>

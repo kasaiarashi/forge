@@ -28,6 +28,13 @@ anyhow.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+# rustls is pulled in transitively by tonic, but forge-ffi needs a
+# direct dependency so it can install the aws-lc-rs default
+# CryptoProvider at session-open time. Without it, the first rustls
+# `ClientConfig::new()` on any path (status → fetch_server_info,
+# push/pull, locks) panics with "no process-level CryptoProvider",
+# which tears down the hosting process (WinUI GUI, UE editor).
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [dev-dependencies]
 tempfile.workspace = true
