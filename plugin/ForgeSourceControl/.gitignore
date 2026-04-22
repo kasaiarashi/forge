@@ -13,6 +13,11 @@ Saved/
 !Plugins/ForgeSourceControl/Binaries/
 !Plugins/ForgeSourceControl/Binaries/**
 
+# ...but NOT forge_ffi.dll. That's produced by `cargo build -p forge-ffi`
+# and placed by the Windows client installer at install time; a tracked
+# copy would silently ship a stale DLL in Fab zips.
+Plugins/ForgeSourceControl/Binaries/Win64/forge_ffi.dll
+
 # OS
 Thumbs.db
 .DS_Store
