@@ -1457,6 +1457,30 @@ impl MetadataDb {
         dispatch_pg!(self, update_ref, repo, name, old_hash, new_hash, force);
         let conn = self.conn()?;
 
+        // `new_hash == 0` is the sentinel for "delete this ref" — mirrors
+        // git's `push <remote> :branch` / `push --delete` semantics. When
+        // `force` is set OR `old_hash` is also zero we delete
+        // unconditionally (idempotent: returns true even when the ref was
+        // already gone so `forge push --delete` stays convergent). When
+        // `old_hash` is non-zero we CAS on it so concurrent writers can't
+        // race us into erasing work they just pushed.
+        let new_is_zero = new_hash.iter().all(|&b| b == 0);
+        if new_is_zero {
+            let old_is_zero = old_hash.iter().all(|&b| b == 0);
+            if force || old_is_zero {
+                conn.execute(
+                    "DELETE FROM refs WHERE repo = ?1 AND name = ?2",
+                    rusqlite::params![repo, name],
+                )?;
+                return Ok(true);
+            }
+            let affected = conn.execute(
+                "DELETE FROM refs WHERE repo = ?1 AND name = ?2 AND hash = ?3",
+                rusqlite::params![repo, name, old_hash],
+            )?;
+            return Ok(affected > 0);
+        }
+
         if force {
             // Force overwrite — INSERT new row or replace existing one. We
             // don't return false on a no-op overwrite because callers want
@@ -2497,6 +2521,60 @@ mod tests {
         );
     }
 
+    // ── delete path (new_hash = zero) ─────────────────────────────────────
+
+    #[test]
+    fn delete_with_matching_old_hash_removes_ref() {
+        let (_tmp, db) = fresh_db();
+        db.update_ref("alice/del", "refs/heads/feat", &ZERO, &h(0xAA), false)
+            .unwrap();
+        let ok = db
+            .update_ref("alice/del", "refs/heads/feat", &h(0xAA), &ZERO, false)
+            .unwrap();
+        assert!(ok);
+        assert!(db.get_ref("alice/del", "refs/heads/feat").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_with_stale_old_hash_is_rejected() {
+        let (_tmp, db) = fresh_db();
+        db.update_ref("alice/del", "refs/heads/feat", &ZERO, &h(0xAA), false)
+            .unwrap();
+        // Caller thinks the tip is 0xBB but it's actually 0xAA → CAS miss.
+        let ok = db
+            .update_ref("alice/del", "refs/heads/feat", &h(0xBB), &ZERO, false)
+            .unwrap();
+        assert!(!ok);
+        // Ref still present.
+        assert_eq!(
+            db.get_ref("alice/del", "refs/heads/feat").unwrap().unwrap(),
+            h(0xAA)
+        );
+    }
+
+    #[test]
+    fn force_delete_ignores_stale_old_hash() {
+        let (_tmp, db) = fresh_db();
+        db.update_ref("alice/del", "refs/heads/feat", &ZERO, &h(0xAA), false)
+            .unwrap();
+        let ok = db
+            .update_ref("alice/del", "refs/heads/feat", &h(0xBB), &ZERO, true)
+            .unwrap();
+        assert!(ok);
+        assert!(db.get_ref("alice/del", "refs/heads/feat").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_when_absent_is_idempotent_with_zero_old_hash() {
+        let (_tmp, db) = fresh_db();
+        // Never created — deleting is a no-op that still reports success
+        // so `forge push --delete` stays convergent on retry.
+        let ok = db
+            .update_ref("alice/del", "refs/heads/ghost", &ZERO, &ZERO, false)
+            .unwrap();
+        assert!(ok);
+    }
+
     #[test]
     fn force_with_same_hash_is_a_noop_but_reports_success() {
         let (_tmp, db) = fresh_db();
@@ -2806,8 +2884,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = Arc::new(MetadataDb::open(&tmp.path().join("forge.db")).unwrap());
         db.create_repo("alice/pool", "").unwrap();
-        // Seed a few refs so readers have something to scan.
-        for b in 0u8..8 {
+        // Seed a few refs so readers have something to scan. Start at
+        // byte 1 — `h(0)` is all-zero bytes which `update_ref` now
+        // treats as the delete sentinel, so seeding with it would
+        // silently drop the ref instead of inserting it.
+        for b in 1u8..=8 {
             db.update_ref(
                 "alice/pool",
                 &format!("refs/heads/b{b}"),

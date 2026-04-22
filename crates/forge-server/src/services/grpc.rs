@@ -1257,8 +1257,14 @@ impl ForgeService for ForgeGrpcService {
         // Fast-forward guard: for non-force updates against an existing ref,
         // require `new_hash` to be a descendant of `old_hash`. Otherwise a
         // stale client could rewind the branch with a behind-tip.
+        //
+        // Deletes (new_hash == 0) are not subject to the FF guard — they
+        // remove the tip by definition. The DB layer still enforces CAS
+        // on the deletion path when `old_hash` is non-zero, so a stale
+        // client can't blow away work it didn't know about.
         let old_is_zero = req.old_hash.iter().all(|&b| b == 0);
-        if !req.force && !old_is_zero {
+        let new_is_zero = req.new_hash.iter().all(|&b| b == 0);
+        if !req.force && !old_is_zero && !new_is_zero {
             let old = ForgeHash::from_hex(&hex::encode(&req.old_hash))
                 .map_err(|e| internal_err("grpc", e))?;
             let new = ForgeHash::from_hex(&hex::encode(&req.new_hash))
@@ -1279,7 +1285,7 @@ impl ForgeService for ForgeGrpcService {
         // Check push triggers on successful ref update.
         if success {
             audit!(
-                action = "ref.update",
+                action = if new_is_zero { "ref.delete" } else { "ref.update" },
                 outcome = "success",
                 actor_id = caller.user_id(),
                 repo = repo,
@@ -1288,10 +1294,15 @@ impl ForgeService for ForgeGrpcService {
                 new_hash = %hex::encode(&req.new_hash),
                 force = req.force
             );
-            if let Some(engine_tx) = &self.workflow_engine {
-                crate::services::actions::trigger::check_push_triggers(
-                    &self.db, engine_tx, repo, &req.ref_name, &req.new_hash,
-                );
+            // Deletes don't trigger push workflows — there's no new commit
+            // to run against, and the zero hash isn't resolvable in the
+            // object store.
+            if !new_is_zero {
+                if let Some(engine_tx) = &self.workflow_engine {
+                    crate::services::actions::trigger::check_push_triggers(
+                        &self.db, engine_tx, repo, &req.ref_name, &req.new_hash,
+                    );
+                }
             }
         }
 
