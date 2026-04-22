@@ -50,6 +50,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
 
+use forge_core::hash::ForgeHash;
 use forge_core::workspace::Workspace;
 
 // ── Public C ABI types ──────────────────────────────────────────────────────
@@ -165,6 +166,7 @@ mod session {
         /// threads is plenty for the editor — push/pull saturate a
         /// link on the server CPU, not the client.
         pub fn runtime(&self) -> Result<&tokio::runtime::Runtime, anyhow::Error> {
+            super::install_default_crypto_provider();
             let rt = self.runtime.get_or_init(|| {
                 let built = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
@@ -206,6 +208,27 @@ mod session {
 
 use session::Session;
 
+/// Install the rustls process-level `CryptoProvider` (aws-lc-rs)
+/// idempotently. Binary crates in this workspace (`forge-cli`,
+/// `forge-server`, `forge-agent`) do this in their own `main()`, but
+/// `forge-ffi` is a cdylib loaded by WinUI / UE / external agents —
+/// nothing of ours runs at startup. Any path that constructs a
+/// `rustls::ClientConfig` without a provider installed panics with
+/// "Could not automatically determine the process-level CryptoProvider";
+/// under cdylib hosting that tears the host process down.
+///
+/// Must be called before any code that touches tonic TLS. Safe to call
+/// repeatedly; `Once` keeps it to one real install.
+fn install_default_crypto_provider() {
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        // `install_default` returns Err if a provider is already set —
+        // swallow it, we're happy as long as *something* is installed.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 // ── Exported functions ──────────────────────────────────────────────────────
 
 /// Library version (Cargo's `CARGO_PKG_VERSION`). Returned as a static
@@ -239,6 +262,12 @@ pub unsafe extern "C" fn forge_session_open(
     out_err: *mut forge_error_t,
 ) -> *mut forge_session_t {
     catch_unwind(AssertUnwindSafe(|| {
+        // Install the rustls provider before any later code path can
+        // build a TLS client. `compute_status_json` spawns its own
+        // tokio runtime + gRPC connect inline — it never touches
+        // `Session::runtime()`, so the install can't live there alone.
+        install_default_crypto_provider();
+
         let path_str = match cstr_to_str(workspace_path, "workspace_path", out_err) {
             Some(s) => s,
             None => return ptr::null_mut(),
@@ -522,6 +551,488 @@ fn build_workspace_info_json(sess: &Session) -> Result<String, anyhow::Error> {
         "workflow": workflow,
     })
     .to_string())
+}
+
+// ── Log / branch / asset-info (read-only) ───────────────────────────────────
+//
+// These reuse forge-core primitives directly instead of going through
+// `forge_cli::commands::*::run`, which all discover the workspace via
+// `std::env::current_dir()` — unsafe under concurrent FFI callers.
+
+/// Enumerate commits reachable from HEAD (first-parent walk) as a JSON
+/// array of `{hash, short_hash, parents[], author{name,email}, timestamp, message}`.
+///
+/// `limit` caps the walk; 0 means "no cap" but still stops at the
+/// graph boundary. Returns `"[]"` on an empty repo. Null on error.
+///
+/// # Safety
+/// `session` non-null; `out_err` nullable writable. Success values
+/// must be freed via [`forge_string_free`].
+#[no_mangle]
+pub unsafe extern "C" fn forge_log_json(
+    session: *mut forge_session_t,
+    limit: u32,
+    out_err: *mut forge_error_t,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return ptr::null_mut();
+        };
+        match build_log_json(sess, limit) {
+            Ok(json) => {
+                clear_error(out_err);
+                string_to_raw(json, out_err)
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                ptr::null_mut()
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_log_json",
+        );
+        ptr::null_mut()
+    })
+}
+
+fn build_log_json(sess: &Session, limit: u32) -> Result<String, anyhow::Error> {
+    use serde_json::json;
+
+    let head = sess
+        .workspace
+        .head_snapshot()
+        .map_err(|e| anyhow::anyhow!("read HEAD: {e}"))?;
+
+    let mut entries = Vec::<serde_json::Value>::new();
+    let mut current = head;
+    let mut remaining = if limit == 0 { u32::MAX } else { limit };
+
+    while !current.is_zero() && remaining > 0 {
+        let snap = sess
+            .workspace
+            .object_store
+            .get_snapshot(&current)
+            .map_err(|e| anyhow::anyhow!("load snapshot {}: {e}", current.to_hex()))?;
+
+        let parents: Vec<String> = snap.parents.iter().map(ForgeHash::to_hex).collect();
+        entries.push(json!({
+            "hash": current.to_hex(),
+            "short_hash": current.short(),
+            "parents": parents,
+            "author": {
+                "name": snap.author.name,
+                "email": snap.author.email,
+            },
+            "timestamp": snap.timestamp.to_rfc3339(),
+            "message": snap.message,
+        }));
+
+        remaining = remaining.saturating_sub(1);
+        current = snap.parents.first().copied().unwrap_or(ForgeHash::ZERO);
+    }
+
+    Ok(serde_json::Value::Array(entries).to_string())
+}
+
+/// List branches as a JSON array of
+/// `{name, is_current, is_remote, tip_hash}`.
+///
+/// Remote-tracking refs aren't enumerated yet (forge-core stores them
+/// differently); `is_remote` is always false today but the shape is
+/// stable for when they're added.
+///
+/// # Safety
+/// `session` non-null; `out_err` nullable writable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_branch_list_json(
+    session: *mut forge_session_t,
+    out_err: *mut forge_error_t,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return ptr::null_mut();
+        };
+        match build_branch_list_json(sess) {
+            Ok(json) => {
+                clear_error(out_err);
+                string_to_raw(json, out_err)
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                ptr::null_mut()
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_branch_list_json",
+        );
+        ptr::null_mut()
+    })
+}
+
+fn build_branch_list_json(sess: &Session) -> Result<String, anyhow::Error> {
+    use serde_json::json;
+
+    let current = sess
+        .workspace
+        .current_branch()
+        .map_err(|e| anyhow::anyhow!("read current branch: {e}"))?;
+    let names = sess
+        .workspace
+        .list_branches()
+        .map_err(|e| anyhow::anyhow!("list branches: {e}"))?;
+
+    let entries: Vec<_> = names
+        .into_iter()
+        .map(|name| {
+            let tip = sess
+                .workspace
+                .get_branch_tip(&name)
+                .ok()
+                .map(|h| h.to_hex())
+                .unwrap_or_default();
+            json!({
+                "name": name,
+                "is_current": current.as_deref() == Some(name.as_str()),
+                "is_remote": false,
+                "tip_hash": tip,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::Value::Array(entries).to_string())
+}
+
+/// Return a JSON document with `.uasset`/`.umap` metadata extracted
+/// from `path` (resolved relative to the workspace root unless
+/// absolute). Shape: `{path, asset_class, engine_version, package_flags[], dependencies[], file_size}`.
+///
+/// Returns null + `FORGE_ERR_NOT_FOUND` if the file is missing, or
+/// `FORGE_ERR_IO` if the header is not a valid UE asset (garbage
+/// input, truncated file). Success values must be freed via
+/// [`forge_string_free`].
+///
+/// # Safety
+/// `session` non-null; `path` non-null UTF-8 C string; `out_err` nullable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_asset_info_json(
+    session: *mut forge_session_t,
+    path: *const c_char,
+    out_err: *mut forge_error_t,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return ptr::null_mut();
+        };
+        let Some(path_str) = cstr_to_str(path, "path", out_err) else {
+            return ptr::null_mut();
+        };
+        match build_asset_info_json(sess, path_str) {
+            Ok(json) => {
+                clear_error(out_err);
+                string_to_raw(json, out_err)
+            }
+            Err(e) => {
+                let code = if e.to_string().contains("not found") {
+                    forge_status_t::FORGE_ERR_NOT_FOUND
+                } else {
+                    forge_status_t::FORGE_ERR_IO
+                };
+                set_error(out_err, code, &e.to_string());
+                ptr::null_mut()
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_asset_info_json",
+        );
+        ptr::null_mut()
+    })
+}
+
+fn build_asset_info_json(sess: &Session, path: &str) -> Result<String, anyhow::Error> {
+    use serde_json::json;
+
+    let abs = if PathBuf::from(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        sess.workspace.root.join(path)
+    };
+
+    if !abs.exists() {
+        return Err(anyhow::anyhow!("not found: {}", abs.display()));
+    }
+
+    let bytes =
+        std::fs::read(&abs).map_err(|e| anyhow::anyhow!("read {}: {e}", abs.display()))?;
+    let file_size = bytes.len() as u64;
+
+    let meta = forge_core::uasset::parse_uasset(&bytes)
+        .ok_or_else(|| anyhow::anyhow!("not a valid UE asset header: {}", abs.display()))?;
+
+    Ok(json!({
+        "path": path,
+        "asset_class": meta.asset_class,
+        "engine_version": meta.engine_version,
+        "package_flags": meta.package_flags,
+        "dependencies": meta.dependencies,
+        "file_size": file_size,
+    })
+    .to_string())
+}
+
+// ── Write ops: unstage, switch_branch, branch_create, branch_delete ────────
+
+/// Unstage the given paths (JSON array of UTF-8 strings). Mirrors
+/// `forge unstage <paths>`; dot-path `["."]` unstages everything.
+///
+/// # Safety
+/// `session` non-null; `paths_json` non-null NUL-terminated UTF-8 JSON
+/// array; `out_err` nullable writable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_unstage(
+    session: *mut forge_session_t,
+    paths_json: *const c_char,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        let Some(json_str) = cstr_to_str(paths_json, "paths_json", out_err) else {
+            return 1;
+        };
+        let paths: Vec<String> = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_error(
+                    out_err,
+                    forge_status_t::FORGE_ERR_ARG,
+                    &format!("paths_json must be a JSON array of strings: {e}"),
+                );
+                return 1;
+            }
+        };
+        match forge_cli::commands::unstage::run_in(&sess.workspace.root, paths) {
+            Ok(()) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                set_error(out_err, forge_status_t::FORGE_ERR_IO, &e.to_string());
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_unstage",
+        );
+        1
+    })
+}
+
+/// Switch to branch `name`. When `create != 0`, creates the branch at
+/// the current HEAD first (like `forge switch -c`). Returns 0 on
+/// success. Fails with `FORGE_ERR_CONFLICT` when the working tree has
+/// uncommitted changes, `FORGE_ERR_NOT_FOUND` when the branch doesn't
+/// exist and `create` is false.
+///
+/// # Safety
+/// `session` non-null; `name` non-null UTF-8 C string; `out_err` nullable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_switch(
+    session: *mut forge_session_t,
+    name: *const c_char,
+    create: c_int,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        let Some(name_str) = cstr_to_str(name, "name", out_err) else {
+            return 1;
+        };
+        match forge_cli::commands::switch::run_with_create_in(
+            &sess.workspace.root,
+            name_str.to_string(),
+            create != 0,
+        ) {
+            Ok(()) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let code = if msg.contains("uncommitted changes") {
+                    forge_status_t::FORGE_ERR_CONFLICT
+                } else if msg.contains("does not exist") {
+                    forge_status_t::FORGE_ERR_NOT_FOUND
+                } else {
+                    forge_status_t::FORGE_ERR_IO
+                };
+                set_error(out_err, code, &msg);
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_switch",
+        );
+        1
+    })
+}
+
+/// Create a new branch `name` at the current HEAD. Fails with
+/// `FORGE_ERR_CONFLICT` when the branch already exists, or
+/// `FORGE_ERR_IO` when HEAD cannot be resolved.
+///
+/// # Safety
+/// `session` non-null; `name` non-null UTF-8 C string; `out_err` nullable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_branch_create(
+    session: *mut forge_session_t,
+    name: *const c_char,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        let Some(name_str) = cstr_to_str(name, "name", out_err) else {
+            return 1;
+        };
+        match run_branch_create(sess, name_str) {
+            Ok(()) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                let code = if e.to_string().contains("already exists") {
+                    forge_status_t::FORGE_ERR_CONFLICT
+                } else {
+                    forge_status_t::FORGE_ERR_IO
+                };
+                set_error(out_err, code, &e.to_string());
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_branch_create",
+        );
+        1
+    })
+}
+
+/// Delete branch `name`. `force != 0` skips the safety check that
+/// prevents deleting the current branch. Returns 0 on success,
+/// non-zero otherwise (branch missing → `FORGE_ERR_NOT_FOUND`, current
+/// branch without force → `FORGE_ERR_CONFLICT`).
+///
+/// # Safety
+/// `session` non-null; `name` non-null UTF-8 C string; `out_err` nullable.
+#[no_mangle]
+pub unsafe extern "C" fn forge_branch_delete(
+    session: *mut forge_session_t,
+    name: *const c_char,
+    force: c_int,
+    out_err: *mut forge_error_t,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(sess) = session_ref(session, out_err) else {
+            return 1;
+        };
+        let Some(name_str) = cstr_to_str(name, "name", out_err) else {
+            return 1;
+        };
+        match run_branch_delete(sess, name_str, force != 0) {
+            Ok(()) => {
+                clear_error(out_err);
+                0
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let code = if msg.contains("not found") {
+                    forge_status_t::FORGE_ERR_NOT_FOUND
+                } else if msg.contains("current branch") {
+                    forge_status_t::FORGE_ERR_CONFLICT
+                } else {
+                    forge_status_t::FORGE_ERR_IO
+                };
+                set_error(out_err, code, &msg);
+                1
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        set_error(
+            out_err,
+            forge_status_t::FORGE_ERR_INTERNAL,
+            "panic in forge_branch_delete",
+        );
+        1
+    })
+}
+
+fn run_branch_create(sess: &Session, name: &str) -> Result<(), anyhow::Error> {
+    // Match CLI behavior: refuse if the ref already exists; otherwise
+    // point a new refs/heads/<name> file at the current HEAD snapshot.
+    let ref_path = sess.workspace.forge_dir().join("refs").join("heads").join(name);
+    if ref_path.exists() {
+        return Err(anyhow::anyhow!("branch '{name}' already exists"));
+    }
+    let head = sess
+        .workspace
+        .head_snapshot()
+        .map_err(|e| anyhow::anyhow!("read HEAD: {e}"))?;
+    if head.is_zero() {
+        return Err(anyhow::anyhow!(
+            "cannot create branch '{name}' before the first commit"
+        ));
+    }
+    sess.workspace
+        .set_branch_tip(name, &head)
+        .map_err(|e| anyhow::anyhow!("set branch tip: {e}"))?;
+    Ok(())
+}
+
+fn run_branch_delete(sess: &Session, name: &str, force: bool) -> Result<(), anyhow::Error> {
+    if !force {
+        let current = sess
+            .workspace
+            .current_branch()
+            .map_err(|e| anyhow::anyhow!("read current branch: {e}"))?;
+        if current.as_deref() == Some(name) {
+            return Err(anyhow::anyhow!("cannot delete the current branch '{name}'"));
+        }
+    }
+    let ref_path = sess.workspace.forge_dir().join("refs").join("heads").join(name);
+    if !ref_path.exists() {
+        return Err(anyhow::anyhow!("branch '{name}' not found"));
+    }
+    std::fs::remove_file(&ref_path)
+        .map_err(|e| anyhow::anyhow!("remove {}: {e}", ref_path.display()))?;
+    Ok(())
 }
 
 // ── Index / commit / push / pull ────────────────────────────────────────────
@@ -1120,23 +1631,16 @@ fn classify_lock_error(e: &anyhow::Error) -> forge_status_t {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn build_status_json(sess: &Session) -> Result<String, anyhow::Error> {
-    use serde_json::json;
-
-    // HEAD: read .forge/HEAD and parse into the branch|detached shape.
-    let head = read_head_json(&sess.workspace)?;
-
-    // Phase 4a is the scaffold — the real dirty-file walk lands in
-    // 4b once the index + ignore glue is reused through the session.
-    // Returning an empty list here keeps the JSON schema stable while
-    // the fuller implementation follows.
-    Ok(json!({
-        "workspace_root": sess.workspace.root.display().to_string(),
-        "head": head,
-        "dirty": serde_json::Value::Array(Vec::new()),
-    })
-    .to_string())
+    // Delegate to the CLI's shared status walk so the GUI + plugin
+    // and `forge status --json` cannot drift. Path resolution goes
+    // through the session's workspace root, not process CWD — safe
+    // under concurrent callers sharing the loaded DLL.
+    let value = forge_cli::commands::status::compute_status_json(&sess.workspace.root)
+        .map_err(|e| anyhow::anyhow!("compute_status: {e}"))?;
+    Ok(value.to_string())
 }
 
+#[allow(dead_code)] // kept for parity with older FFI callers until phase 5.
 fn read_head_json(ws: &Workspace) -> Result<serde_json::Value, anyhow::Error> {
     use serde_json::json;
     let head_path = ws.forge_dir().join("HEAD");
@@ -1254,7 +1758,11 @@ pub extern "C" fn forge_abi_version() -> c_int {
     //   3 — index + commit + push + pull via forge_cli::ops.
     //   4 — lock-event subscription (subscribe + poll) + LockEvent
     //       broadcast hub on the server.
-    4
+    //   5 — log_json, branch_list_json, asset_info_json (read-only
+    //       ops reusing forge-core primitives; no run_in plumbing).
+    //   6 — status_json wired to compute_status_json (real dirty walk);
+    //       unstage, switch, branch_create, branch_delete.
+    6
 }
 
 // ── Tests (Rust-side; exercise the FFI contract as a C caller would) ────────
@@ -1353,7 +1861,7 @@ mod tests {
     }
 
     #[test]
-    fn status_json_reports_branch_head_on_fresh_init() {
+    fn status_json_reports_branch_on_fresh_init() {
         with_workspace(|root| {
             let c_path = CString::new(root.to_str().unwrap()).unwrap();
             let mut err = forge_error_t::default();
@@ -1371,11 +1879,18 @@ mod tests {
                 forge_session_close(sess);
             }
 
-            // Fresh init points HEAD at refs/heads/main.
+            // The new compute_status_json shape: workspace_root, branch,
+            // staged_*/modified/deleted/untracked arrays, locked array,
+            // ahead/behind counters. Fresh init has branch=main and
+            // everything empty.
             let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-            assert_eq!(v["head"]["kind"], "branch");
-            assert_eq!(v["head"]["name"], "main");
-            assert!(v["dirty"].is_array());
+            assert_eq!(v["branch"], "main");
+            assert!(v["staged_new"].is_array());
+            assert!(v["modified"].is_array());
+            assert!(v["untracked"].is_array());
+            assert!(v["locked"].is_array());
+            assert_eq!(v["ahead"], 0);
+            assert_eq!(v["behind"], 0);
         });
     }
 
@@ -1462,8 +1977,164 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_bumped_to_four() {
-        assert_eq!(forge_abi_version(), 4);
+    fn abi_version_bumped_to_six() {
+        assert_eq!(forge_abi_version(), 6);
+    }
+
+    #[test]
+    fn branch_create_and_delete_roundtrip() {
+        with_workspace(|root| {
+            // Seed a commit so HEAD isn't zero (branch create needs a commit).
+            let readme = root.join("README.md");
+            std::fs::write(&readme, b"hello").unwrap();
+            forge_cli::commands::add::run_in(&root, vec!["README.md".into()]).unwrap();
+            forge_cli::commands::snapshot::run_in(
+                &root,
+                Some("initial".into()),
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let name = CString::new("feature/xyz").unwrap();
+
+            // Create it.
+            let rc = unsafe { forge_branch_create(sess, name.as_ptr(), &mut err) };
+            assert_eq!(rc, 0, "create should succeed");
+            assert_eq!(err.code, forge_status_t::FORGE_OK);
+
+            // Second create should conflict.
+            let rc2 = unsafe { forge_branch_create(sess, name.as_ptr(), &mut err) };
+            assert_eq!(rc2, 1);
+            assert_eq!(err.code, forge_status_t::FORGE_ERR_CONFLICT);
+            unsafe { forge_error_free(&mut err); }
+
+            // Delete it.
+            let rc3 = unsafe { forge_branch_delete(sess, name.as_ptr(), 0, &mut err) };
+            assert_eq!(rc3, 0, "delete should succeed");
+
+            // Second delete = NOT_FOUND.
+            let rc4 = unsafe { forge_branch_delete(sess, name.as_ptr(), 0, &mut err) };
+            assert_eq!(rc4, 1);
+            assert_eq!(err.code, forge_status_t::FORGE_ERR_NOT_FOUND);
+            unsafe {
+                forge_error_free(&mut err);
+                forge_session_close(sess);
+            }
+        });
+    }
+
+    #[test]
+    fn unstage_no_op_on_clean_workspace_succeeds() {
+        with_workspace(|root| {
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let payload = CString::new(r#"["."]"#).unwrap();
+            let rc = unsafe { forge_unstage(sess, payload.as_ptr(), &mut err) };
+            assert_eq!(rc, 0);
+            unsafe { forge_session_close(sess); }
+        });
+    }
+
+    #[test]
+    fn log_json_on_empty_repo_returns_empty_array() {
+        with_workspace(|root| {
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let ptr = unsafe { forge_log_json(sess, 10, &mut err) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe {
+                forge_string_free(ptr);
+                forge_session_close(sess);
+            }
+            // Fresh workspace has no commits yet — HEAD points at main
+            // but the branch file is zero.
+            let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+            assert!(v.is_array());
+            assert_eq!(v.as_array().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn branch_list_json_has_main_on_fresh_init() {
+        with_workspace(|root| {
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let ptr = unsafe { forge_branch_list_json(sess, &mut err) };
+            assert!(!ptr.is_null(), "branch list must succeed on fresh init");
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe {
+                forge_string_free(ptr);
+                forge_session_close(sess);
+            }
+            let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+            assert!(v.is_array());
+            let arr = v.as_array().unwrap();
+            assert!(
+                arr.iter().any(|b| b["name"] == "main" && b["is_current"] == true),
+                "expected main to be present + current: {s}"
+            );
+        });
+    }
+
+    #[test]
+    fn asset_info_not_found_errors_with_not_found() {
+        with_workspace(|root| {
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let asset_path = CString::new("Content/Missing.uasset").unwrap();
+            let ptr = unsafe { forge_asset_info_json(sess, asset_path.as_ptr(), &mut err) };
+            assert!(ptr.is_null());
+            assert_eq!(err.code, forge_status_t::FORGE_ERR_NOT_FOUND);
+            unsafe {
+                forge_error_free(&mut err);
+                forge_session_close(sess);
+            }
+        });
+    }
+
+    #[test]
+    fn asset_info_on_non_uasset_returns_io_error() {
+        with_workspace(|root| {
+            // Drop a file that isn't a UE asset and make sure we map
+            // the "header parse failed" path to FORGE_ERR_IO, not a
+            // silent null-without-error regression.
+            let junk = root.join("junk.uasset");
+            std::fs::write(&junk, b"not a real asset header").unwrap();
+
+            let c_path = CString::new(root.to_str().unwrap()).unwrap();
+            let mut err = forge_error_t::default();
+            let sess = unsafe { forge_session_open(c_path.as_ptr(), &mut err) };
+            assert!(!sess.is_null());
+
+            let asset_path = CString::new("junk.uasset").unwrap();
+            let ptr = unsafe { forge_asset_info_json(sess, asset_path.as_ptr(), &mut err) };
+            assert!(ptr.is_null());
+            assert_eq!(err.code, forge_status_t::FORGE_ERR_IO);
+            unsafe {
+                forge_error_free(&mut err);
+                forge_session_close(sess);
+            }
+        });
     }
 
     #[test]

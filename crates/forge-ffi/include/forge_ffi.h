@@ -178,6 +178,104 @@ char *forge_workspace_info_json(struct forge_session_t *session, struct forge_er
 char *forge_current_branch(struct forge_session_t *session, struct forge_error_t *out_err);
 
 /**
+ * Enumerate commits reachable from HEAD (first-parent walk) as a JSON
+ * array of `{hash, short_hash, parents[], author{name,email}, timestamp, message}`.
+ *
+ * `limit` caps the walk; 0 means "no cap" but still stops at the
+ * graph boundary. Returns `"[]"` on an empty repo. Null on error.
+ *
+ * # Safety
+ * `session` non-null; `out_err` nullable writable. Success values
+ * must be freed via [`forge_string_free`].
+ */
+char *forge_log_json(struct forge_session_t *session,
+                     uint32_t limit,
+                     struct forge_error_t *out_err);
+
+/**
+ * List branches as a JSON array of
+ * `{name, is_current, is_remote, tip_hash}`.
+ *
+ * Remote-tracking refs aren't enumerated yet (forge-core stores them
+ * differently); `is_remote` is always false today but the shape is
+ * stable for when they're added.
+ *
+ * # Safety
+ * `session` non-null; `out_err` nullable writable.
+ */
+char *forge_branch_list_json(struct forge_session_t *session, struct forge_error_t *out_err);
+
+/**
+ * Return a JSON document with `.uasset`/`.umap` metadata extracted
+ * from `path` (resolved relative to the workspace root unless
+ * absolute). Shape: `{path, asset_class, engine_version, package_flags[], dependencies[], file_size}`.
+ *
+ * Returns null + `FORGE_ERR_NOT_FOUND` if the file is missing, or
+ * `FORGE_ERR_IO` if the header is not a valid UE asset (garbage
+ * input, truncated file). Success values must be freed via
+ * [`forge_string_free`].
+ *
+ * # Safety
+ * `session` non-null; `path` non-null UTF-8 C string; `out_err` nullable.
+ */
+char *forge_asset_info_json(struct forge_session_t *session,
+                            const char *path,
+                            struct forge_error_t *out_err);
+
+/**
+ * Unstage the given paths (JSON array of UTF-8 strings). Mirrors
+ * `forge unstage <paths>`; dot-path `["."]` unstages everything.
+ *
+ * # Safety
+ * `session` non-null; `paths_json` non-null NUL-terminated UTF-8 JSON
+ * array; `out_err` nullable writable.
+ */
+int forge_unstage(struct forge_session_t *session,
+                  const char *paths_json,
+                  struct forge_error_t *out_err);
+
+/**
+ * Switch to branch `name`. When `create != 0`, creates the branch at
+ * the current HEAD first (like `forge switch -c`). Returns 0 on
+ * success. Fails with `FORGE_ERR_CONFLICT` when the working tree has
+ * uncommitted changes, `FORGE_ERR_NOT_FOUND` when the branch doesn't
+ * exist and `create` is false.
+ *
+ * # Safety
+ * `session` non-null; `name` non-null UTF-8 C string; `out_err` nullable.
+ */
+int forge_switch(struct forge_session_t *session,
+                 const char *name,
+                 int create,
+                 struct forge_error_t *out_err);
+
+/**
+ * Create a new branch `name` at the current HEAD. Fails with
+ * `FORGE_ERR_CONFLICT` when the branch already exists, or
+ * `FORGE_ERR_IO` when HEAD cannot be resolved.
+ *
+ * # Safety
+ * `session` non-null; `name` non-null UTF-8 C string; `out_err` nullable.
+ */
+int forge_branch_create(struct forge_session_t *session,
+                        const char *name,
+                        struct forge_error_t *out_err);
+
+/**
+ * Delete branch `name`. `force != 0` skips the safety check that
+ * prevents deleting the current branch. Returns 0 on success,
+ * non-zero otherwise (branch missing → `FORGE_ERR_NOT_FOUND`, current
+ * branch without force → `FORGE_ERR_CONFLICT`).
+ *
+ * # Safety
+ * `session` non-null; `name` non-null UTF-8 C string; `out_err` nullable.
+ */
+int forge_branch_delete(struct forge_session_t *session,
+                        const char *name,
+                        int force,
+                        struct forge_error_t *out_err);
+
+/**
  * Stage the given paths (JSON array of UTF-8 path strings). Paths
  * are resolved relative to the session's workspace root.
  *
