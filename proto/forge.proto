@@ -570,8 +570,13 @@ message CommitPushRequest {
     // each ref's old_hash and new_hash; mismatch fails the commit. Empty
     // means the server computes touched paths itself.
     repeated string touched_paths = 4;
+    // Bypass the server-side .forgeignore enforcement for this push.
+    // Caller still needs repo:write; the bypass is audit-logged. Use
+    // when ignore rules were added after the offending paths were
+    // already committed and rewriting history isn't practical.
+    bool bypass_forgeignore = 5;
 
-    reserved 5 to 15;
+    reserved 6 to 15;
 }
 
 message CommitPushResponse {

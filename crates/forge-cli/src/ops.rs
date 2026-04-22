@@ -98,7 +98,7 @@ pub fn commit(workspace_root: &Path, message: &str) -> Result<CommitReport> {
 /// Run `forge push` against an explicit workspace. `force` maps to
 /// the `--force` flag.
 pub fn push(workspace_root: &Path, force: bool) -> Result<PushReport> {
-    crate::commands::push::run_in(workspace_root, force, None, None)?;
+    crate::commands::push::run_in(workspace_root, force, false, None, None)?;
     Ok(PushReport::default())
 }
 
