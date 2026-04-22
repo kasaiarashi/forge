@@ -168,28 +168,60 @@ fn download_and_replace_file(
         asset.size as f64 / 1_048_576.0
     );
 
-    let tmp_path = std::env::temp_dir().join(format!("forge-update-{}", asset_name));
-    http_download_file(&asset.browser_download_url, &tmp_path)?;
+    // Download to a staging file *next to the target*, not in the
+    // system temp dir. Two reasons that both matter on Linux:
+    //
+    //   1. `std::fs::copy` / `O_TRUNC` on a currently-running
+    //      executable returns ETXTBSY ("Text file busy", os error 26).
+    //      A systemd-managed forge-web is running from the target
+    //      path, so the naive `fs::copy(tmp, target)` path we used
+    //      before always failed. `rename(2)` is fine — it swaps the
+    //      directory entry without touching the old inode, and the
+    //      running process keeps its copy open until it restarts.
+    //
+    //   2. `std::fs::rename` across filesystems fails with EXDEV.
+    //      `std::env::temp_dir()` often lives on tmpfs while the
+    //      install prefix (`/usr/local/bin`) is on the root
+    //      filesystem — staging in the same directory keeps the
+    //      rename atomic.
+    let target_dir = target_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("target {} has no parent dir", target_path.display()))?;
+    let file_name = target_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("target {} has no file name", target_path.display()))?;
+    let staging = target_dir.join(format!("{}.new", file_name.to_string_lossy()));
 
-    // std::fs::copy preserves the source file's permissions on Unix. curl
-    // writes the tmp with a default 0644, so the copied binary lands
-    // non-executable — forge-web then won't launch after an update. Mark
-    // the tmp executable before copy so the destination inherits 0755.
+    // Clear any leftover staging file from a prior failed run so we
+    // never silently run the new binary's content through a stale
+    // partial download.
+    let _ = std::fs::remove_file(&staging);
+
+    http_download_file(&asset.browser_download_url, &staging)?;
+
+    // curl writes the staged file as 0644 by default; forge-web needs
+    // to be executable. Do the chmod *before* the rename so the
+    // destination inode is already +x when the name is swapped over
+    // — no window where a caller could exec a non-executable file.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&tmp_path)
-            .with_context(|| format!("stat {}", tmp_path.display()))?
+        let mut perms = std::fs::metadata(&staging)
+            .with_context(|| format!("stat {}", staging.display()))?
             .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&tmp_path, perms)
-            .with_context(|| format!("chmod {}", tmp_path.display()))?;
+        std::fs::set_permissions(&staging, perms)
+            .with_context(|| format!("chmod {}", staging.display()))?;
     }
 
-    std::fs::copy(&tmp_path, target_path)
-        .with_context(|| format!("Failed to replace {}", target_path.display()))?;
+    std::fs::rename(&staging, target_path).with_context(|| {
+        format!(
+            "Failed to replace {} (staging file left at {})",
+            target_path.display(),
+            staging.display()
+        )
+    })?;
 
-    let _ = std::fs::remove_file(&tmp_path);
     Ok(())
 }
 
