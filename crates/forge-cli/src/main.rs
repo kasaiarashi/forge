@@ -120,6 +120,12 @@ enum Commands {
         /// Force push (overwrite remote ref even if diverged)
         #[arg(short, long)]
         force: bool,
+        /// Skip the server-side .forgeignore check for this push.
+        /// Intended for when ignore rules were added after the offending
+        /// paths were already committed and rewriting history isn't
+        /// practical. The bypass is audit-logged on the server.
+        #[arg(long)]
+        bypass_forgeignore: bool,
         /// Optional remote name (git-compat; must match the configured remote when set)
         remote: Option<String>,
         /// Optional branch ref (git-compat; must match the current branch when set)
@@ -560,8 +566,8 @@ fn run_cli(cli: Cli) -> anyhow::Result<()> {
         Commands::Status => commands::status::run(cli.json)?,
         Commands::Diff { commit, staged, stat, extract, no_pager, class_stats, paths } => commands::diff::run(commit, staged, stat, extract, paths, no_pager, cli.json, class_stats)?,
         Commands::Log { count, file, oneline, all, no_pager } => commands::log::run(count, file, oneline, all, no_pager, cli.json)?,
-        Commands::Push { force, remote, branch } => {
-            commands::push::run(force, remote.as_deref(), branch.as_deref())?
+        Commands::Push { force, bypass_forgeignore, remote, branch } => {
+            commands::push::run(force, bypass_forgeignore, remote.as_deref(), branch.as_deref())?
         }
         Commands::Pull => commands::pull::run()?,
         Commands::Fetch { branch } => commands::fetch::run(branch)?,

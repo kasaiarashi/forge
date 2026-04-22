@@ -71,9 +71,14 @@ fn clear_session(ws: &Workspace) {
     let _ = std::fs::remove_file(session_file_path(ws));
 }
 
-pub fn run(force: bool, remote_arg: Option<&str>, branch_arg: Option<&str>) -> Result<()> {
+pub fn run(
+    force: bool,
+    bypass_forgeignore: bool,
+    remote_arg: Option<&str>,
+    branch_arg: Option<&str>,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    run_in(&cwd, force, remote_arg, branch_arg)
+    run_in(&cwd, force, bypass_forgeignore, remote_arg, branch_arg)
 }
 
 /// Variant that takes an explicit starting directory so the Phase-4
@@ -81,6 +86,7 @@ pub fn run(force: bool, remote_arg: Option<&str>, branch_arg: Option<&str>) -> R
 pub fn run_in(
     cwd: &std::path::Path,
     force: bool,
+    bypass_forgeignore: bool,
     remote_arg: Option<&str>,
     branch_arg: Option<&str>,
 ) -> Result<()> {
@@ -130,10 +136,19 @@ pub fn run_in(
     }
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async { push_async(&ws, &server_url, &repo_name, &remote_name, force).await })
+    rt.block_on(async {
+        push_async(&ws, &server_url, &repo_name, &remote_name, force, bypass_forgeignore).await
+    })
 }
 
-async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_name: &str, force: bool) -> Result<()> {
+async fn push_async(
+    ws: &Workspace,
+    server_url: &str,
+    repo_name: &str,
+    remote_name: &str,
+    force: bool,
+    bypass_forgeignore: bool,
+) -> Result<()> {
     let mut client = crate::client::connect_forge_write(server_url).await?;
 
     // Get current branch and its tip.
@@ -520,7 +535,14 @@ async fn push_async(ws: &Workspace, server_url: &str, repo_name: &str, remote_na
         upload_session_id: session_id.clone(),
         ref_updates: vec![ref_update],
         touched_paths: Vec::new(),
+        bypass_forgeignore,
     };
+    if bypass_forgeignore {
+        eprintln!(
+            "warning: --bypass-forgeignore set; server-side .forgeignore enforcement \
+             skipped for this push (audit-logged)."
+        );
+    }
 
     // One automatic retry on a transient network error. The session id is
     // the same across both attempts, so if the server committed on the

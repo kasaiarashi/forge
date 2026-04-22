@@ -770,14 +770,30 @@ impl ForgeService for ForgeGrpcService {
         //     lock gate: a push that violates the ignore rules is the
         //     client's bug; there's no point checking who else owns a
         //     lock on a path that shouldn't be in the repo at all.
+        //
+        //     `bypass_forgeignore` lets the caller opt out — mostly for
+        //     the case where ignore patterns were added after the
+        //     offending paths were already committed and the history is
+        //     impractical to rewrite. The bypass is audit-logged so an
+        //     operator can still see it happened.
         let mut ignore_violations: Vec<String> = Vec::new();
-        for u in &req.ref_updates {
-            let v = forgeignore_violations(&os, &u.new_hash, &touched)
-                .map_err(|e| internal_err("forgeignore check", e))?;
-            ignore_violations.extend(v);
+        if !req.bypass_forgeignore {
+            for u in &req.ref_updates {
+                let v = forgeignore_violations(&os, &u.new_hash, &touched)
+                    .map_err(|e| internal_err("forgeignore check", e))?;
+                ignore_violations.extend(v);
+            }
+            ignore_violations.sort();
+            ignore_violations.dedup();
+        } else {
+            audit!(
+                action = "push.forgeignore_bypassed",
+                outcome = "allowed",
+                actor_id = caller.user_id(),
+                repo = repo,
+                session_id = %req.upload_session_id
+            );
         }
-        ignore_violations.sort();
-        ignore_violations.dedup();
         if !ignore_violations.is_empty() {
             // Cap the list we echo back so a catastrophically broken
             // client doesn't blow up the audit log or the gRPC response.
