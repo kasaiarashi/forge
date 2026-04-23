@@ -459,6 +459,8 @@ pub(crate) async fn serve_inner(
     let protected_api = Router::new()
         .route("/repos", post(api::create_repo))
         .route("/repos/:repo", put(api::update_repo).delete(api::delete_repo))
+        .route("/repos/:repo/branches", post(api::create_branch))
+        .route("/repos/:repo/branches/:branch", delete(api::delete_branch))
         // Issues & Pull Requests (writes)
         .route("/repos/:repo/issues", post(api::create_issue))
         .route("/repos/:repo/issues/:id", put(api::update_issue))

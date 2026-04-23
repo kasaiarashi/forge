@@ -368,6 +368,17 @@ const api = {
   listBranches(repo: string) {
     return request<Branch[]>(`/api/repos/${enc(repo)}/branches`);
   },
+  createBranch(repo: string, name: string, baseBranch: string) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/branches`, {
+      method: 'POST',
+      body: JSON.stringify({ name, base_branch: baseBranch }),
+    });
+  },
+  deleteBranch(repo: string, branch: string) {
+    return request<{ success: boolean }>(`/api/repos/${enc(repo)}/branches/${enc(branch)}`, {
+      method: 'DELETE',
+    });
+  },
 
   // Commits
   listCommits(repo: string, branch: string, page = 1, limit = 30) {
@@ -560,15 +571,17 @@ export function repoPath(repo: string): string {
     .join('/');
 }
 
-/// Split a `<owner>/<name>` identifier into its two halves. Returns
-/// `[owner, name]`. If the string has no slash, returns `['', repo]`.
-export function splitRepo(repo: string): [string, string] {
+import { createMockApi, mockData } from './mockApi';
+
+export const splitRepo = (repo: string): [string, string] => {
   const idx = repo.indexOf('/');
   if (idx < 0) return ['', repo];
   return [repo.slice(0, idx), repo.slice(idx + 1)];
 }
 
-export default api;
+const isMock = import.meta.env.MODE === 'mock';
+
+export default isMock ? createMockApi(api) : api;
 
 export interface LanguageStat {
   name: string;
@@ -579,6 +592,9 @@ export interface LanguageStat {
 }
 
 export async function getLanguageStats(repo: string, branch: string): Promise<LanguageStat[]> {
+  if (isMock) {
+    return [{ name: 'TypeScript', color: '#3178c6', percentage: 100, bytes: 1000, count: 10 }];
+  }
   const resp = await fetch(`/api/repos/${encodeURIComponent(repo)}/stats/languages?branch=${encodeURIComponent(branch)}`);
   if (!resp.ok) return [];
   const data = await resp.json();

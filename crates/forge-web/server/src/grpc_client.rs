@@ -225,6 +225,28 @@ impl ForgeGrpcClient {
         Ok(resp.into_inner())
     }
 
+    /// Update a reference (e.g. create or delete a branch)
+    pub async fn update_ref(
+        &self,
+        repo: &str,
+        ref_name: &str,
+        old_hash: Vec<u8>,
+        new_hash: Vec<u8>,
+        force: bool,
+    ) -> anyhow::Result<UpdateRefResponse> {
+        let mut client = self.forge();
+        let resp = client
+            .update_ref(UpdateRefRequest {
+                repo: repo.to_string(),
+                ref_name: ref_name.to_string(),
+                old_hash,
+                new_hash,
+                force,
+            })
+            .await?;
+        Ok(resp.into_inner())
+    }
+
     /// List commits on a branch within a repository.
     pub async fn list_commits(
         &self,

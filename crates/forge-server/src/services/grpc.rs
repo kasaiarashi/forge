@@ -1939,7 +1939,18 @@ impl ForgeService for ForgeGrpcService {
             current = snap.parents.first().copied().unwrap_or(ForgeHash::ZERO);
         }
 
-        let total = (skipped + commits.len()) as i32;
+        let mut remaining = 0;
+        while !current.is_zero() {
+            match os.get_snapshot(&current) {
+                Ok(s) => {
+                    remaining += 1;
+                    current = s.parents.first().copied().unwrap_or(ForgeHash::ZERO);
+                }
+                Err(_) => break,
+            }
+        }
+
+        let total = (skipped + commits.len() + remaining) as i32;
         Ok(Response::new(ListCommitsResponse { commits, total }))
     }
 

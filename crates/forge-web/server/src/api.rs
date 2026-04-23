@@ -404,6 +404,86 @@ pub async fn list_branches(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateBranchBody {
+    pub name: String,
+    pub base_branch: String,
+}
+
+/// POST /api/repos/:repo/branches -- create a branch.
+pub async fn create_branch(
+    State(state): State<Arc<AppState>>,
+    Path(repo): Path<String>,
+    Json(body): Json<CreateBranchBody>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    let base_ref = format!("refs/heads/{}", body.base_branch);
+    let new_ref = format!("refs/heads/{}", body.name);
+
+    let refs_resp = match grpc.get_refs(&repo).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+
+    let base_hash_bytes = match refs_resp.refs.get(&base_ref) {
+        Some(b) => b.clone(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": format!("Base branch '{}' not found", body.base_branch)}))).into_response(),
+    };
+
+    let old_hash = vec![0u8; 20];
+
+    match grpc.update_ref(&repo, &new_ref, old_hash, base_hash_bytes, false).await {
+        Ok(resp) => {
+            if resp.success {
+                (StatusCode::CREATED, Json(serde_json::json!({"success": true}))).into_response()
+            } else {
+                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": resp.error}))).into_response()
+            }
+        }
+        Err(e) => internal_error(e),
+    }
+}
+
+/// DELETE /api/repos/:repo/branches/:branch -- delete a branch.
+pub async fn delete_branch(
+    State(state): State<Arc<AppState>>,
+    Path((repo, branch)): Path<(String, String)>,
+) -> Response {
+    let grpc = match state.grpc_client().await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e),
+    };
+
+    let ref_name = format!("refs/heads/{}", branch);
+    
+    let refs_resp = match grpc.get_refs(&repo).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e),
+    };
+
+    let old_hash = match refs_resp.refs.get(&ref_name) {
+        Some(b) => b.clone(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": format!("Branch '{}' not found", branch)}))).into_response(),
+    };
+
+    let new_hash = vec![0u8; 20];
+
+    match grpc.update_ref(&repo, &ref_name, old_hash, new_hash, true).await {
+        Ok(resp) => {
+            if resp.success {
+                (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
+            } else {
+                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": resp.error}))).into_response()
+            }
+        }
+        Err(e) => internal_error(e),
+    }
+}
+
 /// GET /api/repos/:repo/commits/:branch
 pub async fn list_commits(
     State(state): State<Arc<AppState>>,
