@@ -12,9 +12,25 @@ use forge_proto::forge::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::SystemTime;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
+
+/// Classification of a queued hash, used to skip pointless disk reads
+/// when the BFS revisits already-on-disk objects. Snapshots, trees, and
+/// chunked-blob manifests reference more children; raw chunk leaves
+/// don't, and reading + decompressing a multi-MB chunk just to verify
+/// it has no children is the dominant cost on resumable / mostly-local
+/// pulls in UE-sized repos. `Unknown` covers tree File entries — the
+/// hash could be either a small blob (leaf) or a chunked-blob manifest
+/// (has children), so we still have to read those.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildKind {
+    Metadata,
+    Unknown,
+    Leaf,
+}
 
 use crate::client::AuthInterceptor;
 
@@ -130,7 +146,9 @@ pub(super) async fn fetch_objects_to_tip(
     repo_name: &str,
     tip_bytes: &[u8],
 ) -> Result<u64> {
-    let mut want: Vec<Vec<u8>> = vec![tip_bytes.to_vec()];
+    // Pair every queued hash with what we know about its kind so the
+    // present-walk below can skip leaf chunks entirely.
+    let mut want: Vec<(Vec<u8>, ChildKind)> = vec![(tip_bytes.to_vec(), ChildKind::Metadata)];
     let mut visited: HashSet<ForgeHash> = HashSet::new();
     let mut received = 0u64;
     let mut received_bytes = 0u64;
@@ -149,11 +167,11 @@ pub(super) async fn fetch_objects_to_tip(
     let start = std::time::Instant::now();
 
     while !want.is_empty() {
-        let mut to_visit: Vec<ForgeHash> = Vec::with_capacity(want.len());
-        for h in want.drain(..) {
+        let mut to_visit: Vec<(ForgeHash, ChildKind)> = Vec::with_capacity(want.len());
+        for (h, kind) in want.drain(..) {
             if let Ok(fh) = ForgeHash::from_hex(&hex::encode(&h)) {
                 if visited.insert(fh) {
-                    to_visit.push(fh);
+                    to_visit.push((fh, kind));
                 }
             }
         }
@@ -162,14 +180,32 @@ pub(super) async fn fetch_objects_to_tip(
             continue;
         }
 
-        let (missing, present): (Vec<ForgeHash>, Vec<ForgeHash>) = to_visit
-            .into_iter()
-            .partition(|fh| !ws.object_store.has(fh));
+        let (missing, present): (Vec<(ForgeHash, ChildKind)>, Vec<(ForgeHash, ChildKind)>) =
+            to_visit
+                .into_iter()
+                .partition(|(fh, _)| !ws.object_store.has(fh));
 
-        for fh in &present {
-            walk_object_children(ws, fh, &mut want);
+        // Walk children of already-present objects. Skip leaves outright,
+        // and run the unknown / metadata reads in parallel since each
+        // hits the disk + zstd. The producer-side order doesn't matter
+        // (BFS converges either way) so collect into a Mutex'd vec.
+        let walkable: Vec<(ForgeHash, ChildKind)> = present
+            .into_iter()
+            .filter(|(_, k)| *k != ChildKind::Leaf)
+            .collect();
+        if !walkable.is_empty() {
+            let collected: Mutex<Vec<(Vec<u8>, ChildKind)>> = Mutex::new(Vec::new());
+            walkable.par_iter().for_each(|(fh, _)| {
+                let mut local: Vec<(Vec<u8>, ChildKind)> = Vec::new();
+                walk_object_children(ws, fh, &mut local);
+                if !local.is_empty() {
+                    collected.lock().unwrap().extend(local);
+                }
+            });
+            want.extend(collected.into_inner().unwrap());
         }
 
+        let missing: Vec<ForgeHash> = missing.into_iter().map(|(fh, _)| fh).collect();
         if missing.is_empty() {
             continue;
         }
@@ -382,41 +418,49 @@ pub(super) async fn fetch_objects_to_tip(
     Ok(received)
 }
 
-/// Walk children from decompressed in-memory data (no disk I/O).
-fn walk_children_from_data(data: &[u8], want: &mut Vec<Vec<u8>>) {
+/// Walk children from decompressed in-memory data (no disk I/O). Each
+/// queued child is paired with the kind we expect it to be — Snapshots
+/// and trees are metadata, tree directory entries are metadata, tree
+/// file entries are unknown (could be a small blob leaf or a chunked
+/// manifest), and chunked-blob children are leaves so the BFS skips
+/// reading them on the next wave.
+fn walk_children_from_data(data: &[u8], want: &mut Vec<(Vec<u8>, ChildKind)>) {
     if data.len() < 2 {
         return;
     }
     let tag = data[0];
-    // Skip the 1-byte type tag for bincode deserialization.
     let payload = &data[1..];
     if tag == ObjectType::Snapshot as u8 {
         if let Ok(snap) = bincode::deserialize::<forge_core::object::snapshot::Snapshot>(payload) {
-            want.push(snap.tree.as_bytes().to_vec());
+            want.push((snap.tree.as_bytes().to_vec(), ChildKind::Metadata));
             for parent in &snap.parents {
                 if !parent.is_zero() {
-                    want.push(parent.as_bytes().to_vec());
+                    want.push((parent.as_bytes().to_vec(), ChildKind::Metadata));
                 }
             }
         }
     } else if tag == ObjectType::Tree as u8 {
         if let Ok(tree) = bincode::deserialize::<forge_core::object::tree::Tree>(payload) {
             for entry in &tree.entries {
-                want.push(entry.hash.as_bytes().to_vec());
+                let kind = match entry.kind {
+                    forge_core::object::tree::EntryKind::Directory => ChildKind::Metadata,
+                    _ => ChildKind::Unknown,
+                };
+                want.push((entry.hash.as_bytes().to_vec(), kind));
             }
         }
     } else if tag == ObjectType::ChunkedBlob as u8 {
         if let Ok(chunked) = bincode::deserialize::<forge_core::object::blob::ChunkedBlob>(payload)
         {
             for chunk_ref in &chunked.chunks {
-                want.push(chunk_ref.hash.as_bytes().to_vec());
+                want.push((chunk_ref.hash.as_bytes().to_vec(), ChildKind::Leaf));
             }
         }
     }
 }
 
 /// Walk children from disk (used for resume — objects already on disk).
-fn walk_object_children(ws: &Workspace, hash: &ForgeHash, want: &mut Vec<Vec<u8>>) {
+fn walk_object_children(ws: &Workspace, hash: &ForgeHash, want: &mut Vec<(Vec<u8>, ChildKind)>) {
     let data = match ws.object_store.chunks.get(hash) {
         Ok(d) => d,
         Err(_) => return,

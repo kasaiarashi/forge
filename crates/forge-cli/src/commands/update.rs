@@ -114,10 +114,24 @@ pub fn run(check_only: bool, force: bool, json: bool) -> Result<()> {
     let tmp_path = std::env::temp_dir().join(format!("forge-update-{}", expected));
     http_download_file(&asset.browser_download_url, &tmp_path)?;
 
-    self_replace::self_replace(&tmp_path)
-        .context("Failed to replace binary. Try running with administrator privileges.")?;
+    // forge-web runs the same binary as a systemd service on most server
+    // boxes. When it's active, the unit holds the executable open which
+    // makes the post-replace `<exe> --version` verification (and any
+    // immediate restart) read the still-running old image. Stop the unit
+    // before swapping the bytes, restart it after we've verified.
+    let stopped_forge_web = stop_forge_web_if_running(json);
+
+    let replace_result = self_replace::self_replace(&tmp_path)
+        .context("Failed to replace binary. Try running with administrator privileges.");
 
     let _ = std::fs::remove_file(&tmp_path);
+
+    if let Err(e) = replace_result {
+        if stopped_forge_web {
+            start_forge_web(json);
+        }
+        return Err(e);
+    }
 
     // Verify the replacement actually took effect. `self_replace` has
     // returned Ok in the past on Windows when a scheduled-for-delete
@@ -128,6 +142,14 @@ pub fn run(check_only: bool, force: bool, json: bool) -> Result<()> {
     // exe with `--version` and confirm it reports the new version
     // before claiming success.
     let verified = verify_installed_version(&exe_path, &latest);
+
+    // Best-effort: bring forge-web back up regardless of verify outcome
+    // so a failed verify doesn't leave the server offline. The verify
+    // branch below still surfaces any error to the user.
+    if stopped_forge_web {
+        start_forge_web(json);
+    }
+
     match &verified {
         Ok(installed) if installed == &latest => {
             if json {
@@ -299,6 +321,104 @@ fn parse_version(s: &str) -> Result<SemVer> {
 
 fn format_version(v: &SemVer) -> String {
     format!("{}.{}.{}", v.0, v.1, v.2)
+}
+
+/// Stop the `forge-web.service` systemd unit if it's currently active.
+/// Returns true when this call actually stopped the unit (and therefore
+/// the caller should restart it after the update). On Windows / macOS,
+/// or when systemctl isn't on PATH, or when the unit isn't active, this
+/// is a no-op and returns false.
+fn stop_forge_web_if_running(json: bool) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if !systemctl_is_active("forge-web") {
+            return false;
+        }
+        if !json {
+            println!("Stopping forge-web.service before update...");
+        }
+        let status = Command::new("systemctl")
+            .args(["stop", "forge-web"])
+            .status();
+        match status {
+            Ok(s) if s.success() => true,
+            Ok(s) => {
+                if !json {
+                    eprintln!(
+                        "warning: `systemctl stop forge-web` exited {} — \
+                         continuing anyway. You may need to run `forge update` \
+                         with sudo if the binary swap fails.",
+                        s
+                    );
+                }
+                false
+            }
+            Err(e) => {
+                if !json {
+                    eprintln!(
+                        "warning: failed to invoke systemctl: {e} — \
+                         continuing without stopping forge-web."
+                    );
+                }
+                false
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = json;
+        false
+    }
+}
+
+/// Re-start `forge-web.service`. Best-effort — failures are surfaced as
+/// warnings rather than hard errors so a verify-success update doesn't
+/// flip to "failed" just because the service unit is misconfigured.
+fn start_forge_web(json: bool) {
+    #[cfg(target_os = "linux")]
+    {
+        if !json {
+            println!("Restarting forge-web.service...");
+        }
+        match Command::new("systemctl")
+            .args(["start", "forge-web"])
+            .status()
+        {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!(
+                    "warning: `systemctl start forge-web` exited {} — \
+                     forge-web is currently stopped. Run `sudo systemctl \
+                     start forge-web` to bring it back online.",
+                    s
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to invoke systemctl to restart \
+                     forge-web: {e}. Run `sudo systemctl start forge-web` \
+                     manually."
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = json;
+    }
+}
+
+/// `systemctl is-active <unit>` exits 0 when the unit is `active`,
+/// non-zero otherwise. Treat any error (systemctl missing, permission
+/// denied, unit not loaded) as "not active" so the caller silently
+/// skips the stop/start dance.
+#[cfg(target_os = "linux")]
+fn systemctl_is_active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Fetch a URL as a string using platform tools.

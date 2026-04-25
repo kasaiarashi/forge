@@ -1,9 +1,12 @@
 use anyhow::{bail, Result};
-use forge_core::diff::{diff_maps, flatten_tree, DiffEntry};
+use forge_core::diff::{diff_maps, DiffEntry};
 use forge_core::hash::ForgeHash;
 use forge_core::index::{Index, IndexEntry};
+use forge_core::object::tree::{EntryKind, Tree};
 use forge_core::workspace::{HeadRef, Workspace};
+use rayon::prelude::*;
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 pub fn run(name: String) -> Result<()> {
@@ -96,37 +99,46 @@ pub(crate) fn move_to_commit(
 ) -> Result<()> {
     let index_path = ws.forge_dir().join("index");
 
-    // Dirty-check: compare index entries against working tree.
+    // Dirty-check: compare index entries against working tree. Parallel
+    // because UE projects routinely have tens of thousands of indexed
+    // assets and a serial stat()+rehash loop dominates wall time once
+    // anything in the tree has had its mtime touched (build artifacts,
+    // engine touches, antivirus, etc.).
+    eprintln!("Checking working tree...");
     let index = Index::load(&index_path)?;
-    for (path, entry) in &index.entries {
+    let entries: Vec<(&String, &IndexEntry)> = index.entries.iter().collect();
+    let dirty_msg = "You have uncommitted changes; commit or stash them first.";
+    entries.par_iter().try_for_each(|(path, entry)| -> Result<()> {
         if entry.staged {
-            bail!("You have uncommitted changes; commit or stash them first.");
+            bail!(dirty_msg);
         }
 
         let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        if !abs_path.exists() {
-            // File tracked in index but missing on disk — dirty.
-            bail!("You have uncommitted changes; commit or stash them first.");
-        }
+        let metadata = match std::fs::metadata(&abs_path) {
+            Ok(m) => m,
+            Err(_) => bail!(dirty_msg),
+        };
 
-        let metadata = std::fs::metadata(&abs_path)?;
         let mtime = metadata
             .modified()?
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default();
 
-        if mtime.as_secs() as i64 != entry.mtime_secs
-            || mtime.subsec_nanos() != entry.mtime_nanos
-            || metadata.len() != entry.size
+        if mtime.as_secs() as i64 == entry.mtime_secs
+            && mtime.subsec_nanos() == entry.mtime_nanos
+            && metadata.len() == entry.size
         {
-            // Re-hash to confirm actual content change.
-            let data = std::fs::read(&abs_path)?;
-            let hash = ForgeHash::from_bytes(&data);
-            if hash != entry.hash {
-                bail!("You have uncommitted changes; commit or stash them first.");
-            }
+            return Ok(());
         }
-    }
+
+        // Stat mismatch — confirm via content hash before declaring dirty.
+        let data = std::fs::read(&abs_path)?;
+        let hash = ForgeHash::from_bytes(&data);
+        if hash != entry.hash {
+            bail!(dirty_msg);
+        }
+        Ok(())
+    })?;
 
     // Current HEAD snapshot.
     let current_commit = ws.head_snapshot()?;
@@ -138,26 +150,30 @@ pub(crate) fn move_to_commit(
         return Ok(());
     }
 
-    let get_tree = |h: &ForgeHash| ws.object_store.get_tree(h).ok();
+    // The working tree is clean, so the index already mirrors the current
+    // commit's tree. Reuse it instead of walking thousands of unchanged
+    // tree objects out of the object store.
+    let old_flat: BTreeMap<String, (ForgeHash, u64)> = index
+        .entries
+        .iter()
+        .map(|(p, e)| (p.clone(), (e.object_hash, e.size)))
+        .collect();
 
-    let old_flat: BTreeMap<String, (ForgeHash, u64)> = if current_commit.is_zero() {
-        BTreeMap::new()
-    } else {
-        let snap = ws.object_store.get_snapshot(&current_commit)?;
-        let tree = ws.object_store.get_tree(&snap.tree)?;
-        flatten_tree(&tree, "", &get_tree)
-    };
-
+    eprintln!("Loading target tree...");
     let new_flat: BTreeMap<String, (ForgeHash, u64)> = if target_commit.is_zero() {
         BTreeMap::new()
     } else {
         let snap = ws.object_store.get_snapshot(&target_commit)?;
         let tree = ws.object_store.get_tree(&snap.tree)?;
-        flatten_tree(&tree, "", &get_tree)
+        flatten_tree_parallel(ws, &tree, "")?
     };
 
     // Diff the two trees and apply just the changed files.
     let changes = diff_maps(&old_flat, &new_flat);
+    let n_changed = changes.len();
+    if n_changed > 0 {
+        eprintln!("Applying {n_changed} changes...");
+    }
     for change in &changes {
         match change {
             DiffEntry::Added { path, .. } | DiffEntry::Modified { path, .. } => {
@@ -181,45 +197,93 @@ pub(crate) fn move_to_commit(
         }
     }
 
-    // Rebuild full index from target tree.
+    // Rebuild full index from target tree. Parallel because per-entry we
+    // stat the working file and (for chunked entries) reassemble the blob
+    // to compute its content hash — both I/O bound, both safe to run on
+    // disjoint paths.
+    eprintln!("Rebuilding index...");
+    let new_entries: Vec<(String, IndexEntry)> = new_flat
+        .par_iter()
+        .map(|(path, (hash, size))| {
+            let is_chunked = is_chunked_object(ws, hash);
+
+            let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let (mtime_secs, mtime_nanos) = if abs_path.exists() {
+                mtime_of(&abs_path)
+            } else {
+                (0, 0)
+            };
+
+            let final_content_hash = if is_chunked {
+                match read_blob_content(ws, hash) {
+                    Ok(data) => ForgeHash::from_bytes(&data),
+                    Err(_) => ForgeHash::ZERO,
+                }
+            } else {
+                *hash
+            };
+
+            (
+                path.clone(),
+                IndexEntry {
+                    hash: final_content_hash,
+                    size: *size,
+                    mtime_secs,
+                    mtime_nanos,
+                    staged: false,
+                    is_chunked,
+                    object_hash: *hash,
+                },
+            )
+        })
+        .collect();
     let mut new_index = Index::default();
-    for (path, (hash, size)) in &new_flat {
-        let is_chunked = is_chunked_object(ws, hash);
-
-        let abs_path = ws.root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let (mtime_secs, mtime_nanos) = if abs_path.exists() {
-            mtime_of(&abs_path)
-        } else {
-            (0, 0)
-        };
-
-        let final_content_hash = if is_chunked {
-            match read_blob_content(ws, hash) {
-                Ok(data) => ForgeHash::from_bytes(&data),
-                Err(_) => ForgeHash::ZERO,
-            }
-        } else {
-            *hash
-        };
-
-        new_index.set(
-            path.clone(),
-            IndexEntry {
-                hash: final_content_hash,
-                size: *size,
-                mtime_secs,
-                mtime_nanos,
-                staged: false,
-                is_chunked,
-                object_hash: *hash,
-            },
-        );
+    for (path, entry) in new_entries {
+        new_index.set(path, entry);
     }
     new_index.save(&index_path)?;
 
     // Finally, update HEAD.
     ws.set_head(&new_head)?;
     Ok(())
+}
+
+/// Walk `tree` in parallel, accumulating `path -> (object_hash, size)`
+/// for every reachable file. Sibling subtrees are read in parallel via
+/// rayon so the recursive object-store fetches overlap on a thread pool
+/// instead of stalling end-to-end on disk seeks.
+fn flatten_tree_parallel(
+    ws: &Workspace,
+    tree: &Tree,
+    prefix: &str,
+) -> Result<BTreeMap<String, (ForgeHash, u64)>> {
+    let acc: Mutex<BTreeMap<String, (ForgeHash, u64)>> = Mutex::new(BTreeMap::new());
+
+    tree.entries
+        .par_iter()
+        .try_for_each(|entry| -> Result<()> {
+            let path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{}/{}", prefix, entry.name)
+            };
+            match entry.kind {
+                EntryKind::File | EntryKind::Symlink => {
+                    acc.lock().unwrap().insert(path, (entry.hash, entry.size));
+                }
+                EntryKind::Directory => {
+                    let subtree = ws.object_store.get_tree(&entry.hash)?;
+                    let sub = flatten_tree_parallel(ws, &subtree, &path)?;
+                    let mut guard = acc.lock().unwrap();
+                    for (p, v) in sub {
+                        guard.insert(p, v);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+
+    Ok(acc.into_inner().unwrap())
 }
 
 /// `git switch <branch>` DWIM: when the local branch doesn't exist, look

@@ -7,6 +7,7 @@ import Setup from './pages/Setup';
 import { useAuth } from './context/AuthContext';
 import type { ReactNode } from 'react';
 import RepoTree from './pages/RepoTree';
+import Branches from './pages/Branches';
 import FileView from './pages/FileView';
 import Commits from './pages/Commits';
 import CommitDetail from './pages/CommitDetail';
@@ -129,6 +130,7 @@ export default function App() {
 
         {/* User-namespaced repo routes: /<owner>/<repo>/... — all gated. */}
         <Route path="/:owner/:repo" element={<Authenticated><RepoTree /></Authenticated>} />
+        <Route path="/:owner/:repo/branches" element={<Authenticated><Branches /></Authenticated>} />
         <Route path="/:owner/:repo/tree/:branch" element={<Authenticated><RepoTree /></Authenticated>} />
         <Route path="/:owner/:repo/tree/:branch/*" element={<Authenticated><RepoTree /></Authenticated>} />
         <Route path="/:owner/:repo/blob/:branch/*" element={<Authenticated><FileView /></Authenticated>} />

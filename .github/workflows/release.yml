@@ -37,7 +37,12 @@ jobs:
 
       - name: Build UI
         working-directory: crates/forge-web/ui
-        run: npm ci && npm run build
+        # `npm install` instead of `npm ci` — the lock file is generated
+        # on Windows where some optional platform-specific deps (e.g.
+        # `@emnapi/core` for WASM threading on Linux) aren't recorded,
+        # so a strict `npm ci` on the Linux runner barfs about missing
+        # entries that aren't actually missing on disk.
+        run: npm install --no-audit --no-fund && npm run build
 
       - uses: actions/upload-artifact@v4
         with:

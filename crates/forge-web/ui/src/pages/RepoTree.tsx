@@ -66,6 +66,9 @@ export default function RepoTree() {
   const [languages, setLanguages] = useState<LanguageStat[]>([]);
   const [recentCommits, setRecentCommits] = useState<CommitSummary[]>([]);
   const { user } = useAuth();
+  const [newBranchName, setNewBranchName] = useState('');
+  const [showNewBranchInput, setShowNewBranchInput] = useState(false);
+  const [isBranchLoading, setIsBranchLoading] = useState(false);
 
   // Bare server URL (for `forge remote add` etc.) and the full
   // server-plus-path URL the user will paste into `forge clone`. The full
@@ -133,6 +136,39 @@ export default function RepoTree() {
 
     loadData();
   }, [repo, branch, path]);
+
+  const handleCreateBranch = async () => {
+    if (!newBranchName.trim()) return;
+    setIsBranchLoading(true);
+    try {
+      await api.createBranch(repo, newBranchName, activeBranch);
+      setNewBranchName('');
+      setShowNewBranchInput(false);
+      navigate(`/${encRepo}/tree/${encodeURIComponent(newBranchName)}`);
+    } catch (e: any) {
+      setError(`Failed to create branch: ${e.message}`);
+    } finally {
+      setIsBranchLoading(false);
+    }
+  };
+
+  const handleDeleteBranch = async (branchToDelete: string) => {
+    if (!window.confirm(`Are you sure you want to delete branch '${branchToDelete}'?`)) return;
+    setIsBranchLoading(true);
+    try {
+      await api.deleteBranch(repo, branchToDelete);
+      if (branchToDelete === activeBranch) {
+        navigate(`/${encRepo}`);
+      } else {
+        const br = await api.listBranches(repo);
+        setBranches(br);
+      }
+    } catch (e: any) {
+      setError(`Failed to delete branch: ${e.message}`);
+    } finally {
+      setIsBranchLoading(false);
+    }
+  };
 
   const pathParts = path ? path.split('/') : [];
   const encRepo = repoPath(repo);
@@ -235,7 +271,7 @@ export default function RepoTree() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
             {/* Branch selector */}
             <ActionMenu>
-              <ActionMenu.Button leadingVisual={GitBranchIcon} size="small">
+              <ActionMenu.Button leadingVisual={GitBranchIcon} size="small" disabled={isBranchLoading}>
                 {activeBranch}
               </ActionMenu.Button>
               <ActionMenu.Overlay width="medium">
@@ -250,12 +286,40 @@ export default function RepoTree() {
                       {b.name}
                     </ActionList.Item>
                   ))}
+                  <ActionList.Divider />
+                  {!showNewBranchInput ? (
+                    <ActionList.Item onSelect={(e) => {
+                      e.preventDefault();
+                      setShowNewBranchInput(true);
+                    }}>
+                      <span style={{ color: 'var(--fg-accent)' }}>+ Create new branch</span>
+                    </ActionList.Item>
+                  ) : (
+                    <div style={{ padding: '8px 16px', display: 'flex', gap: '8px', flexDirection: 'column' }}>
+                      <span style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>From {activeBranch}:</span>
+                      <TextInput 
+                        autoFocus
+                        value={newBranchName}
+                        onChange={(e) => setNewBranchName(e.target.value)}
+                        placeholder="Branch name"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleCreateBranch();
+                          if (e.key === 'Escape') setShowNewBranchInput(false);
+                        }}
+                        block
+                      />
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <Button size="small" variant="primary" onClick={handleCreateBranch} style={{ flex: 1 }}>Create</Button>
+                        <Button size="small" onClick={() => setShowNewBranchInput(false)}>Cancel</Button>
+                      </div>
+                    </div>
+                  )}
                 </ActionList>
               </ActionMenu.Overlay>
             </ActionMenu>
 
             {/* Branch/tag counts */}
-            <Link to={`/${encRepo}/tree/${encBranch}`} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px', color: 'var(--fg-muted)', textDecoration: 'none' }}>
+            <Link to={`/${encRepo}/branches`} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px', color: 'var(--fg-muted)', textDecoration: 'none' }}>
               <GitBranchIcon size={14} />
               <strong style={{ color: 'var(--fg-default)' }}>{branches.length}</strong> Branch{branches.length !== 1 ? 'es' : ''}
             </Link>
