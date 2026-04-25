@@ -283,23 +283,7 @@ export default function RepoTree() {
                       selected={b.name === activeBranch}
                       onSelect={() => navigate(`/${encRepo}/tree/${encodeURIComponent(b.name)}`)}
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                        <span>{b.name}</span>
-                        {b.name !== 'main' && (
-                          <Button 
-                            variant="invisible" 
-                            size="small" 
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteBranch(b.name);
-                            }}
-                            style={{ color: 'var(--fg-danger)', padding: '0 4px', height: 'auto' }}
-                            aria-label={`Delete branch ${b.name}`}
-                          >
-                            Delete
-                          </Button>
-                        )}
-                      </div>
+                      {b.name}
                     </ActionList.Item>
                   ))}
                   <ActionList.Divider />
@@ -335,7 +319,7 @@ export default function RepoTree() {
             </ActionMenu>
 
             {/* Branch/tag counts */}
-            <Link to={`/${encRepo}/tree/${encBranch}`} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px', color: 'var(--fg-muted)', textDecoration: 'none' }}>
+            <Link to={`/${encRepo}/branches`} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px', color: 'var(--fg-muted)', textDecoration: 'none' }}>
               <GitBranchIcon size={14} />
               <strong style={{ color: 'var(--fg-default)' }}>{branches.length}</strong> Branch{branches.length !== 1 ? 'es' : ''}
             </Link>

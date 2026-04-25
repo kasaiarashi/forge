@@ -70,6 +70,14 @@ export const createMockApi = (realApi: any) => {
       if (prop === 'listIssues') return () => delay({ issues: [], total: 0 } as IssueListResponse);
       if (prop === 'listWorkflows') return () => delay([] as WorkflowInfo[]);
       if (prop === 'listRuns') return () => delay({ runs: [], total: 0 } as unknown as { runs: RunInfo[], total: number });
+      if (prop === 'createBranch') return async (repo: string, name: string, baseBranch: string) => {
+        mockData.branches.push({ name, head: 'mockhead' });
+        return delay({ success: true });
+      };
+      if (prop === 'deleteBranch') return async (repo: string, branch: string) => {
+        mockData.branches = mockData.branches.filter(b => b.name !== branch);
+        return delay({ success: true });
+      };
 
       // For everything else, log and return empty successes
       return async (...args: any[]) => {
