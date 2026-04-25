@@ -83,7 +83,7 @@ export default function Branches() {
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <GitBranchIcon size={16} style={{ color: 'var(--fg-muted)' }} />
+                  <GitBranchIcon size={16} fill="var(--fg-muted)" />
                   <Link 
                     to={`/${encRepo}/tree/${encodeURIComponent(b.name)}`} 
                     style={{ fontWeight: 600, fontSize: '14px', color: 'var(--fg-accent)', textDecoration: 'none' }}

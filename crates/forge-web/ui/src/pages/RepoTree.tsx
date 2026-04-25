@@ -309,7 +309,7 @@ export default function RepoTree() {
                         block
                       />
                       <div style={{ display: 'flex', gap: '8px' }}>
-                        <Button size="small" variant="primary" onClick={handleCreateBranch} flex={1}>Create</Button>
+                        <Button size="small" variant="primary" onClick={handleCreateBranch} style={{ flex: 1 }}>Create</Button>
                         <Button size="small" onClick={() => setShowNewBranchInput(false)}>Cancel</Button>
                       </div>
                     </div>

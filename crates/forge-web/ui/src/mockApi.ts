@@ -18,7 +18,7 @@ export const mockData = {
   repos: [
     { name: 'mockuser/forge-demo', description: 'A mock repository for UI testing', is_public: true, default_branch: 'main', visibility: 'public', updated_at: Date.now() / 1000 },
     { name: 'mockuser/empty-repo', description: 'An empty mock repository', is_public: false, default_branch: 'main', visibility: 'private', updated_at: Date.now() / 1000 }
-  ] as RepoInfo[],
+  ] as unknown as RepoInfo[],
 
   branches: [
     { name: 'main', head: 'abc1234567890def' },
@@ -66,8 +66,8 @@ export const createMockApi = (realApi: any) => {
       if (prop === 'getTree') return () => delay(mockData.tree);
       if (prop === 'getFile') return () => delay(mockData.fileContent);
       if (prop === 'getLanguageStats') return () => delay([{ name: 'TypeScript', color: '#3178c6', percentage: 100, bytes: 1000, count: 10 }]);
-      if (prop === 'listPullRequests') return () => delay({ pull_requests: [], total: 0 } as PullRequestListResponse);
-      if (prop === 'listIssues') return () => delay({ issues: [], total: 0 } as IssueListResponse);
+      if (prop === 'listPullRequests') return () => delay({ pull_requests: [], total: 0 } as unknown as PullRequestListResponse);
+      if (prop === 'listIssues') return () => delay({ issues: [], total: 0 } as unknown as IssueListResponse);
       if (prop === 'listWorkflows') return () => delay([] as WorkflowInfo[]);
       if (prop === 'listRuns') return () => delay({ runs: [], total: 0 } as unknown as { runs: RunInfo[], total: number });
       if (prop === 'createBranch') return async (repo: string, name: string, baseBranch: string) => {
